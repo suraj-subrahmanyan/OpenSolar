@@ -1,0 +1,383 @@
+#!/usr/bin/env bash
+set -e
+
+SOLAR_HOME="${SOLAR_HOME:-$HOME/.solar}"
+CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude}"
+RECEIPT_PATH="$SOLAR_HOME/install-receipt.json"
+
+usage() {
+    cat <<'EOF'
+solar - OpenSolar lifecycle command
+
+Usage:
+  solar doctor [--json]
+  solar update [extra install flags]
+  solar backup [--out FILE]
+  solar restore <archive>
+  solar uninstall [--yes] [--keep-data] [--dry-run]
+  solar components list
+EOF
+}
+
+receipt_field() {
+    [ -f "$RECEIPT_PATH" ] || return 1
+    RECEIPT_PATH="$RECEIPT_PATH" python3 - "$1" <<'PY'
+import json
+import os
+import sys
+
+with open(os.environ["RECEIPT_PATH"], encoding="utf-8") as f:
+    receipt = json.load(f)
+value = receipt.get(sys.argv[1], "")
+if isinstance(value, list):
+    print(",".join(value))
+else:
+    print(value)
+PY
+}
+
+# Data paths under SOLAR_HOME that backup/restore and --keep-data treat as
+# user data (config + secrets + receipt + database).
+SOLAR_DATA_PATHS="install-receipt.json config.env .env db"
+
+do_backup() {
+    out=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --out) out="$2"; shift 2 ;;
+            *) echo "unknown backup option: $1" >&2; exit 2 ;;
+        esac
+    done
+    [ -d "$SOLAR_HOME" ] || { echo "no Solar home at $SOLAR_HOME" >&2; exit 1; }
+    set --
+    for p in $SOLAR_DATA_PATHS; do
+        [ -e "$SOLAR_HOME/$p" ] && set -- "$@" "$p"
+    done
+    [ "$#" -gt 0 ] || { echo "nothing to back up in $SOLAR_HOME" >&2; exit 1; }
+    if [ -z "$out" ]; then
+        mkdir -p "$SOLAR_HOME/backups"
+        out="$SOLAR_HOME/backups/solar-backup-$(date -u +%Y%m%d%H%M%S).tar.gz"
+    fi
+    tar czf "$out" -C "$SOLAR_HOME" "$@"
+    echo "backup written: $out"
+}
+
+do_restore() {
+    archive="${1:-}"
+    [ -n "$archive" ] || { echo "usage: solar restore <archive>" >&2; exit 2; }
+    [ -f "$archive" ] || { echo "archive not found: $archive" >&2; exit 1; }
+    mkdir -p "$SOLAR_HOME"
+    tar xzf "$archive" -C "$SOLAR_HOME"
+    echo "restored from $archive into $SOLAR_HOME"
+}
+
+do_update() {
+    if [ ! -f "$RECEIPT_PATH" ]; then
+        echo "no install receipt at $RECEIPT_PATH; run install.sh first" >&2
+        exit 1
+    fi
+    src="$(receipt_field source_dir)"
+    comps="$(receipt_field components)"
+    [ -n "$src" ] || { echo "receipt has no source_dir" >&2; exit 1; }
+    [ -n "$comps" ] || { echo "receipt has no components" >&2; exit 1; }
+    if [ ! -f "$src/install.sh" ]; then
+        echo "installer not found at $src/install.sh; re-clone the source to update" >&2
+        exit 1
+    fi
+    echo "updating from $src (components: $comps)"
+    "$src/install.sh" --yes --components "$comps" \
+        --solar-home "$SOLAR_HOME" --claude-dir "$CLAUDE_DIR" "$@"
+}
+
+doctor_json() {
+    SOLAR_HOME="$SOLAR_HOME" CLAUDE_DIR="$CLAUDE_DIR" RECEIPT_PATH="$RECEIPT_PATH" python3 - <<'PY'
+import json
+import os
+from datetime import datetime, timezone
+
+solar_home = os.environ["SOLAR_HOME"]
+claude_dir = os.environ["CLAUDE_DIR"]
+receipt_path = os.environ["RECEIPT_PATH"]
+result = {
+    "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "verdict": "ok",
+    "components": [],
+    "paths": {},
+    "warnings": [],
+}
+if os.path.isfile(receipt_path):
+    with open(receipt_path, encoding="utf-8") as f:
+        receipt = json.load(f)
+    result["components"] = receipt.get("components", [])
+else:
+    result["verdict"] = "fail"
+    result["warnings"].append("install receipt missing")
+
+checks = {
+    "solar_home": solar_home,
+    "receipt": receipt_path,
+    "claude_dir": claude_dir,
+    "kernel": os.path.join(claude_dir, "solar", "SOLAR.md"),
+    "db": os.path.join(solar_home, "db", "solar.db"),
+    "solar_bin": os.path.join(solar_home, "bin", "solar"),
+}
+fail_keys = {"solar_home", "receipt", "solar_bin"}
+if "kernel" in result["components"] or not result["components"]:
+    fail_keys.add("kernel")
+for key, path in checks.items():
+    ok = os.path.isdir(path) if key in ("solar_home", "claude_dir") else os.path.exists(path)
+    result["paths"][key] = "ok" if ok else "missing"
+    if not ok and key in fail_keys:
+        result["verdict"] = "fail"
+        result["warnings"].append("path missing: " + key)
+
+print(json.dumps(result, indent=2, sort_keys=True))
+PY
+}
+
+doctor() {
+    if [ "${1:-}" = "--json" ]; then
+        doctor_json
+    else
+        doctor_json
+    fi
+}
+
+remove_sentinel() {
+    [ -f "$CLAUDE_DIR/CLAUDE.md" ] || return 0
+    python3 - "$CLAUDE_DIR/CLAUDE.md" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+begin = b"<!-- BEGIN OPENSOLAR -->"
+end = b"<!-- END OPENSOLAR -->"
+prefix_marker = b"<!-- OPENSOLAR-PREFIX: "
+
+
+def find_region(text):
+    start = text.find(begin)
+    if start < 0:
+        return None
+    end_start = text.find(end, start + len(begin))
+    if end_start < 0:
+        return None
+    region_end = end_start + len(end)
+    if text[region_end:region_end + 2] == b"\r\n":
+        region_end += 2
+    elif text[region_end:region_end + 1] == b"\n":
+        region_end += 1
+    body = text[start:region_end]
+    prefix_mode = b"none"
+    marker_at = body.find(prefix_marker)
+    if marker_at >= 0:
+        value_start = marker_at + len(prefix_marker)
+        value_end = body.find(b" -->", value_start)
+        if value_end >= 0:
+            prefix_mode = body[value_start:value_end]
+    return start, region_end, prefix_mode
+
+
+text = path.read_bytes()
+region = find_region(text)
+if region:
+    start, region_end, prefix_mode = region
+    if prefix_mode == b"newline" and start > 0 and text[start - 1:start] == b"\n":
+        start -= 1
+    path.write_bytes(text[:start] + text[region_end:])
+PY
+    if [ ! -s "$CLAUDE_DIR/CLAUDE.md" ]; then
+        rm -f "$CLAUDE_DIR/CLAUDE.md"
+    fi
+}
+
+# Stop and remove daemon services Solar registered (recorded at install time).
+# Best-effort: missing launchctl/systemctl is not fatal.
+remove_daemons() {
+    record="$SOLAR_HOME/registered-daemons.txt"
+    [ -f "$record" ] || return 0
+    while IFS="$(printf '\t')" read -r kind label path; do
+        case "$kind" in
+            launchd)
+                [ -f "$path" ] && launchctl unload "$path" >/dev/null 2>&1 || true
+                rm -f "$path"
+                ;;
+            systemd)
+                if command -v systemctl >/dev/null 2>&1; then
+                    systemctl --user disable --now "$label" >/dev/null 2>&1 || true
+                fi
+                rm -f "$path"
+                # Remove now-empty systemd dirs Solar created (rmdir no-ops if
+                # the dir still holds user content).
+                rmdir "$HOME/.config/systemd/user" "$HOME/.config/systemd" "$HOME/.config" 2>/dev/null || true
+                ;;
+        esac
+    done < "$record"
+}
+
+# Remove MCP servers Solar registered (recorded at install time), via the
+# sanctioned claude CLI. Best-effort: a missing claude CLI is not fatal.
+remove_mcp_servers() {
+    record="$SOLAR_HOME/registered-mcp.txt"
+    [ -f "$record" ] || return 0
+    command -v claude >/dev/null 2>&1 || return 0
+    while IFS= read -r server_name; do
+        case "$server_name" in ''|'#'*) continue ;; esac
+        claude mcp remove "$server_name" >/dev/null 2>&1 || true
+    done < "$record"
+}
+
+remove_installed_skills() {
+    manifest="$CLAUDE_DIR/solar/installed-skills.txt"
+    [ -f "$manifest" ] || return 0
+    while IFS= read -r skill_name; do
+        case "$skill_name" in
+            ""|.*|*/*) continue ;;
+        esac
+        skill_path="$CLAUDE_DIR/skills/$skill_name"
+        if guard_path "$skill_path"; then
+            rm -rf "$skill_path"
+        fi
+    done < "$manifest"
+    rmdir "$CLAUDE_DIR/skills" 2>/dev/null || true
+}
+
+guard_path() {
+    [ -n "$1" ] || return 1
+    [ "$1" != "/" ] || return 1
+    return 0
+}
+
+# Strip Solar-owned hook entries from settings.json, keyed by the
+# "/solar/hooks/" command path segment. User-owned entries and other keys
+# are preserved; if nothing else remains the file is removed (residue-free).
+remove_solar_settings() {
+    settings_file="$CLAUDE_DIR/settings.json"
+    [ -f "$settings_file" ] || return 0
+    python3 - "$settings_file" <<'PY'
+import json
+import os
+import sys
+
+settings_file = sys.argv[1]
+marker = "/solar/hooks/"
+with open(settings_file, encoding="utf-8") as f:
+    text = f.read().strip()
+settings = json.loads(text) if text else {}
+hooks = settings.get("hooks", {}) if isinstance(settings, dict) else {}
+
+
+def is_solar(cmd):
+    return isinstance(cmd, str) and marker in cmd
+
+
+for event in list(hooks.keys()):
+    groups = hooks.get(event) or []
+    new_groups = []
+    for group in groups:
+        if not isinstance(group, dict):
+            new_groups.append(group)
+            continue
+        kept = [h for h in group.get("hooks", []) if not is_solar(h.get("command"))]
+        if kept:
+            g = dict(group)
+            g["hooks"] = kept
+            new_groups.append(g)
+    if new_groups:
+        hooks[event] = new_groups
+    else:
+        del hooks[event]
+if isinstance(settings, dict) and not hooks:
+    settings.pop("hooks", None)
+
+if settings:
+    tmp = settings_file + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, settings_file)
+else:
+    os.remove(settings_file)
+PY
+}
+
+uninstall() {
+    yes=false
+    keep_data=false
+    dry_run=false
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --yes) yes=true; shift ;;
+            --keep-data) keep_data=true; shift ;;
+            --dry-run) dry_run=true; shift ;;
+            *) echo "unknown uninstall option: $1" >&2; exit 2 ;;
+        esac
+    done
+
+    if [ "$yes" != "true" ]; then
+        echo "Refusing to uninstall without --yes." >&2
+        exit 2
+    fi
+    if [ ! -f "$RECEIPT_PATH" ]; then
+        echo "No install receipt found at $RECEIPT_PATH" >&2
+        exit 1
+    fi
+    if [ "$dry_run" = "true" ]; then
+        echo "Would remove OpenSolar files recorded under $SOLAR_HOME and $CLAUDE_DIR/solar"
+        exit 0
+    fi
+
+    remove_sentinel
+    remove_solar_settings
+    remove_daemons
+    remove_mcp_servers
+    remove_installed_skills
+    if guard_path "$CLAUDE_DIR/solar"; then
+        rm -rf "$CLAUDE_DIR/solar"
+    fi
+    rmdir "$CLAUDE_DIR" 2>/dev/null || true
+    if [ "$keep_data" = "true" ]; then
+        # --keep-data contract: preserve ONLY the user's data (db/ + config.env
+        # + .env) and remove EVERYTHING else under SOLAR_HOME (code, venv, bin,
+        # node_modules, cache, logs, receipt, registered-*.txt, ...). Enumerate
+        # what to KEEP (not what to remove) so new derived artifacts can never
+        # silently survive a --keep-data uninstall.
+        if guard_path "$SOLAR_HOME" && [ -d "$SOLAR_HOME" ]; then
+            find "$SOLAR_HOME" -mindepth 1 -maxdepth 1 \
+                ! -name db ! -name config.env ! -name .env \
+                -exec rm -rf {} +
+        fi
+    elif guard_path "$SOLAR_HOME"; then
+        rm -rf "$SOLAR_HOME"
+    fi
+    echo "OpenSolar uninstalled"
+}
+
+components_list() {
+    if [ -f "$RECEIPT_PATH" ]; then
+        python3 - "$RECEIPT_PATH" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    receipt = json.load(f)
+for name in receipt.get("components", []):
+    print(name)
+PY
+    fi
+}
+
+cmd="${1:-}"
+case "$cmd" in
+    doctor) shift; doctor "$@" ;;
+    update) shift; do_update "$@" ;;
+    backup) shift; do_backup "$@" ;;
+    restore) shift; do_restore "$@" ;;
+    uninstall) shift; uninstall "$@" ;;
+    components)
+        shift
+        [ "${1:-}" = "list" ] || { usage; exit 2; }
+        components_list
+        ;;
+    ""|--help|-h) usage ;;
+    *) echo "unknown command: $cmd" >&2; usage; exit 2 ;;
+esac
