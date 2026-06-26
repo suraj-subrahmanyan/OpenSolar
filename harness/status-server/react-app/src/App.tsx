@@ -37,7 +37,14 @@ import {
   X,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   Navigate,
   NavLink,
@@ -49,10 +56,14 @@ import {
 } from "react-router-dom";
 import {
   deliverableUrl,
+  fetchAuthLoginStatus,
+  fetchAuthStatus,
   fetchDeliverables,
   fetchDeliverableText,
   fetchEvents,
   fetchProjection,
+  reuseHostCreds,
+  startAuthLogin,
   submitEvalVerdict,
   submitHandoff,
   fetchSettings,
@@ -60,16 +71,19 @@ import {
   fetchStatus,
   fetchUsage,
   openEventStream,
+  openProjectionStream,
   saveSettings,
   submitIntake,
   submitPlanVerdict,
 } from "./api";
+import type { AuthLoginStatus, AuthStatus } from "./api";
 import {
   ROLE_META,
   ROLE_ORDER,
   asString,
   compactNumber,
   eventActor,
+  eventType,
   eventTimestamp,
   formatDateTime,
   humanEvent,
@@ -82,6 +96,7 @@ import {
   stallCopy,
   statusTone,
   titleForSprint,
+  unwrapEvent,
 } from "./format";
 import type {
   DagNode,
@@ -176,10 +191,223 @@ function BrandMark({ size = 40 }: { size?: number }) {
   );
 }
 
+const PROVIDER_LABEL: Record<string, string> = {
+  codex: "OpenAI Codex",
+  claude: "Claude (Anthropic)",
+};
+
+// Subscription-first sign-in. The automatic path wins by default: if the active runtime's
+// provider is already authed (or detection is unavailable) we render the app with zero friction.
+// Only an explicit "unauth" shows the sign-in card, and even then "Continue" never hard-blocks.
+function AuthGate({ children }: { children: ReactNode }) {
+  const navigate = useNavigate();
+  const [phase, setPhase] = useState<"checking" | "ready" | "signin">(
+    "checking",
+  );
+  const [provider, setProvider] = useState<"claude" | "codex">("claude");
+  const [busy, setBusy] = useState(false);
+  const [login, setLogin] = useState<AuthLoginStatus | null>(null);
+  const [message, setMessage] = useState("");
+  const pollRef = useRef<number | undefined>(undefined);
+
+  const evaluate = useCallback(
+    (auth: AuthStatus | null, runtime: "claude" | "codex") => {
+      const state = auth?.[runtime];
+      // Degrade OPEN: only a definite "unauth" blocks; detection gaps never trap the user.
+      setPhase(state === "unauth" ? "signin" : "ready");
+    },
+    [],
+  );
+
+  const check = useCallback(async () => {
+    try {
+      const [auth, settings] = await Promise.all([
+        fetchAuthStatus(),
+        fetchSettings().catch(() => null),
+      ]);
+      const runtime: "claude" | "codex" =
+        settings?.runtime?.value === "codex" ? "codex" : "claude";
+      setProvider(runtime);
+      evaluate(auth, runtime);
+    } catch {
+      setPhase("ready"); // status-server unreachable -> don't block the app
+    }
+  }, [evaluate]);
+
+  useEffect(() => {
+    void check();
+  }, [check]);
+  useEffect(
+    () => () => {
+      if (pollRef.current) window.clearInterval(pollRef.current);
+    },
+    [],
+  );
+
+  const recheck = useCallback(async () => {
+    const auth = await fetchAuthStatus().catch(() => null);
+    if (auth && auth[provider] === "ok") {
+      setPhase("ready");
+      return true;
+    }
+    return false;
+  }, [provider]);
+
+  const onReuse = useCallback(async () => {
+    setBusy(true);
+    setMessage("");
+    try {
+      const r = await reuseHostCreds(provider);
+      if (r.reused) {
+        const ok = await recheck();
+        if (!ok)
+          setMessage("Copied an existing sign-in, but it didn’t verify yet.");
+      } else {
+        setMessage(
+          "No existing sign-in found on this machine — use a device code below.",
+        );
+      }
+    } catch {
+      setMessage("Couldn’t reuse an existing sign-in.");
+    } finally {
+      setBusy(false);
+    }
+  }, [provider, recheck]);
+
+  const onDeviceLogin = useCallback(async () => {
+    setBusy(true);
+    setMessage("");
+    setLogin(null);
+    try {
+      await startAuthLogin(provider);
+      if (pollRef.current) window.clearInterval(pollRef.current);
+      pollRef.current = window.setInterval(async () => {
+        const s = await fetchAuthLoginStatus(provider).catch(() => null);
+        if (!s) return;
+        setLogin(s);
+        if (s.state === "done") {
+          if (pollRef.current) window.clearInterval(pollRef.current);
+          await recheck();
+        } else if (s.state === "failed") {
+          if (pollRef.current) window.clearInterval(pollRef.current);
+          setMessage("Sign-in didn’t complete — you can try again.");
+        }
+      }, 2000);
+    } catch {
+      setMessage("Couldn’t start sign-in.");
+    } finally {
+      setBusy(false);
+    }
+  }, [provider, recheck]);
+
+  if (phase === "checking") {
+    return (
+      <div className="auth-gate" data-testid="auth-checking">
+        <div className="auth-card auth-card-slim">
+          <Loader2 className="spin" size={22} />
+          <span>Checking your sign-in…</span>
+        </div>
+      </div>
+    );
+  }
+  if (phase === "ready") return <>{children}</>;
+
+  const pending = login?.state === "pending" || login?.state === "started";
+  return (
+    <div className="auth-gate" data-testid="auth-signin">
+      <div className="auth-card">
+        <BrandMark size={44} />
+        <h1 className="auth-title">Sign in to run Solar</h1>
+        <p className="auth-sub">
+          Solar runs your work through{" "}
+          <strong>{PROVIDER_LABEL[provider]}</strong> using your existing
+          subscription. Sign in once on this machine.
+        </p>
+
+        <button
+          className="auth-primary"
+          onClick={onReuse}
+          disabled={busy}
+          data-testid="auth-reuse"
+        >
+          {busy ? (
+            <Loader2 className="spin" size={16} />
+          ) : (
+            <ShieldCheck size={16} />
+          )}
+          Use my existing sign-in
+        </button>
+
+        <button
+          className="auth-secondary"
+          onClick={onDeviceLogin}
+          disabled={busy}
+          data-testid="auth-device"
+        >
+          Sign in with a device code
+        </button>
+
+        {pending && (
+          <div className="auth-device-box" data-testid="auth-device-box">
+            <p className="auth-device-hint">
+              Open this link and enter the code:
+            </p>
+            {login?.url ? (
+              <a
+                href={login.url}
+                target="_blank"
+                rel="noreferrer"
+                className="auth-link"
+              >
+                {login.url} <ArrowUpRight size={14} />
+              </a>
+            ) : null}
+            {login?.code ? (
+              <div className="auth-code" data-testid="auth-code">
+                {login.code}
+              </div>
+            ) : null}
+            {!login?.url && login?.tail ? (
+              <pre className="auth-tail">{login.tail}</pre>
+            ) : null}
+            <div className="auth-waiting">
+              <Loader2 className="spin" size={14} /> Waiting for you to finish…
+            </div>
+          </div>
+        )}
+        {login?.state === "done" && (
+          <div className="auth-done" data-testid="auth-done">
+            <CheckCircle2 size={16} /> Signed in. Loading…
+          </div>
+        )}
+
+        {message && <p className="auth-message">{message}</p>}
+
+        <div className="auth-foot">
+          <button
+            className="auth-ghost"
+            onClick={() => {
+              setPhase("ready");
+              navigate("/settings");
+            }}
+          >
+            Advanced: set provider API keys
+          </button>
+          <button className="auth-ghost" onClick={() => setPhase("ready")}>
+            Continue without signing in
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   return (
     <Tooltip.Provider delayDuration={220}>
-      <Shell />
+      <AuthGate>
+        <Shell />
+      </AuthGate>
     </Tooltip.Provider>
   );
 }
@@ -239,7 +467,9 @@ function Shell() {
   );
 
   return (
-    <div className={`app-shell ${isSettingsRoute ? "settings-shell-route" : ""}`}>
+    <div
+      className={`app-shell ${isSettingsRoute ? "settings-shell-route" : ""}`}
+    >
       {!isSettingsRoute && (
         <Sidebar
           sprints={sprints}
@@ -636,9 +866,12 @@ function useSessionData(
 
   useEffect(() => {
     if (!sprintId) return undefined;
-    // Live updates for the open session: stream events and refresh on arrival
-    // (debounced). The interval is a safety net; when SSE is live it runs rarely,
-    // and if SSE is unavailable we degrade to the original poll cadence.
+    // Live projection: the server streams a snapshot on connect, then a delta only when the
+    // sprint's semantic signature changes (node status / phase / verdict / gate / stall). We
+    // apply the authoritative fast projection in place — no refetching all five endpoints on
+    // every raw event. A debounced secondary refresh pulls the non-streamed slices
+    // (status / usage / deliverables) when something meaningful moves; a slow interval reconciles
+    // everything as a safety net and becomes the sole poll when SSE is unavailable.
     let pending: number | undefined;
     const scheduleRefresh = () => {
       if (pending) return;
@@ -648,25 +881,55 @@ function useSessionData(
         void onSprintChanged();
       }, 500);
     };
-    const stream = openEventStream(
+    const isCurrent = () => selectedSprintRef.current === sprintId;
+    const cacheProjection = (projectionResponse: ProjectionResponse) => {
+      const base: SessionCacheEntry = sessionDataCache.get(sprintId) || {
+        status: undefined,
+        projection: undefined,
+        events: [],
+        usage: undefined,
+        deliverables: [],
+      };
+      sessionDataCache.set(sprintId, {
+        ...base,
+        projection: projectionResponse,
+      });
+    };
+    const projStream = openProjectionStream(
       sprintId,
-      () => {
+      (msg) => {
+        if (!isCurrent()) return;
         setStreamState("live");
-        scheduleRefresh();
+        const projectionResponse: ProjectionResponse = {
+          ok: true,
+          data: msg.data,
+          generated_at: msg.generated_at,
+          schema_version: msg.data?.projection_schema,
+        };
+        setProjection(projectionResponse);
+        cacheProjection(projectionResponse);
+        const changed = msg.changed || {};
+        const moved =
+          msg.type === "snapshot" ||
+          !!changed.phase ||
+          !!changed.eval_verdict ||
+          (Array.isArray(changed.nodes) && changed.nodes.length > 0) ||
+          (Array.isArray(changed.gates) && changed.gates.length > 0);
+        if (moved) scheduleRefresh();
       },
       () => setStreamState("retrying"),
     );
-    setStreamState(stream ? "live" : "off");
+    setStreamState(projStream ? "live" : "off");
     const id = window.setInterval(
       () => {
         void refresh();
         void onSprintChanged();
       },
-      stream ? 15000 : 3500,
+      projStream ? 20000 : 3500,
     );
     return () => {
       if (pending) window.clearTimeout(pending);
-      stream?.close();
+      projStream?.close();
       window.clearInterval(id);
     };
   }, [onSprintChanged, refresh, sprintId]);
@@ -1022,6 +1285,19 @@ function prettyActionLabel(id: string): string {
 function artifactPath(ref?: string | { rel_path?: unknown }): string {
   if (typeof ref === "string") return ref;
   return asString(ref?.rel_path);
+}
+
+// Deliverable file names repeat the full sprint id (e.g.
+// "sprint-20260623-…--de49b5a4.acceptance_verdict.json"). Strip that prefix so the
+// list shows the meaningful part ("acceptance_verdict.json").
+function deliverableLabel(item: { name?: string; rel_path?: string }): string {
+  const base = asString(item.name || item.rel_path)
+    .split("/")
+    .pop() as string;
+  // Strip the sprint-id prefix (handles single- or double-dash before the hash);
+  // keep the real filename intact (no underscore→space mangling of code/data files).
+  const stripped = base.replace(/^sprint-.*?-+[0-9a-f]{6,}\./i, "");
+  return stripped || base;
 }
 
 function projectionGateArtifacts(
@@ -1577,12 +1853,32 @@ function RailList({
     if (focusPath && focusRowRef.current) focusRowRef.current.focus();
   }, [focusPath]);
 
+  const output = deliverables.filter((item) => item.primary);
+  const process = deliverables.filter((item) => !item.primary);
+
+  const renderRow = (item: Deliverable) => (
+    <button
+      type="button"
+      key={item.rel_path}
+      ref={focusPath === item.rel_path ? focusRowRef : undefined}
+      className="artifact-row"
+      onClick={() => onOpen(item.rel_path)}
+    >
+      <FileText className="artifact-icon" size={15} />
+      <span className="artifact-name" title={item.name}>
+        {deliverableLabel(item)}
+      </span>
+      <span className="artifact-meta">{item.kind.toUpperCase()}</span>
+      <ChevronRight size={14} className="artifact-chevron" />
+    </button>
+  );
+
   return (
     <div className="rail-list" data-testid="deliverables-panel">
       <div className="rail-head">
         <div className="rail-head-title">
           <span>Deliverables</span>
-          <span className="rail-count">{deliverables.length}</span>
+          <span className="rail-count">{output.length || deliverables.length}</span>
         </div>
         <button
           type="button"
@@ -1596,22 +1892,23 @@ function RailList({
       {deliverables.length === 0 ? (
         <EmptyInline label="No deliverables yet" />
       ) : (
-        <div className="artifact-list">
-          {deliverables.map((item) => (
-            <button
-              type="button"
-              key={item.rel_path}
-              ref={focusPath === item.rel_path ? focusRowRef : undefined}
-              className="artifact-row"
-              onClick={() => onOpen(item.rel_path)}
-            >
-              <FileText className="artifact-icon" size={15} />
-              <span className="artifact-name">{item.name}</span>
-              <span className="artifact-meta">{item.kind.toUpperCase()}</span>
-              <ChevronRight size={14} className="artifact-chevron" />
-            </button>
-          ))}
-        </div>
+        <>
+          {output.length > 0 && (
+            <div className="artifact-group">
+              <div className="artifact-group-label">Output</div>
+              <div className="artifact-list">{output.map(renderRow)}</div>
+            </div>
+          )}
+          {process.length > 0 && (
+            <div className="artifact-group">
+              <div className="artifact-group-label">
+                Process artifacts
+                <span className="rail-count">{process.length}</span>
+              </div>
+              <div className="artifact-list">{process.map(renderRow)}</div>
+            </div>
+          )}
+        </>
       )}
       <div className="rail-divider" />
       <UsagePanel usage={usage} />
@@ -1917,9 +2214,16 @@ function buildProcessSteps(
   options: { showStallSummary?: boolean; stall?: StallSummary } = {},
 ): ProcessStep[] {
   const steps: ProcessStep[] = [];
-  const orderedEvents = [...events].sort(
-    (a, b) => eventTimeValue(a) - eventTimeValue(b),
-  );
+  const orderedEvents = [...events]
+    .filter((event) => {
+      // Drop internal autopilot diagnostics (kb_probe_failed, ipv4_unavailable, doctor_passed,
+      // route_normalized, …) — they're machine noise, not part of the agent story the user reads.
+      const u = unwrapEvent(event);
+      const a = asString(u.actor);
+      const kind = eventType(u);
+      return a !== "solar-autopilot" && !kind.startsWith("autopilot_");
+    })
+    .sort((a, b) => eventTimeValue(a) - eventTimeValue(b));
 
   orderedEvents.forEach((event, index) => {
     steps.push(processStepFromEvent(event, index === orderedEvents.length - 1));
@@ -2011,9 +2315,14 @@ function processStepFromEvent(
   event: EventRecord,
   latest: boolean,
 ): ProcessStep {
+  event = unwrapEvent(event);
   const body = payload(event);
-  const type = event.type || event.event || "event";
-  const actor = eventActor(event);
+  const type = eventType(event);
+  // Narrative: attribute the step to the AGENT the coordinator dispatched to (PM/Builder/
+  // Evaluator/Planner) when the payload names a role, so the stream reads "PM did X, Builder did
+  // Y" instead of everything being "coordinator".
+  const stepRole = normalizeRole(body.role || body.target_role || event.role);
+  const actor = stepRole ? ROLE_META[stepRole].title : eventActor(event);
   const node = asString(body.node_id || body.node || event.node_id);
   const phase = asString(body.phase || event.phase);
   const decision = asString(body.decision || event.decision);
@@ -2327,12 +2636,16 @@ function buildActivityDays(
     buckets.set(key, { date: key, count: 0, sprints: [] });
   });
   sprints.forEach((sprint) => {
-    // /sprints exposes mtime (unix seconds); fall back to updated_at if present.
+    // Bucket by true creation time (created_ts from the sprint_id); fall back to
+    // mtime/updated_at only when it is missing, so the activity map reflects real days.
+    const createdTs = sprint.created_ts;
     const mtime = sprint.mtime;
     const ts =
-      typeof mtime === "number"
-        ? mtime * 1000
-        : Date.parse(asString(sprint.updated_at) || "");
+      typeof createdTs === "number"
+        ? createdTs * 1000
+        : typeof mtime === "number"
+          ? mtime * 1000
+          : Date.parse(asString(sprint.created_at) || asString(sprint.updated_at) || "");
     if (!ts) return;
     const key = new Date(ts).toISOString().slice(0, 10);
     const bucket = buckets.get(key);
@@ -2355,7 +2668,8 @@ function normalizeCrewPreset(value: string): string {
   const clean = value.trim().toLowerCase().replace(/_/g, "-");
   if (CREW_PRESETS.some((preset) => preset.id === clean)) return clean;
   if (clean.includes("fast") || clean.includes("glm")) return "fast";
-  if (clean.includes("quality") || clean.includes("opus")) return "high-quality";
+  if (clean.includes("quality") || clean.includes("opus"))
+    return "high-quality";
   if (clean.includes("claude")) return "all-claude";
   return "custom";
 }
@@ -2630,7 +2944,9 @@ function SettingsView() {
                 />
               )}
               {activeSection === "usage" && <UsageLimitsPane usage={usage} />}
-              {activeSection === "activity" && <ActivityPane sprints={sprints} />}
+              {activeSection === "activity" && (
+                <ActivityPane sprints={sprints} />
+              )}
               {activeSection === "about" && (
                 <AboutPane settings={settings} usage={usage} />
               )}
@@ -2672,8 +2988,8 @@ function SettingsNotice({ settings }: { settings?: SettingsPayload }) {
       <ShieldCheck size={15} aria-hidden="true" />
       <p>
         Runtime source: {settings?.source || "status-server"}. Saves update the
-        local config and local secrets only; restart the cockpit to apply changes
-        to running panes.
+        local config and local secrets only; restart the cockpit to apply
+        changes to running panes.
       </p>
     </div>
   );
@@ -2688,7 +3004,9 @@ function CredentialsPane({
   apiKeys: Record<string, string>;
   onSave: () => Promise<void>;
   saving: boolean;
-  setApiKeys: (next: (prev: Record<string, string>) => Record<string, string>) => void;
+  setApiKeys: (
+    next: (prev: Record<string, string>) => Record<string, string>,
+  ) => void;
 }) {
   const [visibleKeys, setVisibleKeys] = useState<Record<string, boolean>>({});
   return (
@@ -2809,7 +3127,9 @@ function DefaultCrewPane({
           <span
             className={`settings-status-pill ${runtimeLaunchSupported ? "is-ok" : ""}`}
           >
-            {runtimeLaunchSupported ? "restart applies" : "launch wiring pending"}
+            {runtimeLaunchSupported
+              ? "restart applies"
+              : "launch wiring pending"}
           </span>
         </div>
         <div
@@ -2974,9 +3294,15 @@ function ActivityPane({ sprints }: { sprints: SprintSummary[] }) {
   const selected = days.find((day) => day.date === selectedDay);
   const selectedSprints = selected?.sprints || [];
   const sevenDayTotal = days.slice(-7).reduce((sum, day) => sum + day.count, 0);
-  const active = sprints.filter((sprint) => sessionTone(sprint) === "working").length;
-  const attention = sprints.filter((sprint) => sessionTone(sprint) === "blocked").length;
-  const done = sprints.filter((sprint) => sessionTone(sprint) === "complete").length;
+  const active = sprints.filter(
+    (sprint) => sessionTone(sprint) === "working",
+  ).length;
+  const attention = sprints.filter(
+    (sprint) => sessionTone(sprint) === "blocked",
+  ).length;
+  const done = sprints.filter(
+    (sprint) => sessionTone(sprint) === "complete",
+  ).length;
   const busiest = days.reduce(
     (best, day) => (day.count > best.count ? day : best),
     days[0] || { date: "", count: 0, sprints: [] },
@@ -3017,19 +3343,25 @@ function ActivityPane({ sprints }: { sprints: SprintSummary[] }) {
         <span>
           Busiest day:{" "}
           <strong>
-            {busiest.date ? `${busiest.date} (${busiest.count})` : "not available"}
+            {busiest.date
+              ? `${busiest.date} (${busiest.count})`
+              : "not available"}
           </strong>
         </span>
         <span>
           Selected:{" "}
           <strong>
-            {selected ? `${selected.date} (${selected.count})` : "not available"}
+            {selected
+              ? `${selected.date} (${selected.count})`
+              : "not available"}
           </strong>
         </span>
       </div>
       <div className="settings-row-list activity-session-list">
         {selectedSprints.length === 0 && (
-          <div className="activity-empty-row">No sessions on the selected day.</div>
+          <div className="activity-empty-row">
+            No sessions on the selected day.
+          </div>
         )}
         {selectedSprints.slice(0, 10).map((sprint) => (
           <NavLink
@@ -3044,7 +3376,8 @@ function ActivityPane({ sprints }: { sprints: SprintSummary[] }) {
             </div>
             <em>
               {formatDateTime(
-                asString(sprint.updated_at) ||
+                asString(sprint.created_at) ||
+                  asString(sprint.updated_at) ||
                   asString(sprint.latest_event?.ts) ||
                   (typeof sprint.mtime === "number"
                     ? new Date(sprint.mtime * 1000).toISOString()
@@ -3072,8 +3405,14 @@ function AboutPane({
       description="Only values exposed by the local status-server are shown."
     >
       <div className="settings-facts">
-        <FactRow label="Settings source" value={settings?.source || "not exposed"} />
-        <FactRow label="Settings generated" value={settings?.generated_at || "not exposed"} />
+        <FactRow
+          label="Settings source"
+          value={settings?.source || "not exposed"}
+        />
+        <FactRow
+          label="Settings generated"
+          value={settings?.generated_at || "not exposed"}
+        />
         <FactRow
           label="Settings writes"
           value={settings?.write_supported ? "supported" : "not advertised"}

@@ -52,7 +52,11 @@ except ModuleNotFoundError:  # status-server.py uses the pure builders without F
     Blueprint = _NoopBlueprint  # type: ignore[assignment]
     request = _Request()  # type: ignore[assignment]
 
-HARNESS_DIR = Path(os.environ.get("HARNESS_DIR", str(Path.home() / ".solar" / "harness"))).expanduser()
+HARNESS_DIR = Path(
+    os.environ.get("HARNESS_DIR")
+    or os.environ.get("SOLAR_HARNESS_DIR")
+    or str(Path.home() / ".solar" / "harness")
+).expanduser()
 SCRIPT_HARNESS_DIR = Path(__file__).resolve().parents[2]
 SPRINTS_DIR = HARNESS_DIR / "sprints"
 SESSIONS_DIR = HARNESS_DIR / "sessions"
@@ -93,12 +97,80 @@ def _read_json(path: Path) -> tuple[Any, bool]:
         return None, False
 
 
+def _clean_sprint_title(sid: str, fallback: str) -> str:
+    """Human-friendly session title.
+
+    The stored title comes from the PRD's first heading, which is the user's intent
+    truncated mid-word at 80 chars (and is occasionally a non-English planner heading).
+    Prefer the user's full original intent from raw_intent.json, then truncate at a
+    word boundary. Falls back to the stored title when no raw intent is recorded.
+    """
+    fallback = re.sub(r"\s+", " ", str(fallback or "")).strip()
+    full = ""
+    data, ok = _read_json(SPRINTS_DIR / f"{sid}.raw_intent.json")
+    if ok and isinstance(data, dict):
+        candidate = data.get("raw")
+        if candidate is None:
+            candidate = data.get("text") or data.get("intent")
+        if isinstance(candidate, dict):
+            full = str(candidate.get("text") or candidate.get("prompt") or "")
+        elif isinstance(candidate, str):
+            s = candidate.strip()
+            if s.startswith("{"):
+                # raw is a stringified dict — JSON or a Python repr ({'text': "..."}).
+                import ast
+
+                parsed = None
+                for loader in (json.loads, ast.literal_eval):
+                    try:
+                        parsed = loader(s)
+                        break
+                    except Exception:
+                        parsed = None
+                if isinstance(parsed, dict):
+                    full = str(parsed.get("text") or parsed.get("prompt") or "")
+            else:
+                full = s
+    title = re.sub(r"\s+", " ", full).strip() or fallback
+    if not title:
+        return sid
+    limit = 76
+    if len(title) > limit:
+        head = title[:limit].rsplit(" ", 1)[0].rstrip(" ,.;:-—")
+        title = (head or title[:limit].rstrip()) + "…"
+    return title
+
+
+def _sprint_created(sid: str, fallback_mtime: float) -> tuple[float, str]:
+    """Real creation time from the sprint_id (sprint-YYYYMMDD-HHMMSS-…, UTC). Used
+    for stable recency + display instead of the file mtime, which gets bumped by
+    background re-projection / reads and pollutes ordering and timestamps."""
+    import datetime as _dt
+    m = re.match(r"^sprint-(\d{8})-(\d{6})-", sid or "")
+    if m:
+        try:
+            dt = _dt.datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S").replace(tzinfo=_dt.timezone.utc)
+            return dt.timestamp(), dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            pass
+    ts = float(fallback_mtime or 0.0)
+    iso = _dt.datetime.fromtimestamp(ts, _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if ts else ""
+    return ts, iso
+
+
 def _sprint_status_rows(limit: int = 80) -> list[dict]:
     active = {"active", "dispatched", "reviewing", "ready_for_review", "failed_review"}
-    rows: list[dict] = []
+    # Pass 1 (cheap): read ONLY status.json per sprint. The sidebar list needs just
+    # id/title/status/phase/recency — no task-graph. The old code called _load_task_graph()
+    # per sprint, which globs every file in sprints/ three times; with ~1.3k artifacts across
+    # ~50 sprints that took 13s and left the sidebar stuck on skeletons.
+    prelim: list[dict] = []
     for sf in SPRINTS_DIR.glob("*.status.json"):
         data, ok = _read_json(sf)
         if not ok or not isinstance(data, dict):
+            continue
+        if data.get("archived"):
+            # Owner-archived sessions are kept on disk but hidden from the list.
             continue
         sid = str(data.get("sprint_id") or data.get("id") or sf.name.removesuffix(".status.json"))
         try:
@@ -106,28 +178,64 @@ def _sprint_status_rows(limit: int = 80) -> list[dict]:
         except OSError:
             mtime = 0.0
         status = str(data.get("status") or "")
-        phase = str(data.get("phase") or "")
-        tg, tg_ok = _load_task_graph(sid)
-        nodes = tg.get("nodes") if isinstance(tg.get("nodes"), list) else []
+        created_ts, created_at = _sprint_created(sid, mtime)
+        prelim.append({
+            "sprint_id": sid,
+            "title": data.get("title") or sid,
+            "status": status,
+            "phase": str(data.get("phase") or ""),
+            "is_active": status.lower() in active,
+            "mtime": mtime,
+            "created_ts": created_ts,
+            "created_at": created_at,
+        })
+    # Sort by true creation time (newest first). The old code sorted by file mtime,
+    # which background re-projection bumps — pushing a brand-new session below stale
+    # ones. created_ts comes from the sprint_id and is stable.
+    prelim.sort(key=lambda item: (-float(item.get("created_ts") or 0), str(item.get("sprint_id") or "")))
+    prelim = prelim[:limit]
+    # Pass 2: node counts for the capped set only, via DIRECT path reads (no dir globbing).
+    rows: list[dict] = []
+    for item in prelim:
+        sid = item["sprint_id"]
+        nodes: list = []
+        runtime_state: dict = {}
+        tg_ok = False
+        for name in (
+            f"{sid}.task_graph.json",
+            f"{sid}.task_dag.state.json",
+            f"{sid}.task_graph.state.json",
+            f"{sid}.closure.json",
+        ):
+            tg_data, tg_read = _read_json(SPRINTS_DIR / name)
+            if tg_read and isinstance(tg_data, dict):
+                tg = _normalize_task_graph_payload(tg_data)
+                raw_nodes = tg.get("nodes")
+                if isinstance(raw_nodes, list):
+                    nodes = raw_nodes
+                    runtime_state = tg.get("runtime_state") or {}
+                    tg_ok = True
+                    break
         node_counts: dict[str, int] = {}
         for node in nodes:
             if not isinstance(node, dict):
                 continue
-            st = _node_status(node, tg.get("runtime_state") or {})
+            st = _node_status(node, runtime_state)
             node_counts[st] = node_counts.get(st, 0) + 1
         rows.append({
             "sprint_id": sid,
-            "title": data.get("title") or sid,
-            "status": status,
-            "phase": phase,
-            "is_active": status.lower() in active,
-            "mtime": mtime,
+            "title": _clean_sprint_title(sid, item["title"]),
+            "status": item["status"],
+            "phase": item["phase"],
+            "is_active": item["is_active"],
+            "mtime": item["mtime"],
+            "created_ts": item.get("created_ts"),
+            "created_at": item.get("created_at"),
             "node_count": len(nodes),
             "node_status_counts": node_counts,
             "task_graph_present": tg_ok,
         })
-    rows.sort(key=lambda item: (not bool(item.get("is_active")), -float(item.get("mtime") or 0), str(item.get("sprint_id") or "")))
-    return rows[:limit]
+    return rows
 
 
 def _active_sprint_ids(limit: int = 8) -> list[str]:
@@ -585,7 +693,73 @@ def _build_blocker_diagnostics(sid: str, status: dict, nodes: list[dict], node_c
     return diagnostics
 
 
-def _build_stall_summary(status: dict, node_cards: list[dict], diagnostics: list[dict], tg_ok: bool) -> dict:
+def _recent_sprint_events(sid: str, limit: int = 24) -> list[dict]:
+    """Tail of the sprint event log — used to tell 'actively working' from 'stuck looping'."""
+    if not sid:
+        return []
+    try:
+        lines = (SPRINTS_DIR / f"{sid}.events.jsonl").read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    out: list[dict] = []
+    for line in lines[-limit:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+            if isinstance(d, dict):
+                out.append(d)
+        except ValueError:
+            continue
+    return out
+
+
+# Repeated low-level events that mean "retrying / can't start work", not progress.
+_STALL_CHURN_REASONS = {
+    "invalid_prd", "no_free_worker", "clear_gate_failed", "pane_not_idle",
+    "worker_capacity_exhausted", "clear_gate", "duplicate",
+}
+_STALL_CHURN_EVENTS = {"gate_blocked", "dispatch_failed", "dispatch_queued", "planner_notified"}
+_STALL_PROGRESS_HINTS = (
+    "passed", "model_session", "prd_completed", "compiled_requirement",
+    "node_dispatch", "graph_node", "eval_dispatch", "finalized", "completed",
+)
+
+
+def _loop_stall_reasons(events: list[dict]) -> list[str] | None:
+    """Detect a sprint stuck in a dispatch/gate retry loop with no forward progress."""
+    if not events:
+        return None
+    churn = 0
+    progress = 0
+    reasons: list[str] = []
+    for e in events[-18:]:
+        ev = str(e.get("event") or "")
+        reason = str((e.get("payload") or {}).get("reason") or e.get("reason") or "").strip()
+        if any(h in ev for h in _STALL_PROGRESS_HINTS):
+            progress += 1
+        elif ev in _STALL_CHURN_EVENTS or reason in _STALL_CHURN_REASONS:
+            churn += 1
+            if reason:
+                reasons.append(reason)
+    if churn >= 4 and progress == 0:
+        return sorted(set(reasons))
+    return None
+
+
+def _stall_human_reason(reasons: list[str]) -> str:
+    rs = set(reasons)
+    if rs & {"no_free_worker", "worker_capacity_exhausted"}:
+        return "No available worker — the runtime can't hand the task to an agent pane."
+    if "invalid_prd" in rs:
+        return "Stuck at the spec gate — the PRD isn't passing validation and isn't being repaired."
+    if rs & {"clear_gate_failed", "pane_not_idle"}:
+        return "Can't reach a worker pane to continue (pane busy or unresponsive)."
+    return "Repeated retries with no forward progress."
+
+
+def _build_stall_summary(status: dict, node_cards: list[dict], diagnostics: list[dict], tg_ok: bool, events: list[dict] | None = None) -> dict:
     sprint_status = str(status.get("status") or "").strip().lower()
     phase = str(status.get("phase") or "").strip().lower()
     blocked = [card for card in node_cards if str(card.get("status") or "").lower() in {"blocked", "gate_blocked", "failed"} or card.get("blocked_reason")]
@@ -629,6 +803,16 @@ def _build_stall_summary(status: dict, node_cards: list[dict], diagnostics: list
             "title": "One or more DAG nodes are blocked",
             "detail": "At least one node is blocked or failed. Check node details before expecting completion.",
             "reasons": reasons,
+        }
+    loop_reasons = _loop_stall_reasons(events or [])
+    if loop_reasons is not None and sprint_status not in {"passed", "finalized", "completed", "done"}:
+        return {
+            "is_stalled": True,
+            "state": "retry_loop",
+            "severity": "warn",
+            "title": "Stalled before execution could start",
+            "detail": _stall_human_reason(loop_reasons),
+            "reasons": loop_reasons,
         }
     return {
         "is_stalled": False,
@@ -1542,7 +1726,17 @@ def _timeline_from_events(events: list[dict], dashboard: dict, generated_at: str
     return rows
 
 
-def build_projection_payload(sprint_id: str | None = None) -> tuple[dict, list[str]]:
+def _projection_lazy_slices(sid: str) -> dict:
+    quoted = urllib.parse.quote(sid) if sid else ""
+    return {
+        "events": f"/events?sprint_id={quoted}&limit=140" if sid else "/events?limit=140",
+        "deliverables": f"/sprints/{quoted}/deliverables" if sid else "",
+        "usage": "/usage",
+    }
+
+
+def build_projection_payload(sprint_id: str | None = None, mode: str = "full") -> tuple[dict, list[str]]:
+    projection_mode = "fast" if str(mode or "").strip().lower() in {"fast", "summary"} else "full"
     dashboard, degraded = build_dashboard_payload(sprint_id)
     sid = str(dashboard.get("focus_sprint_id") or sprint_id or "")
     status = _load_status_by_sprint(sid) if sid else {}
@@ -1552,8 +1746,8 @@ def build_projection_payload(sprint_id: str | None = None) -> tuple[dict, list[s
     capability_mismatch = _capability_mismatch_projection(dashboard)
     human_action = _human_action_required(status, dashboard, artifacts, capability_mismatch)
     generated_at = _now()
-    events = _projection_events(sid)
-    timeline = _timeline_from_events(events, dashboard, generated_at)
+    events = [] if projection_mode == "fast" else _projection_events(sid)
+    timeline = [] if projection_mode == "fast" else _timeline_from_events(events, dashboard, generated_at)
     requirements = _projection_requirements(sid, artifacts)
     plan = _projection_plan(dashboard, artifacts)
     task_graph = _projection_task_graph(dashboard)
@@ -1562,14 +1756,16 @@ def build_projection_payload(sprint_id: str | None = None) -> tuple[dict, list[s
     evaluation = _projection_evaluation(status, artifacts)
     return {
         "projection_schema": "solar.dashboard_projection.v1",
+        "projection_mode": projection_mode,
         "sprint_id": sid,
-        "title": dashboard.get("title") or status.get("title") or sid,
+        "title": _clean_sprint_title(sid, dashboard.get("title") or status.get("title") or ""),
         "status": status.get("status") or dashboard.get("sprint_status") or "",
         "phase": status.get("phase") or dashboard.get("phase") or "",
+        "lazy_slices": _projection_lazy_slices(sid),
         "sprint": {
             "sprint_id": sid,
             "epic_id": dashboard.get("epic_id") or status.get("epic_id") or "",
-            "title": dashboard.get("title") or status.get("title") or sid,
+            "title": _clean_sprint_title(sid, dashboard.get("title") or status.get("title") or ""),
             "status": status.get("status") or dashboard.get("sprint_status") or "",
             "phase": status.get("phase") or dashboard.get("phase") or "",
             "raw_status": status,
@@ -1627,7 +1823,7 @@ def build_dashboard_payload(sprint_id: str | None = None) -> tuple[dict, list[st
     registry = _capability_registry()
     node_cards = _build_node_cards(sid, nodes, tg.get("runtime_state") or {}, routing)
     diagnostics = _build_blocker_diagnostics(sid, status, nodes, node_cards, tg_ok)
-    stall = _build_stall_summary(status, node_cards, diagnostics, tg_ok)
+    stall = _build_stall_summary(status, node_cards, diagnostics, tg_ok, events=_recent_sprint_events(sid))
 
     status_counts: dict[str, int] = {}
     cost_by_status: dict[str, float] = {}

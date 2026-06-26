@@ -18,7 +18,8 @@ Endpoints:
 Startup: solar-harness status-server start  (writes pidfile, nohup)
          solar-harness status-server stop|restart|status
 
-Binds to 127.0.0.1:8765 only. No auth, no TLS (internal use).
+Binds 127.0.0.1:8765 (loopback) on mac/Linux; 0.0.0.0 under WSL so the Windows host can reach it
+(localhostForwarding edge case). SOLAR_BIND_HOST overrides. No auth, no TLS (internal use).
 Port fallback: 8765-8775 if primary is occupied.
 """
 
@@ -35,6 +36,7 @@ import math
 import importlib.util
 import shutil
 import time
+import threading
 import datetime
 import urllib.parse
 import urllib.error
@@ -50,7 +52,11 @@ except Exception:  # pragma: no cover
     yaml = None
 
 # ── Paths ──
-HARNESS_DIR = Path(os.environ.get("HARNESS_DIR", str(Path.home() / ".solar" / "harness")))
+HARNESS_DIR = Path(
+    os.environ.get("HARNESS_DIR")
+    or os.environ.get("SOLAR_HARNESS_DIR")
+    or str(Path.home() / ".solar" / "harness")
+)
 SOURCE_HARNESS_DIR = Path(os.environ.get("SOLAR_SOURCE_HARNESS_DIR", str(Path.home() / "Solar" / "harness")))
 if str(HARNESS_DIR / "lib") not in sys.path:
     sys.path.insert(0, str(HARNESS_DIR / "lib"))
@@ -119,7 +125,44 @@ OPEN_ALLOWED_ROOTS = [
     Path.home() / "Knowledge",
 ]
 
-BIND_HOST = "127.0.0.1"
+def _detect_wsl() -> bool:
+    """True on WSL."""
+    try:
+        with open("/proc/version", "r", errors="ignore") as fh:
+            return "microsoft" in fh.read().lower()
+    except OSError:
+        return False
+
+
+def _wsl_networking_mode() -> str:
+    """WSL networking mode via `wslinfo --networking-mode` ('mirrored' | 'nat' | ''). Empty when
+    wslinfo is absent (older WSL) — treated as NAT for bind purposes."""
+    try:
+        out = subprocess.run(
+            ["wslinfo", "--networking-mode"], capture_output=True, text=True, timeout=3
+        )
+        return (out.stdout or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _default_bind_host() -> str:
+    """Listen interface, chosen for the Windows-path keystone WITHOUT needlessly widening the
+    surface:
+      - non-WSL            -> 127.0.0.1 (loopback only).
+      - WSL mirrored mode  -> 127.0.0.1. Mirrored networking makes host<->WSL localhost
+        bidirectional, so the Windows host reaches the server on 127.0.0.1 with NO LAN exposure.
+      - WSL NAT mode       -> 0.0.0.0. NAT's localhostForwarding intermittently drops 127.0.0.1
+        (microsoft/WSL #9516); binding all interfaces lets the host reach the WSL VM IP. This is
+        the only case that widens the surface (behind the Windows firewall); the intended guard is
+        the loopback auth token (security M1, deferred).
+    SOLAR_BIND_HOST overrides explicitly. Prefer setting WSL to mirrored mode (the secure path)."""
+    if not _detect_wsl():
+        return "127.0.0.1"
+    return "127.0.0.1" if _wsl_networking_mode() == "mirrored" else "0.0.0.0"
+
+
+BIND_HOST = os.environ.get("SOLAR_BIND_HOST") or _default_bind_host()
 PORT_RANGE = range(8765, 8776)
 
 
@@ -426,7 +469,7 @@ def _orchestration_dashboard_payload(sprint_id: str = "") -> dict:
     }
 
 
-def _orchestration_projection_payload(sprint_id: str = "") -> dict:
+def _orchestration_projection_payload(sprint_id: str = "", mode: str = "full") -> dict:
     mod = _load_orchestration_routes_module()
     builder = getattr(mod, "build_projection_payload", None)
     if not callable(builder):
@@ -439,7 +482,7 @@ def _orchestration_projection_payload(sprint_id: str = "") -> dict:
             "degraded_sources": ["projection_builder:missing"],
             "data": {},
         }
-    data, degraded = builder(sprint_id or None)
+    data, degraded = builder(sprint_id or None, mode=mode)
     return {
         "ok": True,
         "schema_version": getattr(mod, "SCHEMA_VERSION", "solar.orchestration.v1"),
@@ -447,6 +490,81 @@ def _orchestration_projection_payload(sprint_id: str = "") -> dict:
         "degraded_sources": degraded or [],
         "data": data,
     }
+
+
+def _projection_signature(data: dict) -> dict:
+    """Compact, comparable signature of the projection bits that drive live UI — phase, per-node
+    status, gate/verdict state, active node, stall. The projection stream emits an SSE update only
+    when this signature changes, so a quiet sprint produces no traffic beyond heartbeats."""
+    if not isinstance(data, dict):
+        return {}
+    nodes: dict = {}
+    for bucket in ((data.get("nodes") or []), ((data.get("task_graph") or {}).get("nodes") or [])):
+        for n in bucket:
+            if isinstance(n, dict):
+                nid = n.get("id") or n.get("node_id")
+                if nid:
+                    nodes.setdefault(str(nid), str(n.get("status") or ""))
+    gates: dict = {}
+    for g in (data.get("human_gates") or []):
+        if isinstance(g, dict):
+            gid = g.get("id") or g.get("node_id") or g.get("type")
+            if gid:
+                gates[str(gid)] = str(g.get("status") or g.get("state") or "")
+    ev = data.get("evaluation") or {}
+    req = data.get("requirements") or {}
+    plan = data.get("plan") or {}
+    summ = data.get("summary") or {}
+    har = data.get("human_action_required") or {}
+    stall = (summ.get("stall") or {}) or ((data.get("dispatch") or {}).get("stall") or {})
+    return {
+        "phase": str(data.get("phase") or ""),
+        "status": str(data.get("status") or ""),
+        "nodes": nodes,
+        "gates": gates,
+        "eval_verdict": str(ev.get("verdict") or ev.get("requested_verdict") or ""),
+        "req_verdict": str(req.get("verdict") or ""),
+        "plan_status": str(plan.get("status") or ""),
+        "active_node": str(summ.get("active_node") or ""),
+        "stalled": bool(stall.get("is_stalled")),
+        "action": str(har.get("type") or ""),
+        "actions": sorted(
+            str(a.get("id") or a.get("action") or "")
+            for a in (data.get("available_actions") or [])
+            if isinstance(a, dict)
+        ),
+    }
+
+
+def _projection_delta(prev: dict, cur: dict) -> dict:
+    """Human-meaningful diff between two signatures — node status transitions plus phase/verdict/
+    gate/stall changes. Drives the 'changed' field the dashboard uses to know what moved."""
+    prev = prev if isinstance(prev, dict) else {}
+    cur = cur if isinstance(cur, dict) else {}
+    changed: dict = {}
+    pn = prev.get("nodes") or {}
+    cn = cur.get("nodes") or {}
+    node_changes = [
+        {"id": nid, "from": pn.get(nid), "to": st}
+        for nid, st in cn.items()
+        if pn.get(nid) != st
+    ]
+    if node_changes:
+        changed["nodes"] = node_changes
+    pg = prev.get("gates") or {}
+    cg = cur.get("gates") or {}
+    gate_changes = [
+        {"id": gid, "from": pg.get(gid), "to": st}
+        for gid, st in cg.items()
+        if pg.get(gid) != st
+    ]
+    if gate_changes:
+        changed["gates"] = gate_changes
+    for key in ("phase", "status", "eval_verdict", "req_verdict",
+                "plan_status", "active_node", "stalled", "action"):
+        if prev.get(key) != cur.get(key):
+            changed[key] = {"from": prev.get(key), "to": cur.get(key)}
+    return changed
 
 
 def _orchestration_verdict_payload(kind: str, sprint_id: str, data: dict) -> tuple[dict, int]:
@@ -804,10 +922,13 @@ def _write_user_config(cfg: dict) -> None:
 
 
 def _runtime_launch_supported() -> bool:
-    """The persisted runtime selector is only safe to enable when the launch seam
-    is present in this checkout. The proven Codex branch has both pieces; this
-    GUI branch may not."""
+    """The persisted runtime selector is only safe to enable when the FULL launch chain is
+    wired: solar-harness.sh reads the config 'runtime' as the SOLAR_PANE_RUNTIME default,
+    pane-launcher.sh consumes it, and the dispatcher honors it. The config-read is what makes
+    the stored toggle value actually drive the panes (else the toggle is a no-op), so it is
+    required here too — not just the launch seam."""
     try:
+        harness = (HARNESS_DIR / "solar-harness.sh").read_text(encoding="utf-8", errors="replace")
         launcher = (HARNESS_DIR / "pane-launcher.sh").read_text(encoding="utf-8", errors="replace")
         dispatcher = (HARNESS_DIR / "lib" / "graph_node_dispatcher.py").read_text(
             encoding="utf-8",
@@ -815,7 +936,133 @@ def _runtime_launch_supported() -> bool:
         )
     except Exception:
         return False
-    return "SOLAR_PANE_RUNTIME" in launcher and "def _pane_runtime(" in dispatcher
+    return (
+        'solar_config_json_get "runtime"' in harness
+        and "SOLAR_PANE_RUNTIME" in launcher
+        and "def _pane_runtime(" in dispatcher
+    )
+
+
+def _auth_status_payload() -> dict:
+    """Subscription-first auth state per provider via auth-helpers.sh (file-presence based;
+    NEVER returns token values). The dashboard's AuthGate consumes this to decide first-run
+    sign-in vs. proceed. Degrades to 'unknown' (never blocks) if the helper is absent/errors."""
+    helper = HARNESS_DIR / "auth-helpers.sh"
+    fallback = {"ok": True, "codex": "unknown", "claude": "unknown", "glm": "unknown", "source": "unavailable"}
+    if not helper.exists():
+        return fallback
+    try:
+        out = subprocess.run(
+            ["bash", str(helper), "status"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        data = json.loads((out.stdout or "").strip() or "{}")
+        if isinstance(data, dict) and data.get("ok"):
+            return data
+    except Exception:
+        pass
+    return fallback
+
+
+# In-flight device-code logins, keyed by provider. ThreadingHTTPServer serves each request on
+# its own thread, so the registry is lock-guarded. We NEVER store token values — only the process
+# handle and a logfile the CLI writes its (non-secret) device-code prompt to.
+_AUTH_LOGIN_LOCK = threading.Lock()
+_AUTH_LOGINS: dict = {}
+_AUTH_LOGIN_URL_RE = re.compile(r"https?://[^\s'\"]+")
+_AUTH_LOGIN_CODE_RE = re.compile(r"\b([A-Z0-9]{4,8}-[A-Z0-9]{4,8})\b")
+
+
+def _auth_run_dir() -> Path:
+    d = HARNESS_DIR / "run"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return d
+
+
+def _auth_reuse_host_creds(provider: str) -> dict:
+    """Zero-step path: on WSL, copy creds the user already has on the Windows side. Delegates to
+    auth-helpers.sh (which only copies when the runtime-home target is absent — never overwrites)."""
+    if provider not in ("codex", "claude"):
+        return {"ok": False, "error": "unknown provider"}
+    helper = HARNESS_DIR / "auth-helpers.sh"
+    if not helper.exists():
+        return {"ok": False, "error": "auth helper unavailable"}
+    try:
+        out = subprocess.run(
+            ["bash", str(helper), "reuse-host-creds", provider],
+            capture_output=True, text=True, timeout=20,
+        )
+        data = json.loads((out.stdout or "").strip() or "{}")
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {"ok": False, "error": "reuse failed", "provider": provider}
+
+
+def _auth_login_start(provider: str) -> dict:
+    """Start a headless device-code login (codex login --device-auth / claude setup-token) as a
+    detached background process whose stdout goes to a logfile. The dashboard polls
+    /auth/login/status to read the device URL+code and completion."""
+    if provider not in ("codex", "claude"):
+        return {"ok": False, "error": "unknown provider"}
+    helper = HARNESS_DIR / "auth-helpers.sh"
+    if not helper.exists():
+        return {"ok": False, "error": "auth helper unavailable"}
+    with _AUTH_LOGIN_LOCK:
+        existing = _AUTH_LOGINS.get(provider)
+        if existing and existing["proc"].poll() is None:
+            return {"ok": True, "provider": provider, "state": "pending", "note": "already running"}
+        log_path = _auth_run_dir() / f"auth-login-{provider}.log"
+        try:
+            log_fh = open(log_path, "wb")
+        except OSError as exc:
+            return {"ok": False, "error": f"log open failed: {exc}"}
+        try:
+            proc = subprocess.Popen(
+                ["bash", str(helper), "login", provider],
+                stdout=log_fh, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, start_new_session=True,
+            )
+        except Exception as exc:
+            log_fh.close()
+            return {"ok": False, "error": f"spawn failed: {exc}"}
+        _AUTH_LOGINS[provider] = {"proc": proc, "log": log_path, "fh": log_fh, "started": time.time()}
+    return {"ok": True, "provider": provider, "state": "started"}
+
+
+def _auth_login_status(provider: str) -> dict:
+    """Poll an in-flight login: surface the parsed device URL+code plus a raw tail (so the UI
+    shows the CLI's real prompt even if parsing misses the format), and detect completion by
+    re-checking actual auth state."""
+    if provider not in ("codex", "claude"):
+        return {"ok": False, "error": "unknown provider"}
+    with _AUTH_LOGIN_LOCK:
+        entry = _AUTH_LOGINS.get(provider)
+    if not entry:
+        return {"ok": True, "provider": provider, "state": "idle"}
+    rc = entry["proc"].poll()
+    raw = ""
+    try:
+        raw = entry["log"].read_text(errors="replace")
+    except OSError:
+        pass
+    url_m = _AUTH_LOGIN_URL_RE.search(raw)
+    code_m = _AUTH_LOGIN_CODE_RE.search(raw)
+    url = url_m.group(0) if url_m else None
+    code = code_m.group(1) if code_m else None
+    tail = "\n".join(raw.splitlines()[-12:]).strip()
+    if rc is None:
+        return {"ok": True, "provider": provider, "state": "pending", "url": url, "code": code, "tail": tail}
+    final = _auth_status_payload()
+    state = "done" if final.get(provider) == "ok" else "failed"
+    return {"ok": True, "provider": provider, "state": state, "exit_code": rc,
+            "url": url, "code": code, "tail": tail, "auth": final}
 
 
 def _model_id_to_alias(model_id: str) -> str:
@@ -971,7 +1218,64 @@ def _deliverable_content_type(path: Path) -> str:
         return "image/png"
     if suffix in (".jpg", ".jpeg"):
         return "image/jpeg"
+    # Code / config / data outputs: serve as readable text so the dashboard can preview them.
+    if suffix in (
+        ".py", ".sh", ".ts", ".tsx", ".js", ".jsx", ".css", ".yaml", ".yml",
+        ".toml", ".csv", ".diff", ".patch", ".ini", ".cfg", ".sql", ".rs",
+        ".go", ".java", ".rb", ".ipynb", ".xml", ".env",
+    ):
+        return "text/plain; charset=utf-8"
     return "application/octet-stream"
+
+
+def _find_cwd_value(obj) -> str:
+    """Recursively find a 'cwd' string in a nested JSON structure."""
+    if isinstance(obj, dict):
+        v = obj.get("cwd")
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        for vv in obj.values():
+            r = _find_cwd_value(vv)
+            if r:
+                return r
+    elif isinstance(obj, list):
+        for vv in obj:
+            r = _find_cwd_value(vv)
+            if r:
+                return r
+    return ""
+
+
+def _sprint_workdir(sid: str) -> Path | None:
+    """Discover the sprint's working directory (where the builder produced the REAL
+    output — code, reports). That output lives in the workdir, not under SPRINTS_DIR,
+    so without surfacing it the deliverables rail shows only process plumbing. The
+    `cwd` field is recorded in the sprint's raw_intent / eval artifacts."""
+    if not _valid_sprint_id(sid):
+        return None
+    cwd = ""
+    for name in (f"{sid}.raw_intent.json", f"{sid}.S1-eval.json", f"{sid}.S2-eval.json", f"{sid}.S3-eval.json"):
+        p = SPRINTS_DIR / name
+        if not p.exists():
+            continue
+        try:
+            cwd = _find_cwd_value(json.loads(p.read_text(encoding="utf-8", errors="replace")))
+        except (OSError, ValueError):
+            continue
+        if cwd:
+            break
+    if not cwd:
+        return None
+    try:
+        wd = Path(cwd).expanduser().resolve()
+    except OSError:
+        return None
+    # Sanity: a real task dir — not /, $HOME, or the harness/sprints tree itself.
+    if not wd.is_dir():
+        return None
+    if wd in (Path("/"), Path.home().resolve()) or _is_within(wd, HARNESS_DIR) or _is_within(SPRINTS_DIR, wd):
+        return None
+    return wd
 
 
 def _discover_sprint_deliverables(sid: str) -> list[dict]:
@@ -1019,11 +1323,79 @@ def _discover_sprint_deliverables(sid: str) -> list[dict]:
                 "kind": resolved.suffix.lower().lstrip(".") or "file",
                 "size": stat.st_size,
                 "mtime": stat.st_mtime,
+                "source": "process",
+                "primary": False,
                 "view_url": f"/sprints/{urllib.parse.quote(sid)}/deliverables?path={urllib.parse.quote(key)}",
             })
         except OSError:
             continue
-    rows.sort(key=lambda item: (-float(item.get("mtime") or 0), str(item.get("name") or "")))
+
+    # Surface the REAL produced output from the sprint's working directory. The
+    # builder writes code/reports to the workdir (cwd), not under SPRINTS_DIR, so
+    # without this the rail shows only process plumbing and never the deliverable.
+    workdir = _sprint_workdir(sid)
+    if workdir is not None:
+        # Only surface files PRODUCED during the sprint (mtime at/after start), so a
+        # workdir that is a populated repo doesn't dump pre-existing files as deliverables.
+        cutoff = 0.0
+        try:
+            import datetime as _dt
+            _sf = SPRINTS_DIR / f"{sid}.status.json"
+            _ca = str((json.loads(_sf.read_text(encoding="utf-8", errors="replace")) if _sf.exists() else {}).get("created_at") or "")
+            if _ca:
+                cutoff = _dt.datetime.fromisoformat(_ca.replace("Z", "+00:00")).timestamp() - 300
+        except Exception:
+            cutoff = 0.0
+        output_suffixes = allowed_suffixes | {
+            ".py", ".sh", ".ts", ".tsx", ".js", ".jsx", ".css", ".yaml", ".yml",
+            ".toml", ".csv", ".diff", ".patch", ".sql", ".rs", ".go", ".java", ".rb", ".ipynb",
+        }
+        skip_dirs = {
+            ".git", "__pycache__", ".pytest_cache", "node_modules", ".venv", "venv",
+            "dist", "build", ".vite", ".mypy_cache", ".ruff_cache", ".idea", ".cache", "site-packages",
+        }
+        wd_count = 0
+        try:
+            for path in sorted(workdir.rglob("*"), key=lambda p: str(p)):
+                if wd_count >= 80:
+                    break
+                try:
+                    parts = path.relative_to(workdir).parts
+                except ValueError:
+                    continue
+                if len(parts) > 3:
+                    continue
+                if any(part in skip_dirs or part.startswith(".") for part in parts):
+                    continue
+                if not path.is_file() or path.suffix.lower() not in output_suffixes:
+                    continue
+                try:
+                    resolved = path.resolve()
+                    key = _safe_rel(resolved, HARNESS_DIR)  # absolute string for workdir files
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    stat = resolved.stat()
+                except OSError:
+                    continue
+                if cutoff and stat.st_mtime < cutoff:
+                    continue
+                rows.append({
+                    "name": resolved.name,
+                    "rel_path": key,
+                    "kind": resolved.suffix.lower().lstrip(".") or "file",
+                    "size": stat.st_size,
+                    "mtime": stat.st_mtime,
+                    "source": "output",
+                    "primary": True,
+                    "view_url": f"/sprints/{urllib.parse.quote(sid)}/deliverables?path={urllib.parse.quote(key)}",
+                })
+                wd_count += 1
+        except OSError:
+            pass
+
+    # Primary (real output) first, then most-recent process artifacts.
+    rows.sort(key=lambda item: (0 if item.get("primary") else 1, -float(item.get("mtime") or 0), str(item.get("name") or "")))
     return rows
 
 
@@ -12729,6 +13101,54 @@ class StatusHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
 
+    def _send_projection_stream(self, sprint_id: str):
+        """Live projection over SSE: recompute the fast projection on a short cadence and push an
+        `event: projection` message only when its signature changes. The first message is a full
+        snapshot so the client syncs; subsequent messages carry the full fast `data` plus a
+        `changed` delta (node-status transitions, phase/verdict/gate/stall changes). A quiet sprint
+        emits nothing but heartbeats, so this replaces the old refetch-on-every-raw-event storm."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        prev_sig: dict | None = None
+        last_heartbeat = 0.0
+        try:
+            while True:
+                data: dict = {}
+                generated_at = ""
+                try:
+                    payload = _orchestration_projection_payload(sprint_id, mode="fast")
+                    data = payload.get("data") or {}
+                    generated_at = payload.get("generated_at") or ""
+                except Exception:
+                    data = {}
+                sig = _projection_signature(data)
+                if sig != prev_sig:
+                    first = prev_sig is None
+                    message = {
+                        "type": "snapshot" if first else "delta",
+                        "sprint_id": sprint_id,
+                        "generated_at": generated_at,
+                        "data": data,
+                        "changed": {} if first else _projection_delta(prev_sig or {}, sig),
+                    }
+                    body = json.dumps(message, ensure_ascii=False, default=str)
+                    self.wfile.write(f"event: projection\ndata: {body}\n\n".encode("utf-8"))
+                    prev_sig = sig
+                now = time.monotonic()
+                if now - last_heartbeat > 15:
+                    self.wfile.write(b": heartbeat\n\n")
+                    last_heartbeat = now
+                self.wfile.flush()
+                time.sleep(1.2)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+
     def _read_json_body(self) -> dict:
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -12738,6 +13158,32 @@ class StatusHandler(BaseHTTPRequestHandler):
             return {}
         raw = self.rfile.read(length).decode("utf-8", errors="replace")
         return json.loads(raw or "{}")
+
+    def _cors_preflight(self):
+        # CORS preflight: the dashboard / Electron shell may issue a cross-origin
+        # OPTIONS before a POST. BaseHTTPRequestHandler has no do_OPTIONS, so the
+        # old default was a 501 that broke preflight. Answer 204 + CORS headers.
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, HEAD, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Max-Age", "86400")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_OPTIONS(self):
+        self._cors_preflight()
+
+    def do_HEAD(self):
+        # Liveness probes (incl. the desktop shell) may use HEAD. Without a
+        # do_HEAD, BaseHTTPRequestHandler returned 501. Mirror a GET's headers
+        # with no body so probes see 200.
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -12774,6 +13220,10 @@ class StatusHandler(BaseHTTPRequestHandler):
                 self._send_json(_ai_influence_youtube_videos_deep_analysis(data))
             elif path == "/ai-influence/youtube-videos/regenerate-daily":
                 self._send_json(_ai_influence_youtube_videos_regenerate_daily(data))
+            elif path == "/auth/login":
+                self._send_json(_auth_login_start(str(data.get("provider", "")).strip()))
+            elif path == "/auth/reuse-host-creds":
+                self._send_json(_auth_reuse_host_creds(str(data.get("provider", "")).strip()))
             elif path == "/api/thunderomlx/start":
                 self._send_json(_start_thunderomlx_from_status())
             elif path == "/api/collector-schedules":
@@ -12810,6 +13260,20 @@ class StatusHandler(BaseHTTPRequestHandler):
         elif path == "/healthz":
             self._send_text("ok")
 
+        elif path == "/runtime-info":
+            # Lightweight runtime identity for the desktop shell / health checks.
+            try:
+                bound_port = self.server.server_address[1]
+            except Exception:
+                bound_port = None
+            self._send_json({
+                "ok": True,
+                "pid": os.getpid(),
+                "port": bound_port,
+                "bind_host": BIND_HOST,
+                "python": sys.executable,
+            })
+
         elif path == "/status":
             sprint_id = params.get("sprint_id", [""])[0]
             self._send_json(_status_payload(limit=50, sprint_id=sprint_id))
@@ -12838,8 +13302,9 @@ class StatusHandler(BaseHTTPRequestHandler):
 
         elif path == "/orchestration/projection":
             sprint_id = params.get("sprint_id", [""])[0]
+            mode = params.get("mode", [""])[0] or ("fast" if params.get("fast", ["0"])[0].lower() in ("1", "true", "yes") else "full")
             try:
-                self._send_json(_orchestration_projection_payload(sprint_id))
+                self._send_json(_orchestration_projection_payload(sprint_id, mode=mode))
             except Exception as exc:
                 self._send_json({"ok": False, "status": "error", "error": f"{type(exc).__name__}: {exc}"}, status=500)
 
@@ -12876,6 +13341,12 @@ class StatusHandler(BaseHTTPRequestHandler):
 
         elif path == "/settings":
             self._send_json(_settings_payload())
+
+        elif path == "/auth/status":
+            self._send_json(_auth_status_payload())
+
+        elif path == "/auth/login/status":
+            self._send_json(_auth_login_status(params.get("provider", [""])[0].strip()))
 
         elif path == "/events":
             sprint_id = params.get("sprint_id", [""])[0]
@@ -13071,10 +13542,18 @@ class StatusHandler(BaseHTTPRequestHandler):
 
         elif re.match(r"^/api/sprints/[^/]+/projection$", path):
             sid = urllib.parse.unquote(path.split("/api/sprints/", 1)[1].split("/projection", 1)[0])
-            try:
-                self._send_json(_orchestration_projection_payload(sid))
-            except Exception as exc:
-                self._send_json({"ok": False, "status": "error", "error": f"{type(exc).__name__}: {exc}"}, status=500)
+            wants_sse = (
+                params.get("stream", ["0"])[0].lower() in ("1", "true", "yes")
+                or "text/event-stream" in str(self.headers.get("Accept", ""))
+            )
+            if wants_sse:
+                self._send_projection_stream(sid)
+            else:
+                mode = params.get("mode", [""])[0] or ("fast" if params.get("fast", ["0"])[0].lower() in ("1", "true", "yes") else "full")
+                try:
+                    self._send_json(_orchestration_projection_payload(sid, mode=mode))
+                except Exception as exc:
+                    self._send_json({"ok": False, "status": "error", "error": f"{type(exc).__name__}: {exc}"}, status=500)
 
         elif path.startswith("/mermaid/assets/"):
             asset = _asset_path(path.removeprefix("/mermaid/assets/"))
@@ -13138,7 +13617,13 @@ def main():
     pid_dir = HARNESS_DIR / "run"
     pid_dir.mkdir(parents=True, exist_ok=True)
     (pid_dir / "status-server.port").write_text(str(port))
-    print(f"Solar Harness status server listening on http://{BIND_HOST}:{port}/", flush=True)
+    # Clients connect over loopback; 0.0.0.0 binds include it, so advertise 127.0.0.1 and note bind.
+    connect_host = "127.0.0.1" if BIND_HOST in ("0.0.0.0", "::") else BIND_HOST
+    bind_note = f" (bind {BIND_HOST})" if BIND_HOST != connect_host else ""
+    print(
+        f"Solar Harness status server listening on http://{connect_host}:{port}/{bind_note}",
+        flush=True,
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

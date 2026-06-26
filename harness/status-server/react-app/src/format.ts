@@ -31,10 +31,10 @@ export type AgentCardModel = {
 
 export const ROLE_META: Record<AgentRole, { title: string; subtitle: string }> =
   {
-    pm: { title: "PM 产品经理", subtitle: "Intake and scope" },
-    planner: { title: "Planner 规划者", subtitle: "DAG and routing" },
-    builder: { title: "Builder 主建设者", subtitle: "Implementation" },
-    evaluator: { title: "Evaluator 审判官", subtitle: "Review and gates" },
+    pm: { title: "PM", subtitle: "Intake and scope" },
+    planner: { title: "Planner", subtitle: "Plan and routing" },
+    builder: { title: "Builder", subtitle: "Implementation" },
+    evaluator: { title: "Evaluator", subtitle: "Review and gates" },
   };
 
 export function asString(value: unknown, fallback = ""): string {
@@ -68,8 +68,23 @@ export function normalizeRole(value: unknown): AgentRole | "" {
   return "";
 }
 
+// Events arrive wrapped in a generic "log_message" envelope. The real event is in
+// payload.legacy_event — sometimes a kind STRING ("plan_verdict"), sometimes the full nested
+// event OBJECT ({event, actor, payload, …}). Flatten both so the stream shows the real story.
+export function unwrapEvent(event: EventRecord): EventRecord {
+  const le = payload(event).legacy_event;
+  if (le && typeof le === "object" && !Array.isArray(le)) {
+    return { ...event, ...(le as Partial<EventRecord>), type: "" };
+  }
+  if (typeof le === "string" && le) {
+    return { ...event, type: "", event: le };
+  }
+  return event;
+}
+
 export function eventType(event: EventRecord): string {
-  return asString(event.type || event.event, "event");
+  const e = unwrapEvent(event);
+  return asString(e.type || e.event, "event");
 }
 
 export function eventTimestamp(event: EventRecord): string {
@@ -164,9 +179,29 @@ export function shortText(value: unknown, max = 92): string {
 }
 
 export function payload(event: EventRecord): JsonRecord {
-  return event.payload && typeof event.payload === "object"
-    ? event.payload
-    : {};
+  const p: unknown = event.payload;
+  if (p && typeof p === "object") return p as JsonRecord;
+  // The harness sometimes emits payload as a stringified dict — JSON, or a Python
+  // repr ({'k': 'v', 'n': None, 'b': True}). Parse tolerantly so the detail isn't lost.
+  if (typeof p === "string" && p.trim().startsWith("{")) {
+    const s = p.trim();
+    try {
+      return JSON.parse(s) as JsonRecord;
+    } catch {
+      try {
+        const j = s
+          .replace(/'/g, '"')
+          .replace(/\bNone\b/g, "null")
+          .replace(/\bTrue\b/g, "true")
+          .replace(/\bFalse\b/g, "false");
+        const parsed = JSON.parse(j);
+        if (parsed && typeof parsed === "object") return parsed as JsonRecord;
+      } catch {
+        /* leave empty — fall through */
+      }
+    }
+  }
+  return {};
 }
 
 export function eventActor(event: EventRecord): string {
@@ -190,6 +225,33 @@ export function humanEvent(event: EventRecord): {
   const target = asString(body.target_pane || body.pane || event.target_pane);
   const model = asString(body.model || event.model);
   const message = asString(event.message || body.message);
+  const status = asString(body.status);
+  const stage = asString(body.stage);
+  const role = asString(body.role);
+  const intent = asString(body.intent);
+  const handoffTo = asString(body.handoff_to || body.target_role);
+  const toState = asString(body.to);
+  const severity = asString((event as { severity?: unknown }).severity);
+  // A compact, human detail pulled from whatever the payload carries, so events read
+  // like "stage prd · reason: invalid prd" instead of the generic fallback line.
+  const summary =
+    [
+      stage && `stage ${stage}`,
+      phase && `phase ${phase}`,
+      role && `role ${role}`,
+      intent && intent.replace(/_/g, " "),
+      status && status.replace(/_/g, " "),
+      node && `node ${node}`,
+      target && `pane ${target}`,
+      handoffTo && `→ ${handoffTo}`,
+      reason && `reason: ${reason.replace(/_/g, " ")}`,
+    ]
+      .filter(Boolean)
+      .join(" · ") || message;
+  // Title-case the event kind: dispatch_failed -> "Dispatch failed".
+  const humanTitle =
+    type.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase()) || "Event";
+  const sevTone = severity === "warn" || severity === "error" ? "blocked" : "";
 
   if (type.includes("phase")) {
     return {
@@ -199,14 +261,14 @@ export function humanEvent(event: EventRecord): {
     };
   }
   if (type.includes("dispatch")) {
-    const action = decision ? decision.replace(/_/g, " ") : "dispatch decision";
     return {
-      title: `Dispatch ${action}`,
-      detail:
-        [node && `node ${node}`, target && `pane ${target}`]
-          .filter(Boolean)
-          .join(" -> ") || message,
-      tone: decision.includes("no_matching") ? "blocked" : "working",
+      title: humanTitle,
+      detail: summary,
+      tone:
+        sevTone ||
+        (decision.includes("no_matching") || type.includes("fail")
+          ? "blocked"
+          : "working"),
     };
   }
   if (
@@ -217,6 +279,7 @@ export function humanEvent(event: EventRecord): {
     return {
       title: "Gate blocked",
       detail:
+        summary ||
         reason ||
         message ||
         [node && `node ${node}`, phase && `phase ${phase}`]
@@ -252,19 +315,34 @@ export function humanEvent(event: EventRecord): {
     type.includes("passed")
   ) {
     return {
-      title: type.replace(/_/g, " "),
+      title: humanTitle,
       detail:
-        message ||
+        summary ||
         [node && `node ${node}`, phase && `phase ${phase}`]
           .filter(Boolean)
           .join(" · "),
       tone: "complete",
     };
   }
+  if (type.includes("state_chang") || type.includes("state_transition")) {
+    // `to` looks like "<sid>:<status>:<phase>:<role>:<hash>" — surface the move.
+    const parts = toState.split(":");
+    const toStatus = parts[1] || status;
+    const toPhase = parts[2] || phase;
+    const moved = [toStatus, toPhase]
+      .filter((x) => x && x !== "_" && x !== "None")
+      .join(" / ");
+    return {
+      title: type.includes("transition") ? "State transition" : "State changed",
+      detail: moved ? `→ ${moved}` : summary,
+      tone: statusTone(toStatus || status),
+    };
+  }
   return {
-    title: type.replace(/_/g, " "),
-    detail: message || "The harness recorded this process event.",
-    tone: statusTone(asString(event.status || body.status)),
+    title: humanTitle,
+    detail: summary || message || "",
+    tone:
+      sevTone || statusTone(asString(event.status || body.status || status)),
   };
 }
 
