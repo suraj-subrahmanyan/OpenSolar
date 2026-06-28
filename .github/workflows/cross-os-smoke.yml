@@ -1,0 +1,62 @@
+name: cross-os-smoke
+# On-demand cross-OS smoke of the parts CI does NOT yet cover per-native-OS:
+#   install -> status-server boots -> POST /intake creates a sprint -> GET /status serves the dashboard payload.
+# DETERMINISTIC, NO LIVE LLM: hosted runners have no Claude/Codex auth, so the planner/builder/eval stages are
+# NOT exercised -- this gates install + dashboard API + intake *plumbing* on each native OS, never a false green.
+# Existing coverage (do not duplicate): desktop-build.yml (3-OS artifact build + ubuntu dashboard chromium render),
+# windows-wsl2-install.yml (WSL2 host->server reachability), install-matrix.yml + solar-ci.yml (ubuntu gates).
+# Public repo => standard runners are FREE on all OSes; concurrency caps (Free: 20 non-macOS / 5 macOS) just queue.
+on:
+  workflow_dispatch:
+    inputs:
+      intake_task:
+        description: "intake task text to POST"
+        default: "Write a one-line hello-world note."
+jobs:
+  unix-smoke:
+    strategy: { fail-fast: false, matrix: { os: [ubuntu-latest, macos-latest] } }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      # NOTE(owner): these install flags are copied verbatim from smoke-install-matrix.sh -> known-good.
+      - name: Install Solar (kernel+harness, fake keys, no LLM CLI)
+        run: HOME="$RUNNER_TEMP/h" bash install.sh --yes --components kernel,harness --fake-keys --skip-llm-cli
+      - name: Boot status-server + smoke /status and /intake plumbing
+        shell: bash
+        run: |
+          set -euo pipefail
+          export HOME="$RUNNER_TEMP/h"; H="$HOME/.solar/harness"
+          ( cd "$H" && setsid nohup python3 lib/symphony/status-server.py >/tmp/srv.log 2>&1 & ) || nohup python3 "$H/lib/symphony/status-server.py" >/tmp/srv.log 2>&1 &
+          for i in $(seq 1 60); do [ -s "$H/run/status-server.port" ] && break; sleep 0.5; done
+          PORT="$(cat "$H/run/status-server.port")"; echo "port=$PORT"
+          curl -fsS "http://127.0.0.1:$PORT/status" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("STATUS_OK current_sprint_present=", "current_sprint" in d)'
+          RESP="$(curl -fsS -m 200 -X POST "http://127.0.0.1:$PORT/intake" -H 'Content-Type: application/json' \
+                  -d "$(python3 -c 'import json,sys;print(json.dumps({"task": sys.argv[1]}))' "${{ inputs.intake_task }}")")"
+          echo "$RESP" | python3 -c 'import sys,json,os;d=json.load(sys.stdin);assert d.get("ok"),d;sid=d["sprint_id"];p=os.path.expanduser("~/.solar/harness/sprints/"+sid+".status.json");assert os.path.exists(p),"no status.json: "+p;print("INTAKE_OK",sid)'
+          echo "✅ SMOKE GREEN on ${{ matrix.os }} (install + status-server + /intake plumbing). Live LLM plan/build NOT run (no auth on hosted runner)."
+  windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      # NOTE(owner): verify the install.ps1 parameter names against the real installer; adjust as needed.
+      - name: Install Solar (PowerShell installer)
+        shell: pwsh
+        run: ./install.ps1 -Yes -Components kernel,harness -FakeKeys -SkipLlmCli
+      - name: Boot status-server + /status smoke
+        shell: pwsh
+        run: |
+          $H = "$env:USERPROFILE\.solar\harness"
+          Start-Process -NoNewWindow -FilePath python -ArgumentList "$H\lib\symphony\status-server.py"
+          for ($i=0; $i -lt 60; $i++) { if (Test-Path "$H\run\status-server.port") { break }; Start-Sleep -Milliseconds 500 }
+          $port = (Get-Content "$H\run\status-server.port").Trim(); Write-Host "port=$port"
+          $r = Invoke-RestMethod "http://127.0.0.1:$port/status"
+          if (-not $r.PSObject.Properties.Name -contains 'current_sprint') { throw "no current_sprint in /status" }
+          Write-Host "✅ STATUS_OK on windows-latest (install + status-server boot). Add the /intake POST smoke next iteration."
