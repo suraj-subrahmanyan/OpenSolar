@@ -15,8 +15,15 @@ if [ ! -s "$H/run/status-server.port" ]; then
   exit 1
 fi
 PORT="$(cat "$H/run/status-server.port")"; echo "port=$PORT"
-curl -fsS "http://127.0.0.1:$PORT/status" >/dev/null && echo "STATUS_OK"
-RESP="$(curl -fsS -m 200 -X POST "http://127.0.0.1:$PORT/intake" -H 'Content-Type: application/json' \
-        -d "$(python3 -c 'import json,sys;print(json.dumps({"task":sys.argv[1]}))' "$TASK")")"
-printf '%s' "$RESP" | python3 -c 'import sys,json,os;d=json.load(sys.stdin);assert d.get("ok"),d;sid=d["sprint_id"];p=os.path.join(os.path.expanduser("~/.solar/harness/sprints"),sid+".status.json");assert os.path.exists(p),"no "+p;print("INTAKE_OK",sid)'
+B="http://127.0.0.1:$PORT"
+# Each step must hard-fail (set -e is off here so the boot loop can tolerate a missing port) — otherwise a
+# 403/empty response falls through to "SMOKE GREEN" (a false pass; that is exactly what hid the WSL 403).
+curl -fsS "$B/status" >/dev/null \
+  || { echo "::error::GET /status failed (port $PORT)"; cat /tmp/solar-srv.log 2>/dev/null; exit 1; }
+echo "STATUS_OK"
+RESP="$(curl -fsS -m 200 -X POST "$B/intake" -H 'Content-Type: application/json' \
+        -d "$(python3 -c 'import json,sys;print(json.dumps({"task":sys.argv[1]}))' "$TASK")")" \
+  || { echo "::error::POST /intake failed (port $PORT)"; cat /tmp/solar-srv.log 2>/dev/null; exit 1; }
+printf '%s' "$RESP" | python3 -c 'import sys,json,os;d=json.load(sys.stdin);assert d.get("ok"),d;sid=d["sprint_id"];p=os.path.join(os.path.expanduser("~/.solar/harness/sprints"),sid+".status.json");assert os.path.exists(p),"no "+p;print("INTAKE_OK",sid)' \
+  || { echo "::error::/intake response invalid: $RESP"; exit 1; }
 echo "SMOKE GREEN: install + status-server + /intake plumbing (live LLM NOT run)."

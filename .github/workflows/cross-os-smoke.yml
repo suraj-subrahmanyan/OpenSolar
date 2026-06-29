@@ -58,4 +58,8 @@ jobs:
         shell: pwsh
         run: |
           # Clone INSIDE WSL so git uses Unix line endings (the Windows checkout converts LF->CRLF, breaking bash).
-          wsl -d Ubuntu-24.04 -- bash -lc 'set -e; git clone --depth 1 --branch ci/cross-os-smoke https://github.com/suraj-subrahmanyan/OpenSolar.git "$HOME/solar"; cd "$HOME/solar"; bash scripts/ci-os-fullcheck.sh'
+          # SOLAR_BIND_HOST=127.0.0.1: by default the server binds 0.0.0.0 under WSL (NAT localhostForwarding
+          # workaround). On the GHA windows-WSL runner that 0.0.0.0 path goes through a localhost relay that
+          # injects 403s (Solar itself never returns 403). Pinning loopback is the override the code documents
+          # as the secure path and makes WSL bind exactly like the green ubuntu/macos jobs.
+          wsl -d Ubuntu-24.04 -- bash -lc 'set -e; export SOLAR_BIND_HOST=127.0.0.1; git clone --depth 1 --branch ci/cross-os-smoke https://github.com/suraj-subrahmanyan/OpenSolar.git "$HOME/solar"; cd "$HOME/solar"; bash scripts/ci-os-fullcheck.sh'
