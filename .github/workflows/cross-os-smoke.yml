@@ -1,7 +1,9 @@
 name: cross-os-smoke
-# On-demand + on-push cross-OS smoke: install -> status-server boots -> GET /status -> POST /intake creates
-# a sprint RECORD (file plumbing). DETERMINISTIC, NO LIVE LLM (no auth on hosted runners). macOS+Linux native
-# (install.sh); Windows is WSL2 (install.ps1 is a WSL bootstrapper). Public repo => runners free on all OSes.
+# Autonomous cross-OS smoke: install -> status-server boots -> GET /status -> POST /intake creates a sprint
+# RECORD (file plumbing). DETERMINISTIC, NO LIVE LLM (no Claude/Codex auth on hosted runners) -> /intake only
+# asserts status.json was written, never a plan/deliverable. macOS+Linux native (install.sh); Windows is WSL2
+# (install.ps1 is a WSL bootstrapper). Runs on push to this branch, on a nightly cron, and on demand.
+# Public repo => standard runners are FREE on all OSes; matrix fail-fast=false so every OS reports.
 on:
   workflow_dispatch:
     inputs:
@@ -10,6 +12,8 @@ on:
         default: "Write a one-line hello-world note."
   push:
     branches: [ci/cross-os-smoke]
+  schedule:
+    - cron: "17 6 * * *"   # nightly autonomous run (UTC)
 permissions:
   contents: read
 jobs:
@@ -31,18 +35,14 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v5
       - name: Provision WSL2 Ubuntu
         uses: Vampire/setup-wsl@v3
         with:
           distribution: Ubuntu-24.04
           set-as-default: "true"
-          additional-packages: python3 curl
-      - name: Copy checkout into WSL, install, run the smoke
+          additional-packages: python3 curl git ca-certificates
+      - name: Clone in WSL (LF, no Windows CRLF) + install + smoke
         shell: pwsh
         run: |
-          # forward-slash the Windows path so backslashes survive the pwsh -> wsl -> bash boundary
-          $ws = ($env:GITHUB_WORKSPACE -replace '\\','/')
-          $wslPath = (wsl -d Ubuntu-24.04 -- wslpath -a "$ws").Trim()
-          Write-Host "workspace=$ws  wslPath=$wslPath"
-          wsl -d Ubuntu-24.04 -- bash -lc "set -e; cp -r '$wslPath' ~/solar; cd ~/solar; ./install.sh --yes --components kernel,harness --fake-keys --skip-llm-cli; bash scripts/ci-os-smoke.sh 'Write a one-line hello-world note.'"
+          # Clone INSIDE WSL so git uses Unix line endings (the Windows checkout converts LF->CRLF and breaks bash).
+          wsl -d Ubuntu-24.04 -- bash -lc 'set -e; git clone --depth 1 --branch ci/cross-os-smoke https://github.com/suraj-subrahmanyan/OpenSolar.git "$HOME/solar"; cd "$HOME/solar"; ./install.sh --yes --components kernel,harness --fake-keys --skip-llm-cli; bash scripts/ci-os-smoke.sh "Write a one-line hello-world note."'
