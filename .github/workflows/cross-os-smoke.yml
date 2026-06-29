@@ -1,9 +1,11 @@
 name: cross-os-smoke
-# Autonomous cross-OS smoke: install -> status-server boots -> GET /status -> POST /intake creates a sprint
-# RECORD (file plumbing). DETERMINISTIC, NO LIVE LLM (no Claude/Codex auth on hosted runners) -> /intake only
-# asserts status.json was written, never a plan/deliverable. macOS+Linux native (install.sh); Windows is WSL2
-# (install.ps1 is a WSL bootstrapper). Runs on push to this branch, on a nightly cron, and on demand.
-# Public repo => standard runners are FREE on all OSes; matrix fail-fast=false so every OS reports.
+# Autonomous cross-OS proof that a BRAND-NEW MACHINE can install Solar and run the real commands.
+# Historically the functional check-suite ran ubuntu-only, so "CI green" hid macOS / Windows-WSL breakage.
+# This runs the full new-machine command battery (scripts/ci-os-fullcheck.sh: solar harness, solar status,
+# install->doctor->status-server HTTP contract->uninstall, offline solar update, dashboard /intake) on every
+# OS. DETERMINISTIC, NO LIVE LLM (no Claude/Codex auth on hosted runners) -> asserts the command + HTTP
+# plumbing up to the auth boundary, never a live plan/deliverable. macOS+Linux native; Windows is WSL2.
+# Public repo => standard runners FREE on all OSes; matrix fail-fast=false so EVERY OS reports its own breakage.
 on:
   workflow_dispatch:
     inputs:
@@ -20,20 +22,18 @@ jobs:
   unix-smoke:
     strategy: { fail-fast: false, matrix: { os: [ubuntu-latest, macos-latest] } }
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - name: Install Solar (native unix; flags per smoke-install-matrix)
-        run: bash install.sh --yes --components kernel,harness --fake-keys --skip-llm-cli
-      - name: Cross-OS smoke (status-server + /status + /intake)
+      - name: New-machine command battery (native unix)
         env:
           INTAKE_TASK: ${{ github.event.inputs.intake_task || 'Write a one-line hello-world note.' }}
-        run: bash scripts/ci-os-smoke.sh "$INTAKE_TASK"
+        run: bash scripts/ci-os-fullcheck.sh
   windows-wsl2-smoke:
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - name: Provision WSL2 Ubuntu
         uses: Vampire/setup-wsl@v3
@@ -41,8 +41,8 @@ jobs:
           distribution: Ubuntu-24.04
           set-as-default: "true"
           additional-packages: python3 curl git ca-certificates
-      - name: Clone in WSL (LF, no Windows CRLF) + install + smoke
+      - name: Clone in WSL (LF, no Windows CRLF) + run the real command battery
         shell: pwsh
         run: |
-          # Clone INSIDE WSL so git uses Unix line endings (the Windows checkout converts LF->CRLF and breaks bash).
-          wsl -d Ubuntu-24.04 -- bash -lc 'set -e; git clone --depth 1 --branch ci/cross-os-smoke https://github.com/suraj-subrahmanyan/OpenSolar.git "$HOME/solar"; cd "$HOME/solar"; ./install.sh --yes --components kernel,harness --fake-keys --skip-llm-cli; bash scripts/ci-os-smoke.sh "Write a one-line hello-world note."'
+          # Clone INSIDE WSL so git uses Unix line endings (the Windows checkout converts LF->CRLF, breaking bash).
+          wsl -d Ubuntu-24.04 -- bash -lc 'set -e; git clone --depth 1 --branch ci/cross-os-smoke https://github.com/suraj-subrahmanyan/OpenSolar.git "$HOME/solar"; cd "$HOME/solar"; bash scripts/ci-os-fullcheck.sh'
