@@ -1,9 +1,7 @@
 name: cross-os-smoke
-# On-demand + on-push cross-OS smoke of the gap not covered elsewhere: install -> status-server boots ->
-# GET /status -> POST /intake creates a sprint (FILE plumbing). DETERMINISTIC, NO LIVE LLM (no Claude/Codex
-# auth on hosted runners) -> the /intake assertion only checks the sprint record (status.json) was written,
-# never a plan/deliverable. macOS + Linux native (install.sh); Windows is WSL2 (install.ps1 is a WSL
-# bootstrapper), reusing the proven setup from windows-wsl2-install.yml. Public repo => runners free on all OSes.
+# On-demand + on-push cross-OS smoke: install -> status-server boots -> GET /status -> POST /intake creates
+# a sprint RECORD (file plumbing). DETERMINISTIC, NO LIVE LLM (no auth on hosted runners). macOS+Linux native
+# (install.sh); Windows is WSL2 (install.ps1 is a WSL bootstrapper). Public repo => runners free on all OSes.
 on:
   workflow_dispatch:
     inputs:
@@ -25,39 +23,26 @@ jobs:
         with: { python-version: "3.12" }
       - name: Install Solar (native unix; flags per smoke-install-matrix)
         run: bash install.sh --yes --components kernel,harness --fake-keys --skip-llm-cli
-      - name: status-server boots + /status + /intake plumbing
-        shell: bash
+      - name: Cross-OS smoke (status-server + /status + /intake)
         env:
-          # pass the input via env (NOT inline ${{ }} in the script) -> no quote-nesting, no injection
           INTAKE_TASK: ${{ github.event.inputs.intake_task || 'Write a one-line hello-world note.' }}
-        run: |
-          set -euo pipefail
-          H="$HOME/.solar/harness"
-          ( cd "$H" && setsid nohup python3 lib/symphony/status-server.py >/tmp/srv.log 2>&1 & ) || nohup python3 "$H/lib/symphony/status-server.py" >/tmp/srv.log 2>&1 &
-          for i in $(seq 1 60); do [ -s "$H/run/status-server.port" ] && break; sleep 0.5; done
-          PORT="$(cat "$H/run/status-server.port")"; echo "port=$PORT"
-          curl -fsS "http://127.0.0.1:$PORT/status" >/dev/null && echo "STATUS_OK"
-          RESP="$(curl -fsS -m 200 -X POST "http://127.0.0.1:$PORT/intake" -H 'Content-Type: application/json' -d "$(python3 -c 'import json,sys;print(json.dumps({"task":sys.argv[1]}))' "${INTAKE_TASK:-Write a one-line hello-world note.}")")"
-          echo "$RESP" | python3 -c 'import sys,json,os;d=json.load(sys.stdin);assert d.get("ok"),d;sid=d["sprint_id"];p=os.path.expanduser("~/.solar/harness/sprints/"+sid+".status.json");assert os.path.exists(p),p;print("INTAKE_OK",sid)'
-          echo "GREEN on $RUNNER_OS: install + status-server + /intake plumbing. Live LLM plan/build NOT run (no auth on runner)."
+        run: bash scripts/ci-os-smoke.sh "$INTAKE_TASK"
   windows-wsl2-smoke:
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
-      - name: Provision WSL2 Ubuntu (proven setup from windows-wsl2-install.yml)
+      - name: Provision WSL2 Ubuntu
         uses: Vampire/setup-wsl@v3
         with:
           distribution: Ubuntu-24.04
-          wsl-version: "2"
           set-as-default: "true"
           additional-packages: python3 curl
-      - name: Install Solar in WSL + boot status-server + /status + /intake smoke
+      - name: Copy checkout into WSL, install, run the smoke
         shell: pwsh
         run: |
-          $wslPath = (wsl -d Ubuntu-24.04 -- wslpath "$env:GITHUB_WORKSPACE").Trim()
-          Write-Host "WSL path: $wslPath"
-          wsl -d Ubuntu-24.04 -- bash -lc "cp -r '$wslPath' ~/solar && cd ~/solar && ./install.sh --yes --components kernel,harness --fake-keys --skip-llm-cli"
-          wsl -d Ubuntu-24.04 -- bash -lc "cd ~/.solar/harness && setsid nohup python3 lib/symphony/status-server.py >/tmp/srv.log 2>&1 & for i in \$(seq 1 60); do [ -s run/status-server.port ] && break; sleep 0.5; done; echo port=\$(cat run/status-server.port)"
-          wsl -d Ubuntu-24.04 -- bash -lc 'set -e; P=$(cat ~/.solar/harness/run/status-server.port); curl -fsS "http://127.0.0.1:$P/status" >/dev/null && echo STATUS_OK; R=$(curl -fsS -m 200 -X POST "http://127.0.0.1:$P/intake" -H "Content-Type: application/json" -d "{\"task\":\"Write a one-line hello-world note.\"}"); printf "%s" "$R" | python3 -c "import sys,json,os;d=json.load(sys.stdin);assert d.get(\"ok\"),d;sid=d[\"sprint_id\"];assert os.path.exists(os.path.expanduser(\"~/.solar/harness/sprints/\"+sid+\".status.json\"));print(\"INTAKE_OK\",sid)"'
-          Write-Host "GREEN windows-wsl2: install + status-server + /intake plumbing in WSL. Live LLM NOT run."
+          # forward-slash the Windows path so backslashes survive the pwsh -> wsl -> bash boundary
+          $ws = ($env:GITHUB_WORKSPACE -replace '\\','/')
+          $wslPath = (wsl -d Ubuntu-24.04 -- wslpath -a "$ws").Trim()
+          Write-Host "workspace=$ws  wslPath=$wslPath"
+          wsl -d Ubuntu-24.04 -- bash -lc "set -e; cp -r '$wslPath' ~/solar; cd ~/solar; ./install.sh --yes --components kernel,harness --fake-keys --skip-llm-cli; bash scripts/ci-os-smoke.sh 'Write a one-line hello-world note.'"
