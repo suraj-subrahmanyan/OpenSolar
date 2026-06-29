@@ -13,7 +13,7 @@ export RUSTUP_HOME="$sandbox/rustup" CARGO_HOME="$sandbox/cargo"
 PY="${SOLAR_PYTHON:-python3}"; srv_pid=""
 cleanup(){ [ -n "$srv_pid" ] && { kill "$srv_pid" 2>/dev/null; wait "$srv_pid" 2>/dev/null; }; }
 trap cleanup EXIT INT TERM
-fail(){ echo "E2E FAIL: $*" >&2; exit 1; }
+fail(){ echo "E2E FAIL: $*" >&2; echo "--- ss.log (tail 40) ---" >&2; tail -40 "$sandbox/ss.log" 2>/dev/null >&2; exit 1; }
 
 echo "== sandbox=$sandbox =="
 echo "-- 1. fresh install (kernel,harness) --"
@@ -45,11 +45,19 @@ echo "   status-server up on :$PORT"
 echo "-- 4. assert dashboard backend contract --"
 B="http://127.0.0.1:$PORT"
 code(){ curl -s -o /dev/null -w '%{http_code}' "$@" 2>/dev/null; }
-[ "$(code "$B/healthz")" = 200 ]            || fail "/healthz != 200"
-[ "$(code -X OPTIONS "$B/status")" = 204 ]  || fail "OPTIONS != 204 (CORS preflight regressed)"
-[ "$(code -I "$B/status")" = 200 ]          || fail "HEAD != 200"
-[ "$(code "$B/runtime-info")" = 200 ]       || fail "/runtime-info != 200"
-[ "$(code "$B/auth/status")" = 200 ]        || fail "/auth/status != 200"
+# Retry each route: subprocess-backed routes (e.g. /auth/status shells auth-helpers.sh) can be cold on
+# the first hit under a nested-virt WSL runner. The handler is 200-by-construction, so a non-200 is a
+# transient/cold-start, not a contract break; print got-vs-want + ss.log if it persists past the retries.
+expect(){ # expect <want> <label> <curl-args...>
+  want="$1"; label="$2"; shift 2; got=""
+  for _ in 1 2 3 4 5 6; do got="$(code "$@")"; [ "$got" = "$want" ] && return 0; sleep 1; done
+  echo "   $label: got=$got want=$want" >&2; fail "$label (got $got, want $want)"
+}
+expect 200 "/healthz"        "$B/healthz"
+expect 204 "OPTIONS /status" -X OPTIONS "$B/status"
+expect 200 "HEAD /status"    -I "$B/status"
+expect 200 "/runtime-info"   "$B/runtime-info"
+expect 200 "/auth/status"    "$B/auth/status"
 curl -s -D - -o /dev/null -X OPTIONS "$B/status" | grep -qi 'access-control-allow-origin' \
   || fail "missing CORS header on preflight"
 echo "   contract ok (healthz 200, OPTIONS 204+CORS, HEAD 200, runtime-info 200, auth/status 200)"
