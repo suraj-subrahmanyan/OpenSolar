@@ -47,12 +47,15 @@ jobs:
         with:
           distribution: Ubuntu-24.04
           set-as-default: "true"
-          # jq + python3-pip are absent in the minimal WSL image (the hosted ubuntu/macos
-          # runners pre-install them); the harness needs jq and install.sh needs a modern pip.
-          additional-packages: python3 python3-pip curl git jq ca-certificates
-      - name: Clone in WSL (LF, no Windows CRLF) + provision deps + run the real command battery
+          # The minimal WSL image lacks jq + python3-pip (hosted ubuntu/macos runners pre-install them).
+          # yaml/jsonschema/rich come with the base python3 via apt; only pydantic is missing, so pull it
+          # from apt (python3-pydantic) — a system-site pip install of it conflicts with the apt-managed
+          # typing-extensions ("Cannot uninstall ... installed by debian"). The per-check installs use
+          # pip --user (no conflict) via the hardened py-deps.sh; check-update (deps-light) needs only the
+          # ambient pydantic that apt provides.
+          additional-packages: python3 python3-pip python3-pydantic curl git jq ca-certificates
+      - name: Clone in WSL (LF, no Windows CRLF) + run the real command battery
         shell: pwsh
         run: |
           # Clone INSIDE WSL so git uses Unix line endings (the Windows checkout converts LF->CRLF, breaking bash).
-          # --break-system-packages: Ubuntu 24.04 python3 is PEP-668 externally-managed; pip 24 (python3-pip) honors it.
-          wsl -d Ubuntu-24.04 -- bash -lc 'set -e; git clone --depth 1 --branch ci/cross-os-smoke https://github.com/suraj-subrahmanyan/OpenSolar.git "$HOME/solar"; cd "$HOME/solar"; python3 -m pip install --break-system-packages -r requirements/harness.txt; bash scripts/ci-os-fullcheck.sh'
+          wsl -d Ubuntu-24.04 -- bash -lc 'set -e; git clone --depth 1 --branch ci/cross-os-smoke https://github.com/suraj-subrahmanyan/OpenSolar.git "$HOME/solar"; cd "$HOME/solar"; bash scripts/ci-os-fullcheck.sh'
