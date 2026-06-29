@@ -33,7 +33,8 @@ echo "-- 3. start INSTALLED harness status-server --"
 HOME="$home_dir" HARNESS_DIR="$home_dir/.solar/harness" "$PY" "$SS" >"$sandbox/ss.log" 2>&1 &
 srv_pid="$!"
 PORT=""
-for _ in $(seq 1 40); do
+# 80 * 0.5s = 40s: a cold macOS runner's first python+server boot exceeds the old 20s.
+for _ in $(seq 1 80); do
   PORT=$(cat "$home_dir/.solar/harness/run/status-server.port" 2>/dev/null || true)
   [ -n "$PORT" ] && curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 && break
   PORT=""; sleep 0.5
