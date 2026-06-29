@@ -1,10 +1,9 @@
 name: cross-os-smoke
 # On-demand + on-push cross-OS smoke of the gap not covered elsewhere: install -> status-server boots ->
-# GET /status -> POST /intake creates a sprint (FILE plumbing). DETERMINISTIC, NO LIVE LLM: hosted runners
-# have no Claude/Codex auth, so the planner/builder/eval stages are NOT exercised -- the /intake assertion
-# only checks the sprint record (status.json) was written, never a plan/deliverable. macOS + Linux are
-# native (install.sh); Windows is WSL2 (install.ps1 is a WSL bootstrapper -> Windows Solar = Solar in WSL2),
-# reusing the proven setup from windows-wsl2-install.yml. Public repo => standard runners are FREE on all OSes.
+# GET /status -> POST /intake creates a sprint (FILE plumbing). DETERMINISTIC, NO LIVE LLM (no Claude/Codex
+# auth on hosted runners) -> the /intake assertion only checks the sprint record (status.json) was written,
+# never a plan/deliverable. macOS + Linux native (install.sh); Windows is WSL2 (install.ps1 is a WSL
+# bootstrapper), reusing the proven setup from windows-wsl2-install.yml. Public repo => runners free on all OSes.
 on:
   workflow_dispatch:
     inputs:
@@ -28,6 +27,9 @@ jobs:
         run: bash install.sh --yes --components kernel,harness --fake-keys --skip-llm-cli
       - name: status-server boots + /status + /intake plumbing
         shell: bash
+        env:
+          # pass the input via env (NOT inline ${{ }} in the script) -> no quote-nesting, no injection
+          INTAKE_TASK: ${{ github.event.inputs.intake_task || 'Write a one-line hello-world note.' }}
         run: |
           set -euo pipefail
           H="$HOME/.solar/harness"
@@ -35,10 +37,9 @@ jobs:
           for i in $(seq 1 60); do [ -s "$H/run/status-server.port" ] && break; sleep 0.5; done
           PORT="$(cat "$H/run/status-server.port")"; echo "port=$PORT"
           curl -fsS "http://127.0.0.1:$PORT/status" >/dev/null && echo "STATUS_OK"
-          TASK='${{ github.event.inputs.intake_task || ''Write a one-line hello-world note.'' }}'
-          RESP="$(curl -fsS -m 200 -X POST "http://127.0.0.1:$PORT/intake" -H 'Content-Type: application/json' -d "$(python3 -c 'import json,sys;print(json.dumps({"task":sys.argv[1]}))' "$TASK")")"
+          RESP="$(curl -fsS -m 200 -X POST "http://127.0.0.1:$PORT/intake" -H 'Content-Type: application/json' -d "$(python3 -c 'import json,sys;print(json.dumps({"task":sys.argv[1]}))' "${INTAKE_TASK:-Write a one-line hello-world note.}")")"
           echo "$RESP" | python3 -c 'import sys,json,os;d=json.load(sys.stdin);assert d.get("ok"),d;sid=d["sprint_id"];p=os.path.expanduser("~/.solar/harness/sprints/"+sid+".status.json");assert os.path.exists(p),p;print("INTAKE_OK",sid)'
-          echo "GREEN on ${{ matrix.os }}: install + status-server + /intake plumbing. Live LLM plan/build NOT run (no auth on runner)."
+          echo "GREEN on $RUNNER_OS: install + status-server + /intake plumbing. Live LLM plan/build NOT run (no auth on runner)."
   windows-wsl2-smoke:
     runs-on: windows-latest
     timeout-minutes: 40
