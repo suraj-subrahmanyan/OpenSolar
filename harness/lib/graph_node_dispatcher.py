@@ -1687,6 +1687,157 @@ def _node_eval_dispatched_after(node: dict[str, Any], marker: datetime.datetime)
     return False
 
 
+def _eval_payload_generation(payload: dict[str, Any]) -> int | None:
+    """Best-effort repair/eval generation parsed from an evaluator JSON sidecar."""
+    raw_values: list[Any] = [
+        payload.get("eval_generation"),
+        payload.get("repair_attempt"),
+        payload.get("repair_generation"),
+    ]
+    context = payload.get("eval_context")
+    if isinstance(context, dict):
+        raw_values.extend([
+            context.get("eval_generation"),
+            context.get("repair_attempt"),
+            context.get("repair_generation"),
+        ])
+    for raw in raw_values:
+        try:
+            text = str(raw).strip()
+            if text:
+                return int(text)
+        except Exception:
+            continue
+    return None
+
+
+def _payload_time(payload: dict[str, Any], *keys: str) -> datetime.datetime | None:
+    for key in keys:
+        value = str(payload.get(key) or "").strip()
+        parsed = _parse_utc(value)
+        if parsed:
+            return parsed
+    context = payload.get("eval_context")
+    if isinstance(context, dict):
+        for key in keys:
+            value = str(context.get(key) or "").strip()
+            parsed = _parse_utc(value)
+            if parsed:
+                return parsed
+    return None
+
+
+def _eval_payload_stale_for_current_repair(node: dict[str, Any], payload: dict[str, Any]) -> str:
+    """Return a reason if an eval sidecar is not valid for this node's current repair generation.
+
+    A repaired node must not be decided by an evaluator/doctor output from an older evidence
+    snapshot. Normal first-pass evals are unaffected. For repaired nodes we accept either explicit
+    matching generation metadata or ordinary evaluator output whose timestamps do not predate the
+    repair marker. Scheduler/doctor backfills without generation are treated as stale because they
+    are exactly the artifact class that can repopulate canonical eval sidecars after repair.
+    """
+    attempt = _node_repair_attempts(node)
+    if attempt <= 0 or not payload:
+        return ""
+
+    generation = _eval_payload_generation(payload)
+    if generation is not None and generation != attempt:
+        return f"eval_generation_mismatch:{generation}!={attempt}"
+
+    assignment_dispatch_ids = {
+        str(item.get("dispatch_id") or "").strip()
+        for item in (node.get("eval_assignments") or [])
+        if isinstance(item, dict) and str(item.get("dispatch_id") or "").strip()
+    }
+    eval_context = payload.get("eval_context") if isinstance(payload.get("eval_context"), dict) else {}
+    payload_dispatch_id = str(
+        payload.get("eval_dispatch_id")
+        or eval_context.get("eval_dispatch_id")
+        or ""
+    ).strip()
+    if payload_dispatch_id and assignment_dispatch_ids and payload_dispatch_id not in assignment_dispatch_ids:
+        return "eval_dispatch_id_mismatch_after_repair"
+
+    assignment_pm_task_ids = {
+        str(item.get("pm_task_id") or "").strip()
+        for item in (node.get("eval_assignments") or [])
+        if isinstance(item, dict) and str(item.get("pm_task_id") or "").strip()
+    }
+    payload_pm_task_id = str(
+        payload.get("pm_task_id")
+        or payload.get("task_id")
+        or eval_context.get("pm_task_id")
+        or ""
+    ).strip()
+    if payload_pm_task_id and assignment_pm_task_ids and payload_pm_task_id not in assignment_pm_task_ids:
+        return "eval_pm_task_id_mismatch_after_repair"
+
+    repair_created_at = _repair_context_created_at(node)
+    payload_at = _payload_time(
+        payload,
+        "evidence_snapshot_at",
+        "eval_instruction_created_at",
+        "checked_at",
+        "created_at",
+        "finished_at",
+        "updated_at",
+    )
+    if repair_created_at and payload_at and payload_at < repair_created_at:
+        return "eval_evidence_snapshot_predates_repair"
+
+    if generation is None:
+        generated_by = str(payload.get("generated_by") or "").strip().lower()
+        generation_mode = str(payload.get("generation_mode") or "").strip().lower()
+        if generated_by == "graph_scheduler.doctor" or generation_mode in {"repair_backfill", "manual_node_eval"}:
+            return "eval_missing_repair_generation_after_repair"
+    return ""
+
+
+def _archive_current_repair_stale_eval_sidecars(
+    sid: str,
+    node: dict[str, Any],
+    node_id: str,
+    eval_json_path: str | Path,
+    reason: str,
+) -> dict[str, str]:
+    if not reason:
+        return {}
+    candidates: list[tuple[str, Path]] = []
+    if str(eval_json_path or "").strip():
+        candidates.append(("eval_json", Path(str(eval_json_path))))
+    candidates.append(("eval_md", _eval_md_file(sid, node_id)))
+
+    archived: dict[str, str] = {}
+    seen: set[Path] = set()
+    for key, raw_path in candidates:
+        try:
+            path = raw_path.expanduser()
+            if path in seen or not path.exists():
+                continue
+            seen.add(path)
+            archive = _archive_path_for_repair(path, max(1, _node_repair_attempts(node)))
+            path.replace(archive)
+        except Exception:
+            continue
+        archived[key] = str(archive)
+    if archived:
+        node["stale_eval_archived_at"] = _utc_now()
+        node["stale_eval_archive_reason"] = reason
+        _append_event(sid, {
+            "event": "graph_eval_sidecar_archived_after_repair",
+            "by": "graph-dispatch",
+            "severity": "warn",
+            "data": {"node": node_id, "reason": reason, "archived": archived},
+        })
+        _record_node_runstate(sid, node_id, {
+            "last_eval_result": "STALE_ARCHIVED",
+            "last_eval_reason": reason,
+            "next_action": "dispatch_fresh_eval",
+            "status": str(node.get("status") or ""),
+        })
+    return archived
+
+
 def _archive_late_pre_repair_eval_sidecars(
     sid: str,
     node: dict[str, Any],
@@ -2127,6 +2278,26 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
             if backfilled_eval is not None:
                 eval_json_path = str(backfilled_eval)
         eval_payload = {} if (late_pre_repair_eval_archived or stale_eval_archived) else (_read_json_file_safe(eval_json_path) if eval_json_path else {})
+        stale_eval_generation_reason = _eval_payload_stale_for_current_repair(node, eval_payload)
+        if stale_eval_generation_reason:
+            archived_generation_eval = _archive_current_repair_stale_eval_sidecars(
+                sid,
+                node,
+                node_id,
+                eval_json_path,
+                stale_eval_generation_reason,
+            )
+            if archived_generation_eval:
+                repaired.append(
+                    {
+                        "node": node_id,
+                        "status": status,
+                        "reason": "stale_eval_generation_archived",
+                        "stale_reason": stale_eval_generation_reason,
+                        "archived_sidecars": archived_generation_eval,
+                    }
+                )
+            eval_payload = {}
         raw_eval_verdict = str(eval_payload.get("verdict") or eval_payload.get("status") or "").strip().lower()
         if raw_eval_verdict in {"pass", "passed", "ok", "success", "succeeded"}:
             eval_verdict = "PASS"
@@ -3399,6 +3570,9 @@ def _store_eval_assignments(node: dict[str, Any], assignments: list[dict[str, An
             "role": str(item.get("role") or "secondary"),
             "eval_md_path": str(item.get("eval_md_path") or ""),
             "eval_json_path": str(item.get("eval_json_path") or ""),
+            "eval_generation": int(item.get("eval_generation") or _node_repair_attempts(node)),
+            "repair_context_created_at": str(item.get("repair_context_created_at") or ""),
+            "dispatched_at": dispatched_at,
         }
         for item in assignments
         if str(item.get("pane") or "") and str(item.get("dispatch_id") or "")
@@ -3907,6 +4081,12 @@ def build_eval_dispatch_text(graph: dict[str, Any], graph_path: str, node: dict[
     peer_eval_json_paths = peer_eval_json_paths or []
     canonical_eval_json_path = canonical_eval_json_path or str(_eval_json_file(sid, node_id))
     canonical_eval_md_path = canonical_eval_md_path or str(_eval_md_file(sid, node_id))
+    eval_generation = _node_repair_attempts(node)
+    repair_context_created = ""
+    repair_context_created_at = _repair_context_created_at(node)
+    if repair_context_created_at is not None:
+        repair_context_created = repair_context_created_at.isoformat().replace("+00:00", "Z")
+    eval_instruction_created_at = _utc_now()
     peer_block = "\n".join(f"- `{path}`" for path in peer_eval_json_paths) if peer_eval_json_paths else "- `N/A`"
     verdict_step = f"""3. 提交节点 verdict。通过时会自动释放下游 ready node；失败时只阻塞依赖它的下游：
    ```bash
@@ -3941,6 +4121,15 @@ Evaluator Role: `{evaluator_role}`
 Evaluator Index: `{evaluator_index}/{evaluator_total}`
 Graph: `{graph_path}`
 Handoff: `{handoff}`
+
+## Eval Generation Contract
+
+- Eval Generation: `{eval_generation}`
+- Repair Context Created At: `{repair_context_created or "N/A"}`
+- Eval Instruction Created At: `{eval_instruction_created_at}`
+- The machine-readable JSON MUST copy `eval_generation`, `repair_attempt`, `eval_dispatch_id`,
+  `repair_context_created_at`, and `eval_instruction_created_at` exactly. Solar ignores stale
+  repaired-node eval sidecars whose generation predates or cannot be tied to the current repair.
 
 ## Handoff Candidates
 
@@ -4048,6 +4237,11 @@ solar-harness session evaluate "{sid}" --json
      "node_id": "{node_id}",
      "verdict": "PASS",
      "summary": "",
+     "eval_generation": {eval_generation},
+     "repair_attempt": {eval_generation},
+     "eval_dispatch_id": "{dispatch_id}",
+     "repair_context_created_at": "{repair_context_created}",
+     "eval_instruction_created_at": "{eval_instruction_created_at}",
      "evaluation_plan": {json.dumps(evaluation_plan, ensure_ascii=False, indent=2)},
      "proof_obligations": {json.dumps(proof_obligations, ensure_ascii=False, indent=2)},
      "proof_checks": {json.dumps(proof_checks_template, ensure_ascii=False, indent=2)},
@@ -7334,6 +7528,11 @@ def dispatch_node_evals(graph_path: str, dry_run: bool = False, ttl: int = 900,
         total_evaluators = int(runtime_plan.get("required_evaluators") or 1)
         dispatch_group_id = f"graph-eval-{sid}-{node_id}-{_utc_now().replace(':', '').replace('-', '')}"
         planned_assignments: list[dict[str, Any]] = []
+        eval_generation = _node_repair_attempts(node)
+        repair_context_created = ""
+        repair_context_created_at = _repair_context_created_at(node)
+        if repair_context_created_at is not None:
+            repair_context_created = repair_context_created_at.isoformat().replace("+00:00", "Z")
         for idx, evaluator in enumerate(selected_evaluators[:total_evaluators], start=1):
             pane = str(evaluator.get("pane") or "")
             if pane in used_evaluator_panes:
@@ -7356,6 +7555,8 @@ def dispatch_node_evals(graph_path: str, dry_run: bool = False, ttl: int = 900,
                     "index": idx,
                     "eval_md_path": str(eval_md_path),
                     "eval_json_path": str(eval_json_path),
+                    "eval_generation": eval_generation,
+                    "repair_context_created_at": repair_context_created,
                 }
             )
         if not planned_assignments:

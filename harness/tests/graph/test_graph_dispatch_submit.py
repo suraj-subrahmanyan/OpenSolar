@@ -649,6 +649,96 @@ class TestSendToPaneLiteral:
         assert Path(repaired[0]["archived_sidecars"]["eval_md"]).exists()
         assert not any(item.get("reason") == "eval_sidecar_exists" for item in repaired)
 
+    def test_repaired_node_ignores_doctor_backfill_without_matching_eval_generation(self, tmp_harness, monkeypatch):
+        """A repaired node must not be failed by a doctor/backfill eval sidecar from the wrong evidence generation."""
+        tmp_path, sprints, sid, graph = tmp_harness
+        import graph_node_dispatcher as gnd
+
+        def epoch(raw: str) -> float:
+            return datetime.datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+
+        node = graph["nodes"][0]
+        node["status"] = "reviewing"
+        node["repair_attempts"] = 1
+        node["repair_context"] = {"attempt": 1, "created_at": "2026-06-29T20:00:00Z"}
+        node["eval_assignments"] = [
+            {
+                "pane": "operator:mini-codex-evaluator",
+                "dispatch_id": "eval-after-repair",
+                "pm_task_id": "pm-eval-after-repair",
+                "role": "primary",
+                "eval_generation": 1,
+                "repair_context_created_at": "2026-06-29T20:00:00Z",
+                "dispatched_at": "2026-06-29T20:01:00Z",
+                "eval_md_path": str(sprints / f"{sid}.N1-eval.md"),
+                "eval_json_path": str(sprints / f"{sid}.N1-eval.json"),
+            }
+        ]
+        graph["node_results"]["N1"] = {"status": "reviewing"}
+        handoff = sprints / f"{sid}.N1-handoff.md"
+        eval_md = sprints / f"{sid}.N1-eval.md"
+        eval_json = sprints / f"{sid}.N1-eval.json"
+        handoff.write_text("# repaired handoff\n", encoding="utf-8")
+        eval_md.write_text("## Verdict\nFAIL\n\nstale backfill still says missing patch\n", encoding="utf-8")
+        eval_json.write_text(
+            json.dumps(
+                {
+                    "verdict": "FAIL",
+                    "node_id": "N1",
+                    "summary": "stale backfill missing patch_diff",
+                    "generated_by": "graph_scheduler.doctor",
+                    "generation_mode": "repair_backfill",
+                    "checked_at": "2026-06-29T20:05:00Z",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.utime(handoff, (epoch("2026-06-29T20:02:00Z"), epoch("2026-06-29T20:02:00Z")))
+        os.utime(eval_md, (epoch("2026-06-29T20:05:00Z"), epoch("2026-06-29T20:05:00Z")))
+        os.utime(eval_json, (epoch("2026-06-29T20:05:00Z"), epoch("2026-06-29T20:05:00Z")))
+        monkeypatch.setattr(gnd, "release_lease", lambda *a, **k: {"released": True})
+
+        repaired = gnd._reconcile_existing_dispatches(graph, sprints / f"{sid}.task_graph.json")
+
+        assert node["status"] == "reviewing"
+        assert graph["node_results"]["N1"]["status"] == "reviewing"
+        assert handoff.exists()
+        assert not eval_json.exists()
+        assert not eval_md.exists()
+        assert repaired[0]["reason"] == "stale_eval_generation_archived"
+        assert repaired[0]["stale_reason"] == "eval_missing_repair_generation_after_repair"
+        assert Path(repaired[0]["archived_sidecars"]["eval_json"]).exists()
+        assert Path(repaired[0]["archived_sidecars"]["eval_md"]).exists()
+        assert not any(item.get("reason") == "eval_sidecar_exists" for item in repaired)
+
+    def test_eval_dispatch_text_requires_generation_metadata_for_repaired_node(self, tmp_harness):
+        """Evaluator instructions must carry the repair generation so sidecars can be freshness-checked."""
+        tmp_path, sprints, sid, graph = tmp_harness
+        import graph_node_dispatcher as gnd
+
+        node = graph["nodes"][0]
+        node["status"] = "reviewing"
+        node["repair_attempts"] = 2
+        node["repair_context"] = {"attempt": 2, "created_at": "2026-06-29T20:00:00Z"}
+        handoff = sprints / f"{sid}.N1-handoff.md"
+        handoff.write_text("# repaired handoff\n", encoding="utf-8")
+
+        text = gnd.build_eval_dispatch_text(
+            graph,
+            str(sprints / f"{sid}.task_graph.json"),
+            node,
+            "operator:mini-codex-evaluator",
+            "eval-after-repair",
+        )
+
+        assert "## Eval Generation Contract" in text
+        assert "- Eval Generation: `2`" in text
+        assert '"eval_generation": 2' in text
+        assert '"repair_attempt": 2' in text
+        assert '"eval_dispatch_id": "eval-after-repair"' in text
+        assert '"repair_context_created_at": "2026-06-29T20:00:00Z"' in text
+
     def test_direct_node_verdict_fail_requests_graph_node_repair_round(self, tmp_harness, monkeypatch):
         """Primary evaluator node-verdict FAIL uses the same repair path as sidecar reconcile."""
         tmp_path, sprints, sid, graph = tmp_harness

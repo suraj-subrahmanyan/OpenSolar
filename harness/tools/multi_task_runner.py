@@ -1811,6 +1811,22 @@ def active_tasks() -> list[dict[str, Any]]:
     return [row for row in list_task_rows() if str(row.get("effective_status") or row.get("status", "")).lower() in ACTIVE_TASK_STATUSES]
 
 
+def active_task_for_node(sid: str, node_id: str, tasks: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    sid = str(sid or "").strip()
+    node_id = str(node_id or "").strip()
+    if not sid or not node_id:
+        return None
+    for task in tasks if tasks is not None else active_tasks():
+        if str(task.get("sprint_id") or "").strip() != sid:
+            continue
+        if str(task.get("node_id") or "").strip() != node_id:
+            continue
+        status = str(task.get("effective_status") or task.get("status") or "").strip().lower()
+        if status in ACTIVE_TASK_STATUSES:
+            return task
+    return None
+
+
 def active_parallel_counts(tasks: list[dict[str, Any]] | None = None) -> dict[str, dict[str, int]]:
     tasks = tasks if tasks is not None else active_tasks()
     by_profile: dict[str, int] = {}
@@ -2770,9 +2786,20 @@ def schedule_once(args: argparse.Namespace) -> dict[str, Any]:
         except Exception as exc:
             skipped.append({"graph": str(graph_path), "reason": "graph_error", "error": str(exc)})
             continue
+        sid = sprint_id_for(graph, graph_path)
         for node in candidates:
             if slots <= 0 and not args.dry_run:
                 break
+            already_active = active_task_for_node(sid, str(node.get("id") or ""), active_rows)
+            if already_active:
+                skipped.append({
+                    "graph": str(graph_path),
+                    "node": node.get("id"),
+                    "reason": "node_already_active",
+                    "task": already_active.get("id"),
+                    "status": already_active.get("effective_status") or already_active.get("status"),
+                })
+                continue
             if scope_conflicts_with_active(node):
                 skipped.append({"graph": str(graph_path), "node": node.get("id"), "reason": "write_scope_conflict_with_active"})
                 continue
