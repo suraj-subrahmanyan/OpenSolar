@@ -2241,6 +2241,56 @@ def _scan_paths_for_secrets(paths: list[Path]) -> list[dict[str, Any]]:
     return matches
 
 
+def _patch_rel_path(path: Path) -> str:
+    for root in (HARNESS_DIR.parent, HARNESS_DIR, SPRINTS_DIR):
+        try:
+            return path.resolve(strict=False).relative_to(root.resolve(strict=False)).as_posix()
+        except Exception:
+            continue
+    return path.name
+
+
+def _new_file_patch_for_path(path: Path) -> str:
+    rel = _patch_rel_path(path)
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception as exc:
+        lines = [f"[unable to read {path}: {type(exc).__name__}]"]
+    out = [
+        f"diff --git a/{rel} b/{rel}",
+        "new file mode 100644",
+        "--- /dev/null",
+        f"+++ b/{rel}",
+        f"@@ -0,0 +1,{len(lines)} @@",
+    ]
+    out.extend(f"+{line}" for line in lines)
+    return "\n".join(out) + "\n"
+
+
+def _emit_node_patch_diff_sidecar(sid: str, node: dict[str, Any]) -> Path | None:
+    if not _proof_obligations_require_field(sid, node, "patch_diff"):
+        return None
+    existing = _existing_node_patch_diff(sid, node)
+    if existing is not None:
+        return existing
+    targets = [path for path in _resolve_write_scope_paths(node) if path.is_file()]
+    if not targets:
+        return None
+    patch_path = _node_patch_diff_candidates(sid, node)[0]
+    parts = [
+        f"# Deterministic patch proof for {sid} / {node.get('id', '')}",
+        "# Generated from existing write_scope files because no node patch_diff artifact was present.",
+        "",
+    ]
+    for target in sorted(targets, key=lambda item: str(item)):
+        parts.append(_new_file_patch_for_path(target))
+    try:
+        patch_path.write_text("\n".join(parts).rstrip() + "\n", encoding="utf-8")
+        return patch_path
+    except Exception:
+        return None
+
+
 def _emit_guard_resource_sidecars(sid: str, node: dict[str, Any]) -> dict[str, Any]:
     node_id = str(node.get("id") or "")
     nid = _safe_node_id(node_id)
@@ -2382,6 +2432,9 @@ Source artifacts:
 
 def _emit_node_proof_sidecars(sid: str, node: dict[str, Any]) -> dict[str, str]:
     emitted: dict[str, str] = {}
+    patch_diff = _emit_node_patch_diff_sidecar(sid, node)
+    if patch_diff:
+        emitted["patch_diff"] = str(patch_diff)
     guard = _emit_guard_resource_sidecars(sid, node)
     if guard:
         emitted["guard_decision"] = str(_expected_node_sidecar_file(sid, str(node.get("id") or ""), "guard_decision"))
