@@ -7,6 +7,8 @@ must be correct before a live model call is attempted.
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -197,6 +199,47 @@ def test_codex_operator_uses_writable_sqlite_home_and_ephemeral_flag(tmp_path, m
     assert "--ephemeral" in cmd
     assert "--cd" in cmd
     assert str(tmp_path) in cmd
+
+
+def test_codex_operator_binds_model_shell_to_active_harness(tmp_path, monkeypatch):
+    codex_operator = _load_module("codex_operator_contract_active_harness", ROOT / "tools" / "codex_operator.py")
+    harness_dir = tmp_path / "clean-harness"
+    harness_dir.mkdir()
+    (harness_dir / "lib").mkdir()
+    (harness_dir / "tools").mkdir()
+    harness_cmd = harness_dir / "solar-harness.sh"
+    harness_cmd.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf 'active-harness=%s\\n' \"$HARNESS_DIR\"\n"
+        "printf 'args=%s\\n' \"$*\"\n",
+        encoding="utf-8",
+    )
+    harness_cmd.chmod(0o755)
+    task_dir = harness_dir / "run" / "operator-results" / "op" / "task"
+    task_dir.mkdir(parents=True)
+    monkeypatch.setenv("HARNESS_DIR", str(harness_dir))
+    monkeypatch.delenv("SOLAR_HARNESS_DIR", raising=False)
+
+    env = codex_operator._codex_exec_env(task_dir)
+    shim = task_dir / "cmd-shims" / "solar-harness"
+
+    assert env["HARNESS_DIR"] == str(harness_dir)
+    assert env["SOLAR_HARNESS_DIR"] == str(harness_dir)
+    assert env["SOLAR_HARNESS_CMD"] == str(shim)
+    assert os.access(shim, os.X_OK)
+    assert env["PATH"].split(os.pathsep)[0] == str(task_dir / "cmd-shims")
+    assert str(harness_dir / "lib") in env["PYTHONPATH"].split(os.pathsep)
+    assert str(harness_dir / "tools") in env["PYTHONPATH"].split(os.pathsep)
+
+    completed = subprocess.run(
+        [str(shim), "context", "inject", "--node", "N0"],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert f"active-harness={harness_dir}" in completed.stdout
+    assert "args=context inject --node N0" in completed.stdout
 
 
 def test_codex_operator_respects_explicit_non_ephemeral(tmp_path, monkeypatch):
