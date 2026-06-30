@@ -1895,7 +1895,12 @@ def _active_multi_task_status_for(sid: str, node_id: str) -> dict[str, Any] | No
     return newest[1] if newest else None
 
 
-def _latest_operator_result_for(sid: str, node_id: str, operator_id: str = "") -> dict[str, Any] | None:
+def _latest_operator_result_for(
+    sid: str,
+    node_id: str,
+    operator_id: str = "",
+    task_id: str = "",
+) -> dict[str, Any] | None:
     """Return the newest terminal PM/operator result for a graph node.
 
     Operator-pool dispatch is asynchronous: `pm_dispatch submit` can succeed
@@ -1914,6 +1919,8 @@ def _latest_operator_result_for(sid: str, node_id: str, operator_id: str = "") -
         if str(data.get("node_id") or "") != node_id:
             continue
         if operator_id and str(data.get("operator_id") or "") != operator_id:
+            continue
+        if task_id and str(data.get("task_id") or "") != task_id:
             continue
         status = str(data.get("status") or "").strip().lower()
         if status not in {"completed", "failed", "failed_missing_handoff", "failed_stale_handoff", "cancelled", "error"}:
@@ -2521,11 +2528,17 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
                 if not pane.startswith("operator:"):
                     continue
                 operator_id = pane.split(":", 1)[1].strip()
-                result = _latest_operator_result_for(sid, node_id, operator_id=operator_id)
+                result = _latest_operator_result_for(
+                    sid,
+                    node_id,
+                    operator_id=operator_id,
+                    task_id=str(assignment.get("pm_task_id") or ""),
+                )
                 if result and not Path(str(assignment.get("eval_json_path") or _eval_json_file(sid, node_id))).exists():
                     terminal_operator_assignment = {
                         "pane": pane,
                         "dispatch_id": str(assignment.get("dispatch_id") or "").strip(),
+                        "pm_task_id": str(assignment.get("pm_task_id") or "").strip(),
                         "reason": "eval_failed_contract_closeout",
                         "operator_status": str(result.get("status") or ""),
                         "result_json": str(result.get("_result_json") or ""),
@@ -2790,6 +2803,7 @@ def _node_eval_assignments(node: dict[str, Any]) -> list[dict[str, Any]]:
                 {
                     "pane": pane,
                     "dispatch_id": dispatch_id,
+                    "pm_task_id": str(item.get("pm_task_id") or ""),
                     "role": str(item.get("role") or "secondary"),
                     "eval_md_path": str(item.get("eval_md_path") or ""),
                     "eval_json_path": str(item.get("eval_json_path") or ""),
@@ -2804,6 +2818,7 @@ def _node_eval_assignments(node: dict[str, Any]) -> list[dict[str, Any]]:
             {
                 "pane": pane,
                 "dispatch_id": dispatch_id,
+                "pm_task_id": str(node.get("eval_pm_task_id") or ""),
                 "role": "primary",
                 "eval_md_path": str(node.get("eval_md_path") or ""),
                 "eval_json_path": str(node.get("eval_json") or ""),
@@ -3321,6 +3336,7 @@ def _store_eval_assignments(node: dict[str, Any], assignments: list[dict[str, An
         {
             "pane": str(item.get("pane") or ""),
             "dispatch_id": str(item.get("dispatch_id") or ""),
+            "pm_task_id": str(item.get("pm_task_id") or ""),
             "role": str(item.get("role") or "secondary"),
             "eval_md_path": str(item.get("eval_md_path") or ""),
             "eval_json_path": str(item.get("eval_json_path") or ""),
@@ -3332,6 +3348,7 @@ def _store_eval_assignments(node: dict[str, Any], assignments: list[dict[str, An
     primary = next((item for item in normalized if item.get("role") == "primary"), normalized[0] if normalized else {})
     node["eval_assigned_to"] = str(primary.get("pane") or "")
     node["eval_dispatch_id"] = str(primary.get("dispatch_id") or "")
+    node["eval_pm_task_id"] = str(primary.get("pm_task_id") or "")
     node["eval_dispatched_at"] = dispatched_at
 
 
@@ -3339,6 +3356,7 @@ def _clear_eval_assignments(node: dict[str, Any]) -> None:
     node.pop("eval_assignments", None)
     node.pop("eval_assigned_to", None)
     node.pop("eval_dispatch_id", None)
+    node.pop("eval_pm_task_id", None)
     node.pop("eval_dispatched_at", None)
 
 
@@ -7377,6 +7395,11 @@ def dispatch_node_evals(graph_path: str, dry_run: bool = False, ttl: int = 900,
                 if sent:
                     pane = str(submit_result.get("pane") or pane)
                     assignment["pane"] = pane
+                    pm_dispatch = submit_result.get("pm_dispatch")
+                    if isinstance(pm_dispatch, dict):
+                        pm_task_id = str(pm_dispatch.get("pm_task_id") or pm_dispatch.get("task_id") or "")
+                        if pm_task_id:
+                            assignment["pm_task_id"] = pm_task_id
             else:
                 submit_result = {}
                 sent = _send_to_pane(pane, instruction_file, dry_run, sid=sid, dispatch_id=str(assignment["dispatch_id"]))

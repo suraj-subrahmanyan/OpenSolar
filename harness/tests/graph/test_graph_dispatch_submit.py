@@ -677,6 +677,53 @@ class TestSendToPaneLiteral:
         assert ("solar-harness-lab:0.2", "dispatch-N1", "node_failed_review") in release_calls
         assert ("solar-harness-lab:0.3", "eval-N1", "node_failed_review") in release_calls
 
+    def test_eval_reconcile_ignores_failed_result_from_older_pm_task(self, tmp_harness, monkeypatch):
+        """A retrying eval assignment must not be closed by an older failed PM task result."""
+        tmp_path, sprints, sid, graph = tmp_harness
+        import graph_node_dispatcher as gnd
+
+        node = graph["nodes"][0]
+        node["status"] = "reviewing"
+        node["eval_assignments"] = [
+            {
+                "pane": "operator:mini-codex-evaluator",
+                "dispatch_id": "eval-new",
+                "pm_task_id": "pm-test-graph-submit-N1-new",
+                "role": "primary",
+                "eval_md_path": str(sprints / f"{sid}.N1-eval.md"),
+                "eval_json_path": str(sprints / f"{sid}.N1-eval.json"),
+            }
+        ]
+        graph["node_results"]["N1"] = {"status": "reviewing"}
+
+        old_result_dir = tmp_path / "run" / "operator-results" / "mini-codex-evaluator" / "pm-test-graph-submit-N1-old"
+        old_result_dir.mkdir(parents=True)
+        (old_result_dir / "result.json").write_text(
+            json.dumps(
+                {
+                    "task_id": "pm-test-graph-submit-N1-old",
+                    "operator_id": "mini-codex-evaluator",
+                    "sprint_id": sid,
+                    "node_id": "N1",
+                    "status": "failed",
+                    "exit_code": 1,
+                    "started_at": "2026-06-30T01:00:00Z",
+                    "finished_at": "2026-06-30T01:00:01Z",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(gnd, "release_lease", lambda *a, **k: {"released": True})
+
+        repaired = gnd._reconcile_existing_dispatches(graph, sprints / f"{sid}.task_graph.json")
+
+        assert repaired == []
+        assert node["status"] == "reviewing"
+        assert node["eval_assignments"][0]["pm_task_id"] == "pm-test-graph-submit-N1-new"
+        assert node.get("eval_retry_reason") is None
+        assert node.get("last_eval_closeout_failure") is None
+
     def test_direct_node_verdict_fail_after_repair_limit_marks_terminal_failed(self, tmp_harness, monkeypatch):
         """Direct evaluator FAIL still terminal-fails once repair attempts are exhausted."""
         tmp_path, sprints, sid, graph = tmp_harness
