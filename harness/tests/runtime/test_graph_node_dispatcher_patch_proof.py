@@ -61,5 +61,8 @@ def test_lib_dispatcher_emits_patch_diff_from_write_scope(tmp_path, monkeypatch)
 def test_tools_dispatcher_emits_patch_diff_from_write_scope(tmp_path, monkeypatch):
     monkeypatch.delenv("HARNESS_DIR", raising=False)
     monkeypatch.delitem(sys.modules, "graph_scheduler", raising=False)
+    monkeypatch.setenv("HARNESS_DIR", str(ROOT))
     module = _load_module("graph_node_dispatcher_tools_patch_proof", ROOT / "tools" / "graph_node_dispatcher.py")
-    _exercise_patch_proof(module, tmp_path, monkeypatch)
+
+    assert module._IMPL.__file__ == str(ROOT / "lib" / "graph_node_dispatcher.py")
+    assert module.main is module._IMPL.main
