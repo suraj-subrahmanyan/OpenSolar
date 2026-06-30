@@ -19,10 +19,35 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
-try:
-    import readline  # type: ignore
-except Exception:  # pragma: no cover - readline may be unavailable in minimal Python builds
-    readline = None  # type: ignore
+_READLINE: Any | None = None
+_READLINE_CHECKED = False
+
+
+def _screen_readline() -> Any | None:
+    """Load readline only for interactive screen history.
+
+    Some packaged Python builds can segfault importing ``readline`` when the
+    process inherits an unavailable locale such as ``en_US.UTF-8``. The worker
+    scheduler does not need readline, so keep it off the module import path.
+    """
+    global _READLINE, _READLINE_CHECKED
+    if _READLINE_CHECKED:
+        return _READLINE
+    _READLINE_CHECKED = True
+    if not sys.stdin.isatty():
+        return None
+    try:
+        import locale
+
+        locale.setlocale(locale.LC_CTYPE, "")
+    except Exception:
+        return None
+    try:
+        import readline as readline_module  # type: ignore
+    except Exception:  # pragma: no cover - readline may be unavailable in minimal Python builds
+        return None
+    _READLINE = readline_module
+    return _READLINE
 
 HOME = Path.home()
 HARNESS_DIR = Path(os.environ.get("HARNESS_DIR", HOME / ".solar" / "harness"))
@@ -4416,6 +4441,7 @@ def command_log_path() -> Path:
 
 
 def load_screen_history() -> None:
+    readline = _screen_readline()
     if readline is None:
         return
     try:
@@ -4428,6 +4454,7 @@ def load_screen_history() -> None:
 
 
 def save_screen_history() -> None:
+    readline = _screen_readline()
     if readline is None:
         return
     try:
@@ -4442,6 +4469,7 @@ def remember_screen_input(text: str) -> None:
     raw = text.strip()
     if not raw:
         return
+    readline = _screen_readline()
     if readline is not None:
         try:
             last = readline.get_history_item(readline.get_current_history_length()) or ""

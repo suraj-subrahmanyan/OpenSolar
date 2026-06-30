@@ -52,8 +52,22 @@ LAB_SESSION_NAME="${SOLAR_HARNESS_LAB_SESSION:-${SESSION_NAME}-lab}"
 HARNESS_MANAGE_LAB="${SOLAR_HARNESS_MANAGE_LAB:-${SOLAR_WATCHDOG_MANAGE_LAB:-0}}"
 COORD_STATE="$HARNESS_DIR/.coordinator-state"
 SESSION_SH="$HARNESS_DIR/session.sh"
-export LANG="en_US.UTF-8"
-export LC_ALL="en_US.UTF-8"
+
+solar_choose_utf8_locale() {
+  local locs
+  locs="$(locale -a 2>/dev/null || true)"
+  if printf '%s\n' "$locs" | grep -Eiq '^C\.UTF-?8$'; then
+    printf 'C.UTF-8'
+  elif printf '%s\n' "$locs" | grep -Eiq '^en_US\.UTF-?8$'; then
+    printf 'en_US.UTF-8'
+  else
+    printf 'C'
+  fi
+}
+
+SOLAR_COORD_LOCALE="${SOLAR_COORD_LOCALE:-$(solar_choose_utf8_locale)}"
+export LANG="$SOLAR_COORD_LOCALE"
+export LC_ALL="$SOLAR_COORD_LOCALE"
 
 # LOCAL-ONLY product architecture: the shipped single-Mac .app has no remote operator
 # pool — dispatch must land on the 4 local cockpit panes. Default the builder/evaluator
