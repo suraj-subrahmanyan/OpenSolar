@@ -14,6 +14,7 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -1241,8 +1242,39 @@ def _archive_path_for_repair(path: Path, attempt: int) -> Path:
     return path.with_name(f"{path.stem}.repair{attempt}.{stamp}.{os.getpid()}{path.suffix}")
 
 
-def _archive_node_review_sidecars(sid: str, node_id: str, handoff_file: Path | None, eval_json_path: str | Path, attempt: int) -> dict[str, str]:
-    archived: dict[str, str] = {}
+def _attempt_archive_dir(sid: str, node_id: str, attempt: int) -> Path:
+    return SPRINTS_DIR / sid / "attempts" / _safe_node_id(node_id) / str(max(1, int(attempt or 1)))
+
+
+def _copy_attempt_archive(path: Path, sid: str, node_id: str, attempt: int, key: str) -> Path | None:
+    try:
+        src = path.expanduser()
+    except Exception:
+        return None
+    if not src.exists() or not src.is_file():
+        return None
+    archive_dir = _attempt_archive_dir(sid, node_id, attempt)
+    safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(key or "artifact")).strip("-") or "artifact"
+    suffix = src.suffix or ".artifact"
+    dest = archive_dir / f"{safe_key}{suffix}"
+    try:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            stem = dest.stem
+            for index in range(2, 100):
+                candidate = dest.with_name(f"{stem}.{index}{dest.suffix}")
+                if not candidate.exists():
+                    dest = candidate
+                    break
+        shutil.copy2(src, dest)
+    except Exception:
+        return None
+    return dest
+
+
+def _archive_node_review_sidecars(sid: str, node_id: str, handoff_file: Path | None, eval_json_path: str | Path, attempt: int) -> dict[str, Any]:
+    archived: dict[str, Any] = {}
+    attempt_archived: dict[str, str] = {}
     candidates: list[tuple[str, Path]] = []
     if handoff_file is not None:
         candidates.append(("handoff_md", Path(handoff_file)))
@@ -1252,6 +1284,8 @@ def _archive_node_review_sidecars(sid: str, node_id: str, handoff_file: Path | N
     ):
         if str(path) not in {"", "."}:
             candidates.append((key, path))
+    for sidecar in sorted(SPRINTS_DIR.glob(f"{sid}.{_safe_node_id(node_id)}-eval-dispatch*")):
+        candidates.append((f"eval_dispatch_{len(candidates)}", sidecar))
 
     seen: set[Path] = set()
     for key, path in candidates:
@@ -1262,12 +1296,18 @@ def _archive_node_review_sidecars(sid: str, node_id: str, handoff_file: Path | N
         if resolved in seen or not resolved.exists():
             continue
         seen.add(resolved)
+        attempt_copy = _copy_attempt_archive(resolved, sid, node_id, attempt, key)
+        if attempt_copy is not None:
+            attempt_archived[key] = str(attempt_copy)
         archive = _archive_path_for_repair(resolved, attempt)
         try:
             resolved.replace(archive)
         except Exception:
             continue
         archived[key] = str(archive)
+    if attempt_archived:
+        archived["_attempt_archive_dir"] = str(_attempt_archive_dir(sid, node_id, attempt))
+        archived["_attempt_sidecars"] = attempt_archived
     return archived
 
 
@@ -1358,14 +1398,16 @@ def _archive_current_repair_stale_eval_sidecars(
     node_id: str,
     eval_json_path: str | Path,
     reason: str,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     if not reason:
         return {}
     candidates: list[tuple[str, Path]] = []
     if str(eval_json_path or "").strip():
         candidates.append(("eval_json", Path(str(eval_json_path))))
     candidates.append(("eval_md", _eval_md_file(sid, node_id)))
-    archived: dict[str, str] = {}
+    archived: dict[str, Any] = {}
+    attempt_archived: dict[str, str] = {}
+    attempt = max(1, _node_repair_attempts(node))
     seen: set[Path] = set()
     for key, raw_path in candidates:
         try:
@@ -1373,11 +1415,17 @@ def _archive_current_repair_stale_eval_sidecars(
             if path in seen or not path.exists():
                 continue
             seen.add(path)
-            archive = _archive_path_for_repair(path, max(1, _node_repair_attempts(node)))
+            attempt_copy = _copy_attempt_archive(path, sid, node_id, attempt, key)
+            if attempt_copy is not None:
+                attempt_archived[key] = str(attempt_copy)
+            archive = _archive_path_for_repair(path, attempt)
             path.replace(archive)
         except Exception:
             continue
         archived[key] = str(archive)
+    if attempt_archived:
+        archived["_attempt_archive_dir"] = str(_attempt_archive_dir(sid, node_id, attempt))
+        archived["_attempt_sidecars"] = attempt_archived
     if archived:
         node["stale_eval_archived_at"] = _utc_now()
         node["stale_eval_archive_reason"] = reason
@@ -5188,6 +5236,8 @@ def dispatch_node_evals(graph_path: str, dry_run: bool = False, ttl: int = 900,
         node_id = str(node.get("id") or "")
         if not _node_eval_needed(graph, sid, node, force=force):
             continue
+        if not dry_run:
+            _emit_node_proof_sidecars(sid, node)
         requested_plan = _plan_node_evaluation(graph, node)
         loop_evaluators = [
             {**item, "busy": bool(item.get("busy")) or str(item.get("pane") or "") in used_evaluator_panes}
@@ -5203,9 +5253,10 @@ def dispatch_node_evals(graph_path: str, dry_run: bool = False, ttl: int = 900,
         node["evaluation_plan"] = runtime_plan
         node["evaluation_plan_updated_at"] = _utc_now()
         if not runtime_capacity.get("available_evaluators"):
+            reason = "evaluator_temporarily_busy" if runtime_capacity.get("busy_evaluators") else "no_available_evaluator"
             skipped.append({
                 "node": node_id,
-                "reason": "no_available_evaluator",
+                "reason": reason,
                 "evaluation_plan": runtime_plan,
             })
             break
@@ -5311,9 +5362,6 @@ def dispatch_node_evals(graph_path: str, dry_run: bool = False, ttl: int = 900,
                 "evaluation_plan": runtime_plan,
             })
             continue
-
-        if not dry_run:
-            _emit_node_proof_sidecars(sid, node)
 
         canonical_eval_md = str(_eval_md_file(sid, node_id))
         canonical_eval_json = str(_eval_json_file(sid, node_id))

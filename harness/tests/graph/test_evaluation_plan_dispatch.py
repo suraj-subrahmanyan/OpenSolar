@@ -139,6 +139,54 @@ def test_dispatch_node_evals_keeps_dual_plan_when_quorum_capacity_exists(monkeyp
     assert graph["nodes"][0]["eval_assignments"][1]["role"] == "secondary"
 
 
+def test_busy_evaluator_dispatch_archives_proof_and_counts_stuck_reason(monkeypatch, tmp_path) -> None:
+    graph = {
+        "sprint_id": "sid-eval-busy",
+        "nodes": [
+            {
+                "id": "N5",
+                "goal": "review blocked by busy evaluator",
+                "status": "reviewing",
+            }
+        ],
+        "node_results": {"N5": {"status": "reviewing"}},
+    }
+    emitted: list[tuple[str, str]] = []
+    saved: dict[str, object] = {}
+
+    monkeypatch.setattr(gnd, "GRAPH_NODE_EVAL_MAX_DISPATCH_FAILURES", 1)
+    monkeypatch.setattr(gnd, "SPRINTS_DIR", tmp_path / "sprints")
+    gnd.SPRINTS_DIR.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(gnd, "load_graph", lambda path: graph)
+    monkeypatch.setattr(gnd, "save_graph", lambda path, data: saved.setdefault("graph", data))
+    monkeypatch.setattr(gnd, "_node_eval_needed", lambda *args, **kwargs: True)
+    monkeypatch.setattr(gnd, "_emit_node_proof_sidecars", lambda sid, node: emitted.append((sid, node["id"])) or {"patch_diff": "/tmp/patch.diff"})
+    monkeypatch.setattr(
+        gnd,
+        "_discover_evaluators",
+        lambda dry_run=False: [
+            {"pane": "operator-pool:evaluator.0", "busy": True, "models": ["gpt-5.5"], "skills": ["review"]},
+        ],
+    )
+
+    result = gnd.dispatch_node_evals(str(tmp_path / "sid-eval-busy.task_graph.json"), dry_run=False)
+
+    assert emitted == [("sid-eval-busy", "N5")]
+    assert result["dispatched"] == []
+    assert result["skipped"][0]["reason"] == "evaluator_temporarily_busy"
+    assert result["terminalized"] == [
+        {
+            "node": "N5",
+            "status": "needs_human_review",
+            "reason": "eval_dispatch_unavailable:evaluator_temporarily_busy:1_consecutive_failures",
+        }
+    ]
+    assert graph["nodes"][0]["eval_dispatch_failures"] == 1
+    assert graph["nodes"][0]["status"] == "needs_human_review"
+    assert graph["node_results"]["N5"]["status"] == "needs_human_review"
+    assert saved["graph"] is graph
+
+
 def test_build_eval_dispatch_text_includes_evaluation_plan(monkeypatch, tmp_path) -> None:
     graph = {"sprint_id": "sid-eval-text"}
     node = {

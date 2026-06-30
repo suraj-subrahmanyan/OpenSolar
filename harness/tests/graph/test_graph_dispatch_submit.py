@@ -505,6 +505,12 @@ class TestSendToPaneLiteral:
         assert Path(archived["eval_json"]).exists()
         assert Path(archived["eval_md"]).exists()
         assert any(key.startswith("eval_dispatch_") and Path(path).exists() for key, path in archived.items())
+        assert Path(archived["_attempt_archive_dir"]) == sprints / sid / "attempts" / "N1" / "1"
+        attempt_sidecars = archived["_attempt_sidecars"]
+        assert Path(attempt_sidecars["handoff_md"]).read_text(encoding="utf-8") == "# handoff\n"
+        assert Path(attempt_sidecars["eval_md"]).read_text(encoding="utf-8") == "## Verdict\nFAIL\n\nEvidence\n"
+        assert json.loads(Path(attempt_sidecars["eval_json"]).read_text(encoding="utf-8"))["verdict"] == "FAIL"
+        assert any(key.startswith("eval_dispatch_") and Path(path).exists() for key, path in attempt_sidecars.items())
         assert len(release_calls) == 1
         assert repaired == [
             {
