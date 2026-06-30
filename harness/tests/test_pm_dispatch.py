@@ -271,6 +271,109 @@ def test_cmd_submit_canonicalizes_analysis_audit_node_before_submit(monkeypatch)
         assert envelope["task_type"] == "audit_inventory"
 
 
+def test_cmd_submit_canonicalizes_implementation_capsule_test_authoring(monkeypatch):
+    pm_dispatch = _load_pm_dispatch()
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        monkeypatch.setattr(pm_dispatch, "HARNESS_DIR", root)
+        monkeypatch.setattr(pm_dispatch, "SPRINTS_DIR", root / "sprints")
+        monkeypatch.setattr(pm_dispatch, "PM_INBOX_DIR", root / "run" / "pm-inbox")
+        monkeypatch.setattr(pm_dispatch, "OPERATOR_INBOX_DIR", root / "run" / "operator-inbox")
+        monkeypatch.setattr(pm_dispatch, "OPERATOR_STATUS_DIR", root / "run" / "operator-status")
+        monkeypatch.setattr(pm_dispatch, "PERSONAS_DIR", root / "personas")
+        (root / "personas").mkdir(parents=True, exist_ok=True)
+        (root / "personas" / "builder.md").write_text("# Builder\n", encoding="utf-8")
+        sprint_graph = {
+            "nodes": [
+                {
+                    "id": "S2",
+                    "goal": "Author focused tests for the implementation.",
+                    "logical_operator": "ImplementationWorker",
+                    "capability_native": True,
+                    "capability_capsule_id": "cap.requirement-compiler-implementation",
+                    "dispatch_task_type": "tests",
+                    "type": "implementation",
+                }
+            ]
+        }
+        (root / "sprints").mkdir(parents=True, exist_ok=True)
+        (root / "sprints" / "sprint-tests.task_graph.json").write_text(json.dumps(sprint_graph), encoding="utf-8")
+
+        monkeypatch.setattr(
+            pm_dispatch,
+            "load_registry",
+            lambda: {
+                "version": 1,
+                "operators": {
+                    "mini-codex-gpt55-medium-builder-1": {
+                        "enabled": True,
+                        "available": True,
+                        "roles": ["builder"],
+                        "launch_cmd_kind": "command",
+                        "task_classes": ["implementation"],
+                        "profile": "codex-builder",
+                        "preferred_for": ["codex", "implementation"],
+                        "provider": "openai",
+                        "model": "gpt-5.5",
+                        "persona": "builder",
+                    }
+                },
+            },
+        )
+        monkeypatch.setattr(pm_dispatch, "is_dispatchable", lambda op: (True, ""))
+
+        sys.path.insert(0, str(ROOT / "lib"))
+        import capability_capsules as caps
+
+        resolve_call: dict[str, object] = {}
+
+        def _resolve(task, operator_id=None, registry_path=None):
+            resolve_call["task"] = dict(task)
+            return {
+                "capability_capsule_id": "cap.requirement-compiler-implementation",
+                "operator_constraints": {
+                    "preferred": ["mini-codex-gpt55-medium-builder-1"],
+                    "forbidden": [],
+                    "default_operator_profile": "mini-codex-gpt55-medium-builder-1",
+                },
+            }
+
+        monkeypatch.setattr(caps, "resolve_capability_capsule_for_task", _resolve)
+
+        captured: dict[str, object] = {}
+        fake_operator_runtime = types.ModuleType("operator_runtime")
+
+        def _submit(envelope):
+            captured["envelope"] = dict(envelope)
+            return {
+                "lease_id": "lease-1",
+                "inbox_path": str(root / "run" / "operator-inbox" / "mini-codex-gpt55-medium-builder-1" / "pm.json"),
+            }
+
+        fake_operator_runtime.submit = _submit  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "operator_runtime", fake_operator_runtime)
+        monkeypatch.setenv("SOLAR_PM_DISPATCH_ALLOW_DIRECT", "1")
+        monkeypatch.setenv("SOLAR_PM_DEFAULT_PROVIDERS", "openai")
+
+        args = argparse.Namespace(
+            role="builder",
+            objective="Author focused tests for the implementation.",
+            operator="",
+            sprint="sprint-tests",
+            node="S2",
+            task_type="",
+            context="",
+            dry_run=False,
+        )
+        rc = pm_dispatch.cmd_submit(args)
+        assert rc == 0
+        assert resolve_call["task"]["task_type"] == "implementation"
+        envelope = captured["envelope"]
+        assert envelope["operator_id"] == "mini-codex-gpt55-medium-builder-1"
+        assert envelope["capability_capsule_id"] == "cap.requirement-compiler-implementation"
+        assert envelope["task_type"] == "implementation"
+
+
 def test_cmd_compile_request_rejects_invalid_compiled_package(monkeypatch, tmp_path):
     pm_dispatch = _load_pm_dispatch()
     monkeypatch.setenv("SOLAR_PM_DISPATCH_ALLOW_DIRECT", "1")

@@ -822,6 +822,14 @@ EVALUATOR_VERIFICATION_TASK_TYPES = {
     "acceptance",
 }
 VERIFICATION_CAPSULE_ID = "cap.requirement-compiler-verification"
+IMPLEMENTATION_CAPSULE_ID = "cap.requirement-compiler-implementation"
+IMPLEMENTATION_CAPSULE_TASK_TYPE_ALIASES = {
+    "test": "implementation",
+    "tests": "implementation",
+    "test_gen": "implementation",
+    "test_generation": "implementation",
+    "test_authoring": "implementation",
+}
 AUDIT_CAPSULE_ID = "cap.requirement-compiler-audit"
 AUDIT_CAPSULE_TASK_TYPE_ALIASES = {
     "": "audit_inventory",
@@ -843,6 +851,8 @@ AUDIT_CAPSULE_TASK_TYPE_ALIASES = {
 def _canonicalize_capsule_task_type(capsule_submit: dict[str, Any], task_type: str) -> str:
     capsule_id = str(capsule_submit.get("capability_capsule_id") or "").strip()
     value = str(task_type or "").strip().lower()
+    if capsule_id == IMPLEMENTATION_CAPSULE_ID:
+        return IMPLEMENTATION_CAPSULE_TASK_TYPE_ALIASES.get(value, value or "implementation")
     if capsule_id == AUDIT_CAPSULE_ID:
         return AUDIT_CAPSULE_TASK_TYPE_ALIASES.get(value, value or "audit_inventory")
     return value
