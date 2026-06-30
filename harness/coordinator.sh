@@ -2979,6 +2979,64 @@ mark_builder_flow() {
   grep -qx "${sid}:${intent}" "$marker" 2>/dev/null || echo "${sid}:${intent}" >> "$marker"
 }
 
+truthy_env() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+pm_operator_role_pool_enabled() {
+  truthy_env "${SOLAR_CODEX_ALLOW_PM_OPERATOR_DISPATCH:-}" && return 0
+  truthy_env "${SOLAR_PM_OPERATOR_DISPATCH:-}" && return 0
+  return 1
+}
+
+pm_operator_role_pool_task_seen() {
+  local sid="$1" role="${2:-planner}" node="N0"
+  [[ -n "$sid" ]] || return 1
+  case "$role" in
+    planner) node="N0" ;;
+    builder) node="B0" ;;
+    evaluator) node="E0" ;;
+  esac
+  python3 - "$HARNESS_DIR" "$sid" "$role" "$node" <<'PY' 2>/dev/null
+import json
+import sys
+from pathlib import Path
+
+h = Path(sys.argv[1])
+sid = sys.argv[2]
+role = sys.argv[3]
+node = sys.argv[4]
+prefix = f"pm-{sid}-{node}-"
+
+for status_path in (h / "run" / "operator-status").glob("*.json"):
+    try:
+        data = json.loads(status_path.read_text(encoding="utf-8"))
+    except Exception:
+        continue
+    task_id = str(data.get("current_task_id") or data.get("task_id") or "")
+    if task_id.startswith(prefix):
+        sys.exit(0)
+
+for task_path in (h / "run" / "pm-inbox").glob(f"{prefix}*.json"):
+    try:
+        data = json.loads(task_path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    if not data or str(data.get("requested_role") or role) == role:
+        sys.exit(0)
+
+results_root = h / "run" / "operator-results"
+for operator_dir in results_root.glob("*"):
+    if operator_dir.is_dir() and any(operator_dir.glob(f"{prefix}*")):
+        sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
 handle_queued() {
   local sid="$1" sf="$2"
   local blocked_by
@@ -3091,6 +3149,12 @@ PY
   guard_role="$(workflow_guard_route_role "$sid")"
 
   if [[ "$guard_role" != "builder_main" && "$guard_role" != "builder" ]]; then
+    if pm_operator_role_pool_enabled && pm_operator_role_pool_task_seen "$sid" "planner" \
+      && { [[ ! -s "$design" ]] || [[ ! -s "$plan" ]] || [[ ! -s "$graph" ]]; }; then
+      log "${G}PRD ready → planner role-pool task already active; suppress legacy pane planner dispatch for ${sid}${N}"
+      emit_event "$sid" "planner_role_pool_inflight" "coordinator" "{\"reason\":\"suppress_legacy_pane_dispatch\"}"
+      return 0
+    fi
     if [[ "$req_file" == "$prd" ]]; then
       local prd_err
       if prd_err=$(validate_doc "prd" "$req_file"); then :; else
