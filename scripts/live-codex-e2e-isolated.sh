@@ -35,6 +35,9 @@ poll_seconds="${SOLAR_LIVE_E2E_POLL_SECONDS:-30}"
 prepare_only=0
 cleanup_sandbox=0
 sandbox="${SOLAR_LIVE_E2E_SANDBOX:-}"
+caller_home="${HOME:-}"
+codex_home="${SOLAR_LIVE_E2E_CODEX_HOME:-${CODEX_HOME:-${caller_home}/.codex}}"
+codex_auth_source="none"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -114,6 +117,19 @@ tmux_lab_session="${tmux_session}-lab"
 tmux_bg_session="${tmux_session}-bg"
 status_pid=""
 interrupted=0
+
+classify_codex_auth_source() {
+  if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+    codex_auth_source="OPENAI_API_KEY"
+    return 0
+  fi
+  if [[ -s "$codex_home/auth.json" ]]; then
+    codex_auth_source="CODEX_HOME/auth.json"
+    return 0
+  fi
+  codex_auth_source="missing"
+  return 1
+}
 
 write_invalid_marker() {
   local reason="$1"
@@ -207,6 +223,7 @@ SH
 
   cat > "$env_file" <<ENV
 export HOME=$(printf '%q' "$home_dir")
+export CODEX_HOME=$(printf '%q' "$codex_home")
 export HARNESS_DIR=$(printf '%q' "$iso_harness")
 export SOLAR_HARNESS_DIR=$(printf '%q' "$iso_harness")
 export SPRINTS_DIR=$(printf '%q' "$iso_harness/sprints")
@@ -224,7 +241,7 @@ export SOLAR_LIVE_E2E_RUN_ID=$(printf '%q' "$run_id")
 export PATH=$(printf '%q' "$bin_dir"):\$PATH
 ENV
 
-  python3 - "$manifest" "$branch_name" "$commit_sha" "$repo_dir" "$source_harness" "$sandbox" "$home_dir" "$iso_harness" "$workspace" "$evidence_dir" "$run_id" "$task" <<'PY'
+  python3 - "$manifest" "$branch_name" "$commit_sha" "$repo_dir" "$source_harness" "$sandbox" "$home_dir" "$iso_harness" "$workspace" "$evidence_dir" "$run_id" "$task" "$codex_home" "$codex_auth_source" <<'PY'
 import json, sys, time
 (
     path,
@@ -239,7 +256,9 @@ import json, sys, time
     evidence_dir,
     run_id,
     task,
-) = sys.argv[1:13]
+    codex_home,
+    codex_auth_source,
+) = sys.argv[1:15]
 payload = {
     "run_id": run_id,
     "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -254,6 +273,8 @@ payload = {
     "evidence_dir": evidence_dir,
     "selected_runtime": "codex",
     "allowed_providers": ["openai"],
+    "codex_home": codex_home,
+    "codex_auth_source": codex_auth_source,
     "task": task,
     "live_execution_requires": "SOLAR_LIVE_E2E_ALLOW=1",
     "validity_rules": [
@@ -408,6 +429,7 @@ print("route proof ok: codex/openai only")
 PY
 }
 
+classify_codex_auth_source >/dev/null 2>&1 || true
 prepare_isolated_harness
 
 if [[ "$prepare_only" == "1" ]]; then
@@ -431,7 +453,26 @@ require_cmd curl
 require_cmd tmux
 require_cmd codex
 
+if ! classify_codex_auth_source; then
+  python3 - "$evidence_dir/CODEX_AUTH_PREFLIGHT_FAILED.json" "$codex_home" <<'PY'
+import json, sys, time
+path, codex_home = sys.argv[1:3]
+payload = {
+    "ok": False,
+    "reason": "codex_auth_missing",
+    "codex_home": codex_home,
+    "written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "required": "Set SOLAR_LIVE_E2E_CODEX_HOME to a Codex home containing auth.json, keep CODEX_HOME set, or provide OPENAI_API_KEY.",
+}
+open(path, "w", encoding="utf-8").write(json.dumps(payload, indent=2) + "\n")
+PY
+  echo "Codex auth preflight failed: no OPENAI_API_KEY and no auth.json under CODEX_HOME=$codex_home" >&2
+  echo "Evidence: $evidence_dir/CODEX_AUTH_PREFLIGHT_FAILED.json" >&2
+  exit 4
+fi
+
 export HOME="$home_dir"
+export CODEX_HOME="$codex_home"
 export HARNESS_DIR="$iso_harness"
 export SOLAR_HARNESS_DIR="$iso_harness"
 export SPRINTS_DIR="$iso_harness/sprints"
