@@ -85,6 +85,57 @@ def tmp_harness(tmp_path, monkeypatch):
 class TestSendToPaneLiteral:
     """send_to_pane uses literal input and verifies Claude actually started."""
 
+    def test_node_scoped_patch_diff_satisfies_proof_presence(self, tmp_harness):
+        """A real {sid}.{node}-patch.diff counts as patch_diff proof evidence."""
+        tmp_path, sprints, sid, graph = tmp_harness
+        import graph_node_dispatcher as gnd
+
+        node = graph["nodes"][0]
+        node["proof_obligations"] = [
+            {"kind": "postcondition", "requirement": "output_present", "field": "patch_diff"}
+        ]
+        (sprints / f"{sid}.N1-handoff.md").write_text("# Handoff\n", encoding="utf-8")
+
+        before = gnd._proof_artifact_presence(sid, node)
+        assert before["patch_diff"] is False
+
+        patch_file = sprints / f"{sid}.N1-patch.diff"
+        patch_file.write_text("--- a/x\n+++ b/x\n@@\n+print('ok')\n", encoding="utf-8")
+
+        after = gnd._proof_artifact_presence(sid, node)
+        assert after["patch_diff"] is True
+
+    def test_node_scoped_patch_diff_is_listed_for_evaluator_support(self, tmp_harness):
+        """Eval prompt support artifacts list the node-scoped patch diff path."""
+        tmp_path, sprints, sid, graph = tmp_harness
+        import graph_node_dispatcher as gnd
+
+        node = graph["nodes"][0]
+        node["proof_obligations"] = [
+            {"kind": "postcondition", "requirement": "output_present", "field": "patch_diff"}
+        ]
+        patch_file = sprints / f"{sid}.N1-patch_diff.diff"
+        patch_file.write_text("--- a/x\n+++ b/x\n@@\n+print('ok')\n", encoding="utf-8")
+
+        block = gnd._proof_support_artifacts_block(sid, node)
+
+        assert "patch_diff" in block
+        assert str(patch_file) in block
+        assert "(present)" in block
+
+    def test_guard_scan_targets_include_node_scoped_patch_diff(self, tmp_harness):
+        """Secret/resource guard scans the patch file the node actually wrote."""
+        tmp_path, sprints, sid, graph = tmp_harness
+        import graph_node_dispatcher as gnd
+
+        node = graph["nodes"][0]
+        patch_file = sprints / f"{sid}.N1-patch-diff.diff"
+        patch_file.write_text("--- a/x\n+++ b/x\n@@\n+safe = True\n", encoding="utf-8")
+
+        targets = gnd._collect_guard_scan_targets(sid, node)
+
+        assert patch_file in targets
+
     def test_uses_literal_flag(self, tmp_harness, monkeypatch):
         """_send_to_pane sends command with -l flag (literal mode)."""
         calls_log = []

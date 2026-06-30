@@ -2900,6 +2900,62 @@ def _expected_node_sidecar_file(sid: str, node_id: str, kind: str) -> Path:
     return SPRINTS_DIR / f"{sid}.{_safe_node_id(node_id)}-{kind}{suffix}"
 
 
+def _artifact_path(value: Any) -> Path | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = SPRINTS_DIR / raw
+    return candidate
+
+
+def _node_patch_diff_candidates(sid: str, node: dict[str, Any]) -> list[Path]:
+    """Return patch/diff files that belong to this node.
+
+    Builders/repair workers write node-scoped patch files such as
+    `{sid}.S1-patch.diff` and `{sid}.S1-patch_diff.diff`.  The previous proof
+    path only knew the sprint-level `{sid}.patch.diff`, so a repair could create
+    a real node patch and still fail `output_present: patch_diff`.
+    """
+    node_id = str(node.get("id") or "")
+    nid = _safe_node_id(node_id)
+    artifacts = node.get("artifacts") if isinstance(node.get("artifacts"), dict) else {}
+    candidates: list[Path] = []
+    for key in ("patch_diff", "patch-diff", "patch_diff_path", "patch_path", "diff"):
+        candidate = _artifact_path(artifacts.get(key))
+        if candidate is not None:
+            candidates.append(candidate)
+    candidates.extend(
+        [
+            SPRINTS_DIR / f"{sid}.{nid}-patch.diff",
+            SPRINTS_DIR / f"{sid}.{nid}-patch_diff.diff",
+            SPRINTS_DIR / f"{sid}.{nid}-patch-diff.diff",
+            SPRINTS_DIR / f"{sid}.{nid}.patch.diff",
+            SPRINTS_DIR / f"{sid}.patch.diff",
+        ]
+    )
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return unique
+
+
+def _existing_node_patch_diff(sid: str, node: dict[str, Any]) -> Path | None:
+    for candidate in _node_patch_diff_candidates(sid, node):
+        try:
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
 def _resolve_write_scope_paths(node: dict[str, Any]) -> list[Path]:
     """Resolve a node's write_scope entries to existing filesystem paths, scoped to known roots."""
     roots = [HARNESS_DIR, HARNESS_DIR.parent, SPRINTS_DIR, Path.cwd()]
@@ -2931,9 +2987,9 @@ def _collect_guard_scan_targets(sid: str, node: dict[str, Any]) -> list[Path]:
     handoff = _existing_node_handoff(sid, node, {"nodes": [node]}) or _handoff_file(sid, node_id)
     if handoff and Path(handoff).exists():
         targets.append(Path(handoff))
-    patch = SPRINTS_DIR / f"{sid}.patch.diff"
-    if patch.exists():
-        targets.append(patch)
+    for patch in _node_patch_diff_candidates(sid, node):
+        if patch.exists():
+            targets.append(patch)
     for path in _resolve_write_scope_paths(node):
         if path.is_dir():
             for sub in sorted(path.rglob("*")):
@@ -3020,6 +3076,8 @@ def _proof_obligations_require_field(sid: str, node: dict[str, Any], field: str)
         if str(obligation.get("field") or "") == field:
             return True
         requirement = str(obligation.get("requirement") or "")
+        if field == "patch_diff" and ("patch_diff" in requirement or requirement == "patch diff exists"):
+            return True
         if field == "guard_decision" and requirement in {"check.guard_decision_written", "guard_decision exists"}:
             return True
         if field == "resource_binding" and requirement in {"check.resource_binding_written", "resource_binding exists"}:
@@ -3063,17 +3121,15 @@ def _emit_bridged_artifact_sidecar(sid: str, node: dict[str, Any]) -> Path | Non
     handoff = _existing_node_handoff(sid, node, {"nodes": [node]}) or _handoff_file(sid, node_id)
     candidate_files: list[tuple[str, Path]] = [
         ("handoff_md", Path(handoff)),
-        ("patch_diff", SPRINTS_DIR / f"{sid}.patch.diff"),
         ("guard_decision", _expected_node_sidecar_file(sid, node_id, "guard_decision")),
         ("resource_binding", _expected_node_sidecar_file(sid, node_id, "resource_binding")),
     ]
+    candidate_files.extend(("patch_diff", path) for path in _node_patch_diff_candidates(sid, node))
     artifacts = node.get("artifacts") if isinstance(node.get("artifacts"), dict) else {}
     for key in ("capsule_plan_ir", "physical_plan_ir", "patch_diff", "test_report", "test_log"):
         value = artifacts.get(key)
-        if isinstance(value, str) and value.strip():
-            candidate = Path(value).expanduser()
-            if not candidate.is_absolute():
-                candidate = SPRINTS_DIR / value
+        candidate = _artifact_path(value)
+        if candidate is not None:
             candidate_files.append((key, candidate))
 
     existing_files = "\n".join(
@@ -3137,6 +3193,9 @@ def _proof_support_artifacts_block(sid: str, node: dict[str, Any]) -> str:
         if _proof_obligations_require_field(sid, node, kind):
             existing = _node_sidecar_file(sid, node_id, kind)
             entries.append((kind, existing or _expected_node_sidecar_file(sid, node_id, kind)))
+    if _proof_obligations_require_field(sid, node, "patch_diff"):
+        patch_diff = _existing_node_patch_diff(sid, node)
+        entries.append(("patch_diff", patch_diff or _node_patch_diff_candidates(sid, node)[0]))
     if not entries:
         return "- `N/A`"
     lines = []
@@ -3154,13 +3213,13 @@ def _proof_artifact_presence(sid: str, node: dict[str, Any], eval_json: str | Pa
     handoff = _existing_node_handoff(sid, node, {"nodes": [node]})
     eval_json_path = Path(eval_json).expanduser() if str(eval_json) else _eval_json_file(sid, node_id)
     eval_md_path = _eval_md_file(sid, node_id)
-    patch_path = Path(str(artifacts.get("patch_diff") or "")).expanduser() if artifacts.get("patch_diff") else Path("")
+    patch_path = _existing_node_patch_diff(sid, node)
     test_path = Path(str(artifacts.get("test_log") or artifacts.get("test_report") or "")).expanduser() if (artifacts.get("test_log") or artifacts.get("test_report")) else Path("")
     presence = {
         "handoff_md": bool(handoff and Path(handoff).exists()),
         "eval_json": bool(eval_json_path.exists()),
         "eval_md": bool(eval_md_path.exists()),
-        "patch_diff": bool(str(patch_path) not in {"", "."} and patch_path.exists()) or bool(handoff and node.get("write_scope")),
+        "patch_diff": bool(patch_path),
         "test_log": bool(str(test_path) not in {"", "."} and test_path.exists()),
     }
     # Deterministic guard/resource sidecars (lib/ previously had no lookup — tools/ did).
