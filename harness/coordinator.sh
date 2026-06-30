@@ -3505,15 +3505,22 @@ EOF
       if [[ "${SOLAR_COORD_MULTITASK_SELFCOMPLETE:-0}" == "1" && "$phase" == "graph_dispatch_active" ]]; then
         local mt_rc=0 mt_out="" mt_log="$HARNESS_DIR/run/coord-multitask-${sid}.log"
         local mt_timeout="${SOLAR_COORD_MULTITASK_TIMEOUT_SEC:-90}"
+        local mt_stamp mt_out_file
+        mt_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+        mt_out_file="$HARNESS_DIR/run/coord-multitask-${sid}-${mt_stamp}.out"
         mkdir -p "$HARNESS_DIR/run"
-        mt_out="$(SOLAR_GRAPH_EVAL_OPERATOR_POOL="${SOLAR_GRAPH_EVAL_OPERATOR_POOL:-1}" \
+        HARNESS_DIR="$HARNESS_DIR" \
+          SPRINTS_DIR="$SPRINTS_DIR" \
+          SOLAR_GRAPH_EVAL_OPERATOR_POOL="${SOLAR_GRAPH_EVAL_OPERATOR_POOL:-1}" \
           SOLAR_MULTI_TASK_AUTO_ADVANCE="${SOLAR_MULTI_TASK_AUTO_ADVANCE:-1}" \
+          PYTHONFAULTHANDLER="${PYTHONFAULTHANDLER:-1}" \
           run_with_timeout "$mt_timeout" python3 "$HARNESS_DIR/lib/multi_task_runner.py" start \
             --graph "$SPRINTS_DIR/${sid}.task_graph.json" \
             --max-workers "${SOLAR_COORD_MULTITASK_WORKERS:-1}" \
-            --interval 20 --renderer plain --once 2>&1)" || mt_rc=$?
+            --interval 20 --renderer plain --once >"$mt_out_file" 2>&1 || mt_rc=$?
+        mt_out="$(tail -c 2000 "$mt_out_file" 2>/dev/null || true)"
         {
-          printf '\n[%s] rc=%s workers=%s timeout=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$mt_rc" "${SOLAR_COORD_MULTITASK_WORKERS:-1}" "$mt_timeout"
+          printf '\n[%s] rc=%s workers=%s timeout=%s output=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$mt_rc" "${SOLAR_COORD_MULTITASK_WORKERS:-1}" "$mt_timeout" "$mt_out_file"
           printf '%s\n' "$mt_out"
         } >> "$mt_log"
         if (( mt_rc != 0 )); then
