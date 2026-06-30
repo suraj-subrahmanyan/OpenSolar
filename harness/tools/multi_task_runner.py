@@ -2668,6 +2668,24 @@ def tmux_start(window: str, runner: Path, cwd: Path, dry_run: bool = False) -> N
     )
 
 
+def _profile_attribution_operator_id(profile: dict[str, Any]) -> str:
+    operator_id = str(profile.get("operator_id") or "").strip()
+    if operator_id and operator_id != "N/A":
+        return operator_id
+    if str(profile.get("backend") or "").strip().lower() == "command":
+        name = str(profile.get("name") or "").strip()
+        if name:
+            return name
+    return "N/A"
+
+
+def _profile_dispatch_mode(profile: dict[str, Any]) -> str:
+    backend = str(profile.get("backend") or "").strip().lower()
+    if backend == "command":
+        return "multi_task_command"
+    return "multi_task_tmux"
+
+
 def launch_node(graph_path: Path, graph: dict[str, Any], node: dict[str, Any], args: argparse.Namespace,
                 dry_run: bool = False) -> dict[str, Any]:
     sid = sprint_id_for(graph, graph_path)
@@ -2696,12 +2714,14 @@ def launch_node(graph_path: Path, graph: dict[str, Any], node: dict[str, Any], a
         "provider": capability.get("provider"),
         "capability_status": capability.get("status"),
         "approval_mode": profile.get("approval_mode"),
-        "operator_id": profile.get("operator_id") or "N/A",
+        "operator_id": _profile_attribution_operator_id(profile),
         "operator_vendor": profile.get("operator_vendor") or capability.get("provider") or "N/A",
         "operator_model": profile.get("operator_model") or profile.get("model") or "N/A",
         "operator_pane": profile.get("operator_pane") or "N/A",
         "operator_quota_refresh_at": profile.get("operator_quota_refresh_at") or "N/A",
         "operator_fallback_reason": profile.get("operator_fallback_reason") or "",
+        "dispatch_mode": _profile_dispatch_mode(profile),
+        "submit_mode": "",
         "quota_fallback_from": profile.get("quota_fallback_from") or node.get("quota_fallback_from") or "",
         "quota_fallback_reason": profile.get("quota_fallback_reason") or node.get("quota_fallback_reason") or "",
         "graph": str(graph_path),

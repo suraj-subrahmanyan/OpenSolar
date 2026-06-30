@@ -3291,6 +3291,32 @@ def _operator_submit_eligible(profile: dict[str, Any], dry_run: bool = False) ->
     )
 
 
+def _profile_attribution_operator_id(profile: dict[str, Any]) -> str:
+    """Return a durable operator label for status/runstate without changing submit routing.
+
+    Physical-operator dispatch requires a concrete profile["operator_id"]. Command-backed
+    multi-task profiles such as codex-evaluator intentionally lack one, so they should stay on
+    the legacy command/tmux path. Still, recording "N/A" erases provider proof for successful
+    command-backed runs. Use the profile name as a stable attribution label only for command
+    profiles; _operator_submit_eligible continues to use the raw operator_id.
+    """
+    operator_id = str(profile.get("operator_id") or "").strip()
+    if operator_id and operator_id != "N/A":
+        return operator_id
+    if str(profile.get("backend") or "").strip().lower() == "command":
+        name = str(profile.get("name") or "").strip()
+        if name:
+            return name
+    return "N/A"
+
+
+def _profile_dispatch_mode(profile: dict[str, Any]) -> str:
+    backend = str(profile.get("backend") or "").strip().lower()
+    if backend == "command":
+        return "multi_task_command"
+    return "multi_task_tmux"
+
+
 def _operator_result_path(operator_id: str, dispatch_id: str) -> Path:
     return HARNESS_DIR / "run" / "operator-results" / operator_id / dispatch_id / "result.json"
 
@@ -3354,6 +3380,8 @@ def _record_node_attribution(sid: str, node_id: str, payload: dict[str, Any], ta
             "operator_id": payload.get("operator_id"),
             "profile": payload.get("profile"),
             "role": payload.get("role"),
+            "dispatch_mode": payload.get("dispatch_mode") or payload.get("submit_mode"),
+            "submit_mode": payload.get("submit_mode"),
             "work_dir": payload.get("work_dir"),
             "status_path": str(status_path(task_dir)),
             "phase": phase or payload.get("status"),
@@ -3398,12 +3426,14 @@ def launch_node(graph_path: Path, graph: dict[str, Any], node: dict[str, Any], a
         "provider": capability.get("provider"),
         "capability_status": capability.get("status"),
         "approval_mode": profile.get("approval_mode"),
-        "operator_id": profile.get("operator_id") or "N/A",
+        "operator_id": _profile_attribution_operator_id(profile),
         "operator_vendor": profile.get("operator_vendor") or capability.get("provider") or "N/A",
         "operator_model": profile.get("operator_model") or profile.get("model") or "N/A",
         "operator_pane": profile.get("operator_pane") or "N/A",
         "operator_quota_refresh_at": profile.get("operator_quota_refresh_at") or "N/A",
         "operator_fallback_reason": profile.get("operator_fallback_reason") or "",
+        "dispatch_mode": _profile_dispatch_mode(profile),
+        "submit_mode": "",
         "quota_fallback_from": profile.get("quota_fallback_from") or node.get("quota_fallback_from") or "",
         "quota_fallback_reason": profile.get("quota_fallback_reason") or node.get("quota_fallback_reason") or "",
         "graph": str(graph_path),
@@ -3431,6 +3461,7 @@ def launch_node(graph_path: Path, graph: dict[str, Any], node: dict[str, Any], a
             result_path = _operator_result_path(operator_id, dispatch_id)
             payload.update(submit_result)
             payload["submit_mode"] = "operatord"
+            payload["dispatch_mode"] = "operatord"
             payload["result_path"] = str(result_path)
             payload["updated_at"] = now_iso()
             json_write(status_path(task_dir), payload)
@@ -3461,6 +3492,8 @@ def launch_node(graph_path: Path, graph: dict[str, Any], node: dict[str, Any], a
             return payload
         except (RuntimeError, ValueError) as exc:
             payload["operator_submit_fallback"] = "legacy"
+            payload["submit_mode"] = ""
+            payload["dispatch_mode"] = _profile_dispatch_mode(profile)
             payload["operator_submit_error"] = str(exc)
             payload["updated_at"] = now_iso()
             json_write(status_path(task_dir), payload)
@@ -3572,6 +3605,17 @@ def _advance_graph(graph_path: Path | str) -> dict[str, Any]:
                         op_id = str(closeout.get("operator_id") or "")
                     if op_id:
                         _record_operator_runtime_failure(op_id, str(r.get("reason") or "closeout"))
+                try:
+                    import graph_scheduler
+
+                    summary["status_sync"] = graph_scheduler.sync_status_cache_from_graph(
+                        graph,
+                        str(graph_path),
+                        actor="multi_task_runner",
+                        event="multi_task_auto_advance_reconciled",
+                    )
+                except Exception as sync_exc:
+                    summary["status_sync_error"] = f"{type(sync_exc).__name__}: {sync_exc}"
         except Exception as exc:
             summary["reconcile_error"] = f"{type(exc).__name__}: {exc}"
     except Exception as exc:
