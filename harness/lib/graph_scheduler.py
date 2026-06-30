@@ -1867,7 +1867,7 @@ def _role_penalty(node_role: str, worker_role: str) -> int | None:
 # binding/eval ever runs. The "resource."/"guard." prefixes are registry-safe (the capability-capsule
 # registry only declares resource/guard caps under those prefixes).
 _DISPATCH_PROVISIONED_CAP_PREFIXES = ("resource.", "guard.")
-_DISPATCH_PROVISIONED_CAPS = frozenset({"scope_compliance"})
+_DISPATCH_PROVISIONED_CAPS = frozenset({"scope_compliance", "repo-workspace"})
 _BUILDER_WORK_LOGICAL_OPERATORS = frozenset({
     "ImplementationWorker",
     "PatchWorker",
