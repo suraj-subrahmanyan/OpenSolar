@@ -148,6 +148,84 @@ open(path, "w", encoding="utf-8").write(json.dumps(payload, indent=2) + "\n")
 PY
 }
 
+model_registry_preflight() {
+  local failure_path="$evidence_dir/MODEL_REGISTRY_PREFLIGHT_FAILED.json"
+  PYTHONPATH="$iso_harness/lib" python3 - "$iso_harness" "$failure_path" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+import model_registry
+
+harness = Path(sys.argv[1])
+failure_path = Path(sys.argv[2])
+registry_path = harness / "config" / "model-registry.json"
+config_path = harness / "config" / "solar-user-config.json"
+roles = ["pm", "planner", "builder", "evaluator"]
+
+errors = []
+resolved = {}
+try:
+    registry = model_registry.load_registry(registry_path)
+except Exception as exc:
+    registry = {}
+    errors.append({
+        "kind": "registry_load_failed",
+        "path": str(registry_path),
+        "error": f"{type(exc).__name__}: {exc}",
+    })
+
+try:
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+except Exception as exc:
+    config = {}
+    errors.append({
+        "kind": "runtime_config_load_failed",
+        "path": str(config_path),
+        "error": f"{type(exc).__name__}: {exc}",
+    })
+
+models = config.get("models") if isinstance(config.get("models"), dict) else {}
+for role in roles:
+    alias = str(models.get(role) or "").strip()
+    if not alias:
+        errors.append({"kind": "missing_role_model", "role": role})
+        continue
+    try:
+        spec = model_registry.spec(registry, alias)
+        if not spec.get("main_allowed"):
+            raise SystemExit(f"model not allowed on main panes: {alias}")
+        resolved[role] = {
+            "alias": alias,
+            "canonical": spec.get("id"),
+            "provider": spec.get("provider"),
+            "model_key": spec.get("model_key"),
+        }
+    except SystemExit as exc:
+        errors.append({
+            "kind": "unsupported_role_model",
+            "role": role,
+            "alias": alias,
+            "error": str(exc),
+        })
+
+if errors:
+    payload = {
+        "ok": False,
+        "reason": "model_registry_preflight_failed",
+        "written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "registry": str(registry_path),
+        "runtime_config": str(config_path),
+        "selected_runtime": config.get("runtime"),
+        "errors": errors,
+        "resolved": resolved,
+    }
+    failure_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    raise SystemExit(1)
+PY
+}
+
 cleanup() {
   local exit_code=$?
   if [[ "$interrupted" == "1" ]]; then
@@ -431,6 +509,11 @@ PY
 
 classify_codex_auth_source >/dev/null 2>&1 || true
 prepare_isolated_harness
+if ! model_registry_preflight; then
+  echo "Model registry preflight failed before live run or /intake." >&2
+  echo "Evidence: $evidence_dir/MODEL_REGISTRY_PREFLIGHT_FAILED.json" >&2
+  exit 5
+fi
 
 if [[ "$prepare_only" == "1" ]]; then
   echo "PREPARE_ONLY PASS"
