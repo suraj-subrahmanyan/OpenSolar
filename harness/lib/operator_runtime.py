@@ -100,11 +100,37 @@ def _active_record_processes_dead(record: Dict[str, Any]) -> bool:
     return bool(pids) and all(not _pid_exists(pid) for pid in pids)
 
 
+def _active_status_without_process_stale(record: Dict[str, Any]) -> bool:
+    """True when an active status has no process evidence and its heartbeat is stale."""
+    if str(record.get("runtime_state") or record.get("state") or "") not in {"leased", "running", "draining"}:
+        return False
+    if _coerce_pid(record.get("worker_pid")) is not None or _coerce_pid(record.get("daemon_pid")) is not None:
+        return False
+    observed_at = _parse_utc(
+        str(
+            record.get("heartbeat_at")
+            or record.get("updated_at")
+            or record.get("started_at")
+            or record.get("leased_at")
+            or ""
+        )
+    )
+    if observed_at is None:
+        return True
+    try:
+        stale_seconds = int(os.environ.get("SOLAR_OPERATOR_ACTIVE_STATUS_STALE_SECONDS", "900") or "900")
+    except Exception:
+        stale_seconds = 900
+    return (datetime.datetime.now(datetime.timezone.utc) - observed_at).total_seconds() >= max(1, stale_seconds)
+
+
 def _clear_stale_active_status(operator_id: str) -> bool:
     status = get_operator_status(operator_id)
     if not status:
         return False
-    if status.get("runtime_state") in {"leased", "running"} and _active_record_processes_dead(status):
+    if status.get("runtime_state") in {"leased", "running", "draining"} and (
+        _active_record_processes_dead(status) or _active_status_without_process_stale(status)
+    ):
         clear_operator_status(operator_id)
         return True
     return False
@@ -397,7 +423,9 @@ def get_operator_runtime_state(operator_id: str) -> str:
     status = get_operator_status(operator_id)
     if status:
         r_state = status.get("runtime_state")
-        if r_state in {"leased", "running"} and _active_record_processes_dead(status):
+        if r_state in {"leased", "running", "draining"} and (
+            _active_record_processes_dead(status) or _active_status_without_process_stale(status)
+        ):
             clear_operator_status(operator_id)
             r_state = ""
         if r_state in VALID_STATES:

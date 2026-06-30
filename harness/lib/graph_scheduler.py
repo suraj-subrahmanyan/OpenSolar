@@ -415,6 +415,23 @@ def _status_path_for_graph(graph: dict[str, Any], graph_path: str | Path | None 
     return SPRINTS_DIR / f"{sid}.status.json"
 
 
+def _write_route_proof_for_sprint(sid: str) -> dict[str, Any]:
+    if not sid:
+        return {}
+    try:
+        import route_proof  # type: ignore
+
+        return route_proof.write_route_proof(HARNESS_DIR, sid, sprints_dir=SPRINTS_DIR)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "enforced": False,
+            "sprint_id": sid,
+            "error": str(exc),
+            "reason": "route_proof_write_failed",
+        }
+
+
 def _status_has_terminal_evidence(sid: str, status: dict[str, Any] | None = None, graph_path: str | Path | None = None) -> bool:
     base_dir = Path(graph_path).expanduser().parent if graph_path else SPRINTS_DIR
     if (base_dir / f"{sid}.finalized").exists():
@@ -681,6 +698,19 @@ def sync_status_cache_from_graph(
             return result
         result["reason"] = "parent_projection_refreshed" if result.get("created") else "parent_not_ready"
         return result
+
+    route_proof = _write_route_proof_for_sprint(sid)
+    if route_proof:
+        result["route_proof"] = {
+            "ok": route_proof.get("ok"),
+            "path": route_proof.get("path"),
+            "selected_runtime": route_proof.get("selected_runtime"),
+            "allowed_providers": route_proof.get("allowed_providers", []),
+            "violations": route_proof.get("violations", []),
+        }
+        if route_proof.get("enforced") and not route_proof.get("ok"):
+            result.update({"ok": False, "reason": "route_proof_violation"})
+            return result
 
     already_passed = str(current.get("status") or "").lower() == "passed"
     already_closed = not current.get("active_node") and str(current.get("stage") or "").lower() in {

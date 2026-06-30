@@ -6060,6 +6060,26 @@ def _append_event(sid: str, event: dict[str, Any]) -> None:
             pass
 
 
+def _write_route_proof_for_sprint(sid: str) -> dict[str, Any]:
+    if not sid:
+        return {}
+    try:
+        lib_dir = HARNESS_DIR / "lib"
+        if str(lib_dir) not in sys.path:
+            sys.path.insert(0, str(lib_dir))
+        import route_proof  # type: ignore
+
+        return route_proof.write_route_proof(HARNESS_DIR, sid, sprints_dir=SPRINTS_DIR)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "enforced": False,
+            "sprint_id": sid,
+            "error": str(exc),
+            "reason": "route_proof_write_failed",
+        }
+
+
 def _mark_parent_sprint_passed_if_ready(sid: str, parent: dict[str, Any], dry_run: bool) -> bool:
     if dry_run or not parent.get("ready"):
         return False
@@ -6069,6 +6089,20 @@ def _mark_parent_sprint_passed_if_ready(sid: str, parent: dict[str, Any], dry_ru
     try:
         data = json.loads(status_file.read_text(encoding="utf-8"))
     except Exception:
+        return False
+
+    route = _write_route_proof_for_sprint(sid)
+    if route.get("enforced") and not route.get("ok"):
+        _append_event(sid, {
+            "event": "graph_parent_ready_route_proof_blocked",
+            "by": "graph-dispatch",
+            "data": {
+                "path": route.get("path"),
+                "selected_runtime": route.get("selected_runtime"),
+                "allowed_providers": route.get("allowed_providers", []),
+                "violations": route.get("violations", []),
+            },
+        })
         return False
 
     now = _utc_now()
