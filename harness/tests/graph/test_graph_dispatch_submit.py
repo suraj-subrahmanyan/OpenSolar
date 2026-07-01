@@ -923,6 +923,78 @@ class TestSendToPaneLiteral:
 
         assert [node["id"] for node in ready] == ["N2"]
 
+    def test_active_repair_is_not_dependency_terminalized_by_stale_failed_result(self, tmp_harness):
+        """A stale failed node_result from the first eval round must not close downstream nodes."""
+        tmp_path, sprints, sid, graph = tmp_harness
+        from graph_scheduler import (
+            node_status,
+            parent_ready_check,
+            terminalize_dependency_blocked_nodes,
+        )
+
+        graph["nodes"] = [
+            {
+                "id": "S1",
+                "status": "failed_review",
+                "depends_on": [],
+                "write_scope": ["/tmp/uniqwords.py"],
+                "repair_attempts": 1,
+                "repair_context": {
+                    "attempt": 1,
+                    "max_attempts": 1,
+                    "created_at": "2026-07-01T19:00:44Z",
+                },
+            },
+            {"id": "S2", "status": "pending", "depends_on": ["S1"], "write_scope": ["/tmp/test_uniqwords.py"]},
+        ]
+        graph["node_results"] = {
+            "S1": {"status": "failed", "updated_at": "2026-07-01T19:00:58Z"},
+        }
+
+        terminalized = terminalize_dependency_blocked_nodes(graph)
+        parent = parent_ready_check(graph)
+
+        assert terminalized == []
+        assert node_status(graph, "S1") == "failed_review"
+        assert graph["nodes"][1]["status"] == "pending"
+        assert parent["failed_nodes"] == []
+        assert parent["open_nodes"] == ["S1", "S2"]
+
+    def test_repair_completed_handoff_schedules_fresh_evaluator_dispatch(self, tmp_harness, monkeypatch):
+        """After repair output exists, the node returns to review and gets a new eval generation."""
+        tmp_path, sprints, sid, graph = tmp_harness
+        import graph_node_dispatcher as gnd
+
+        graph_path = sprints / f"{sid}.task_graph.json"
+        node = graph["nodes"][0]
+        node["status"] = "reviewing"
+        node["repair_attempts"] = 1
+        node["repair_context"] = {
+            "attempt": 1,
+            "max_attempts": 1,
+            "created_at": "2026-07-01T19:00:44Z",
+        }
+        graph["node_results"] = {"N1": {"status": "reviewing"}}
+        graph_path.write_text(json.dumps(graph) + "\n", encoding="utf-8")
+        handoff = sprints / f"{sid}.N1-handoff.md"
+        handoff.write_text("# repaired handoff\n\nUnicode normalization fixed.\n", encoding="utf-8")
+        monkeypatch.setattr(
+            gnd,
+            "_discover_evaluators",
+            lambda dry_run=False: [{"pane": "operator:mini-codex-gpt55-medium-evaluator-1", "busy": False}],
+        )
+
+        result = gnd.dispatch_node_evals(str(graph_path), dry_run=True, max_items=1)
+
+        assert result["ok"] is True
+        assert result["dispatched"][0]["node"] == "N1"
+        assert result["dispatched"][0]["pane"] == "operator:mini-codex-gpt55-medium-evaluator-1"
+        instruction = sprints / f"{sid}.N1-eval-dispatch-q1.md"
+        text = instruction.read_text(encoding="utf-8")
+        assert '"eval_generation": 1' in text
+        assert '"repair_attempt": 1' in text
+        assert '"repair_context_created_at": "2026-07-01T19:00:44Z"' in text
+
     def test_dispatch_text_includes_repair_feedback(self, tmp_harness):
         """A repair dispatch gives the builder evaluator errors and fix hints."""
         tmp_path, sprints, sid, graph = tmp_harness

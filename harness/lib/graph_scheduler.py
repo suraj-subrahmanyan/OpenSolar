@@ -42,6 +42,19 @@ PASS_STATUSES = {"passed"}
 CLOSED_NON_PASS_STATUSES = {"skipped", "cancelled", "skipped_parent_passed"}
 DEPENDENCY_BLOCK_STATUSES = {"failed", "cancelled", "skipped", "skipped_parent_passed", "needs_human_review"}
 SPRINTS_DIR = Path(os.environ.get("HARNESS_SPRINTS_DIR", HARNESS_DIR / "sprints"))
+REPAIR_ACTIVE_STATUSES = {
+    "failed_review",
+    "reviewing",
+    "assigned",
+    "dispatched",
+    "in_progress",
+    "running",
+    "pending",
+    "queued",
+    "blocked",
+    "worker_blocked",
+    "",
+}
 
 
 def _effective_graph_max_parallel(default: int | None = None) -> int | None:
@@ -669,6 +682,28 @@ def sync_status_cache_from_graph(
             )
             result.update({"updated": True, "status": current, "reason": "parent_failed"})
             return result
+        if str(current.get("status") or "").lower() == "failed" and open_nodes:
+            current = _project_status_via_runtime(
+                status_path,
+                new_status="active",
+                actor=actor,
+                event="graph_parent_failed_reopened_for_repair",
+                graph_path=graph_path,
+                allow_reopen=True,
+                status_fields={
+                    "phase": "graph_in_progress",
+                    "stage": "graph_in_progress",
+                    "active_node": desired_active_node,
+                    "open_nodes": open_nodes,
+                    "failed_nodes": failed_nodes,
+                    "graph_parent_ready": parent,
+                    "task_graph_status": "active",
+                    "completed_at": None,
+                },
+                extra={"note": "task_graph has active repair/re-eval work; revoking stale failed parent projection"},
+            )
+            result.update({"updated": True, "status": current, "reason": "parent_reopened_for_repair"})
+            return result
         projection_changed = any([
             current.get("active_node") != desired_active_node,
             list(current.get("open_nodes") or []) != list(open_nodes),
@@ -865,6 +900,22 @@ def _status_rank(status: str) -> int:
     if value in {"assigned", "queued"}:
         return 1
     return 0
+
+
+def _node_has_active_repair_context(node: dict[str, Any]) -> bool:
+    """Return true when a failed eval has opened a repair/re-eval generation.
+
+    During repair, stale `node_results` from the failed evaluator can briefly
+    disagree with the inline node state. The inline repair context is the
+    authoritative signal that the failure is not terminal yet.
+    """
+    repair_context = node.get("repair_context")
+    if not isinstance(repair_context, dict):
+        return False
+    inline_status = str(node.get("status", "") or "").strip().lower()
+    if inline_status not in REPAIR_ACTIVE_STATUSES:
+        return False
+    return bool(repair_context.get("attempt") or repair_context.get("created_at"))
 
 
 def _node_eval_json_candidates(graph: dict[str, Any], node_id: str) -> list[Path]:
@@ -1214,7 +1265,9 @@ def node_status(graph: dict[str, Any], node_id: str) -> str:
     if node_id in results and isinstance(results[node_id], dict):
         result_status = str(results[node_id].get("status", "") or "").lower()
         node_status_value = str(node.get("status", "pending") or "pending").lower()
-        if gate_passed and "failed" not in {result_status, node_status_value}:
+        if _node_has_active_repair_context(node) and result_status in (TERMINAL_STATUSES | {"needs_human_review"}):
+            status = node_status_value or "failed_review"
+        elif gate_passed and "failed" not in {result_status, node_status_value}:
             status = "passed"
         else:
             result_rank = _status_rank(result_status)
