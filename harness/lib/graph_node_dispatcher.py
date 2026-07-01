@@ -3056,23 +3056,47 @@ def _read_json_file_safe(path: str | Path) -> dict[str, Any]:
         return {}
 
 
+def _append_proof_obligations(out: list[dict[str, Any]], payload: Any) -> None:
+    if isinstance(payload, dict) and isinstance(payload.get("proof_obligations"), list):
+        out.extend(item for item in payload.get("proof_obligations", []) if isinstance(item, dict))
+
+
+def _dedupe_proof_obligations(obligations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for item in obligations:
+        try:
+            key = json.dumps(item, sort_keys=True, ensure_ascii=False)
+        except Exception:
+            key = repr(sorted(item.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
 def _node_proof_obligations(sid: str, node: dict[str, Any]) -> list[dict[str, Any]]:
-    obligations = node.get("proof_obligations")
-    if isinstance(obligations, list):
-        return [item for item in obligations if isinstance(item, dict)]
+    obligations: list[dict[str, Any]] = []
+    inline = node.get("proof_obligations")
+    if isinstance(inline, list):
+        obligations.extend(item for item in inline if isinstance(item, dict))
+
     for key in ("capsule_plan_ir", "physical_plan_ir"):
         payload = node.get(key)
-        if isinstance(payload, dict) and isinstance(payload.get("proof_obligations"), list):
-            return [item for item in payload.get("proof_obligations", []) if isinstance(item, dict)]
+        if isinstance(payload, dict):
+            _append_proof_obligations(obligations, payload)
+        elif isinstance(payload, str) and payload.strip():
+            _append_proof_obligations(obligations, _read_json_file_safe(_artifact_path(payload) or payload))
+
     artifacts = node.get("artifacts") if isinstance(node.get("artifacts"), dict) else {}
     for key in ("capsule_plan_ir", "physical_plan_ir"):
         path = artifacts.get(key)
         if not path:
             continue
-        data = _read_json_file_safe(path)
-        if isinstance(data.get("proof_obligations"), list):
-            return [item for item in data.get("proof_obligations", []) if isinstance(item, dict)]
-    return []
+        _append_proof_obligations(obligations, _read_json_file_safe(_artifact_path(path) or path))
+
+    return _dedupe_proof_obligations(obligations)
 
 
 # --- Deterministic secret-leak guard + resource binding (general builder/operator path) ---
@@ -3167,18 +3191,32 @@ def _node_patch_diff_candidates(sid: str, node: dict[str, Any]) -> list[Path]:
 def _existing_node_patch_diff(sid: str, node: dict[str, Any]) -> Path | None:
     for candidate in _node_patch_diff_candidates(sid, node):
         try:
-            if candidate.exists() and candidate.is_file():
+            if candidate.exists() and candidate.is_file() and candidate.stat().st_size > 0:
                 return candidate
         except Exception:
             continue
     return None
 
 
-def _resolve_write_scope_paths(node: dict[str, Any]) -> list[Path]:
+def _resolve_write_scope_paths(node: dict[str, Any], sid: str = "") -> list[Path]:
     """Resolve a node's write_scope entries to existing filesystem paths, scoped to known roots."""
-    roots = [HARNESS_DIR, HARNESS_DIR.parent, SPRINTS_DIR, Path.cwd()]
+    roots: list[Path] = []
+    if sid:
+        roots.extend(
+            [
+                SPRINTS_DIR / sid / "workdir",
+                SPRINTS_DIR / sid,
+                HARNESS_DIR / "sprints" / sid / "workdir",
+                HARNESS_DIR / "sprints" / sid,
+            ]
+        )
+    roots.extend([HARNESS_DIR, HARNESS_DIR.parent, SPRINTS_DIR, Path.cwd()])
     resolved: list[Path] = []
-    for entry in (node.get("write_scope") or []):
+    entries: list[Any] = list(node.get("write_scope") or [])
+    for entry in (node.get("outputs") or []):
+        if entry not in entries:
+            entries.append(entry)
+    for entry in entries:
         rel = str(entry or "").strip()
         if not rel:
             continue
@@ -3208,7 +3246,7 @@ def _collect_guard_scan_targets(sid: str, node: dict[str, Any]) -> list[Path]:
     for patch in _node_patch_diff_candidates(sid, node):
         if patch.exists():
             targets.append(patch)
-    for path in _resolve_write_scope_paths(node):
+    for path in _resolve_write_scope_paths(node, sid):
         if path.is_dir():
             for sub in sorted(path.rglob("*")):
                 if sub.is_file():
@@ -3271,14 +3309,41 @@ def _new_file_patch_for_path(path: Path) -> str:
     return "\n".join(out) + "\n"
 
 
+def _node_requires_patch_diff(sid: str, node: dict[str, Any]) -> bool:
+    return _proof_obligations_require_field(sid, node, "patch_diff")
+
+
+def _patch_diff_not_emitted_file(sid: str, node: dict[str, Any]) -> Path:
+    return SPRINTS_DIR / f"{sid}.{_safe_node_id(str(node.get('id') or ''))}-patch_diff_not_emitted.json"
+
+
+def _record_patch_diff_not_emitted(sid: str, node: dict[str, Any], reason: str) -> None:
+    payload = {
+        "node_id": str(node.get("id") or ""),
+        "reason": reason,
+        "write_scope": list(node.get("write_scope") or []),
+        "outputs": list(node.get("outputs") or []),
+        "checked_at": _utc_now(),
+    }
+    try:
+        path = _patch_diff_not_emitted_file(sid, node)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
 def _emit_node_patch_diff_sidecar(sid: str, node: dict[str, Any]) -> Path | None:
-    if not _proof_obligations_require_field(sid, node, "patch_diff"):
+    if not _node_requires_patch_diff(sid, node):
         return None
     existing = _existing_node_patch_diff(sid, node)
     if existing is not None:
         return existing
-    targets = [path for path in _resolve_write_scope_paths(node) if path.is_file()]
+    targets = [path for path in _resolve_write_scope_paths(node, sid) if path.is_file()]
     if not targets:
+        _record_patch_diff_not_emitted(sid, node, "patch_diff_not_emitted_no_write_scope_targets")
         return None
     patch_path = _node_patch_diff_candidates(sid, node)[0]
     parts = [
@@ -3340,11 +3405,17 @@ def _emit_guard_resource_sidecars(sid: str, node: dict[str, Any]) -> dict[str, A
 
 
 def _proof_obligations_require_field(sid: str, node: dict[str, Any], field: str) -> bool:
+    field = str(field or "").strip()
     for obligation in _node_proof_obligations(sid, node):
-        if str(obligation.get("field") or "") == field:
+        obligation_field = str(obligation.get("field") or "").strip()
+        if obligation_field == field:
             return True
-        requirement = str(obligation.get("requirement") or "")
-        if field == "patch_diff" and ("patch_diff" in requirement or requirement == "patch diff exists"):
+        requirement = str(obligation.get("requirement") or "").strip().lower()
+        if field == "patch_diff" and (
+            "patch_diff" in requirement
+            or requirement == "patch diff exists"
+            or (requirement == "output_present" and obligation_field == "patch_diff")
+        ):
             return True
         if field == "guard_decision" and requirement in {"check.guard_decision_written", "guard_decision exists"}:
             return True

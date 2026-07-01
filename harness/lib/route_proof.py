@@ -110,6 +110,52 @@ def _iter_operator_results(harness_dir: Path, sid: str) -> list[tuple[Path, dict
     return rows
 
 
+def _artifact_path(harness_dir: Path, value: Any) -> Path | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = harness_dir / "sprints" / raw
+    return path
+
+
+def _iter_task_graph_nodes(harness_dir: Path, sid: str) -> list[dict[str, Any]]:
+    graph = _read_json(harness_dir / "sprints" / f"{sid}.task_graph.json")
+    nodes = graph.get("nodes")
+    return [node for node in nodes if isinstance(node, dict)] if isinstance(nodes, list) else []
+
+
+def _physical_selected_operator_ids(harness_dir: Path, node: dict[str, Any]) -> list[dict[str, str]]:
+    selected: list[dict[str, str]] = []
+
+    def add(value: Any, source: str) -> None:
+        operator_id = str(value or "").strip()
+        if operator_id:
+            selected.append({"operator_id": operator_id, "source": source})
+
+    artifacts = node.get("artifacts") if isinstance(node.get("artifacts"), dict) else {}
+    add(artifacts.get("selected_operator_id"), "task_graph.artifacts.selected_operator_id")
+
+    inline = node.get("physical_plan_ir") if isinstance(node.get("physical_plan_ir"), dict) else {}
+    add(inline.get("selected_operator_id"), "task_graph.physical_plan_ir.selected_operator_id")
+
+    physical_path = _artifact_path(harness_dir, artifacts.get("physical_plan_ir"))
+    if physical_path is not None:
+        physical = _read_json(physical_path)
+        add(physical.get("selected_operator_id"), f"physical_plan_ir:{physical_path}")
+
+    deduped: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in selected:
+        key = (item["operator_id"], item["source"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
 def _stage_key(data: dict[str, Any], path: Path) -> str:
     task_id = str(data.get("task_id") or "").strip()
     if task_id:
@@ -236,6 +282,37 @@ def build_route_proof(
         stages.values(),
         key=lambda item: (str(item.get("node_id") or ""), str(item.get("task_id") or "")),
     )
+    actual_operator_ids_by_node: dict[str, set[str]] = {}
+    for stage in stage_list:
+        node_id = str(stage.get("node_id") or "").strip()
+        operator_id = str(stage.get("operator_id") or "").strip()
+        if node_id and operator_id:
+            actual_operator_ids_by_node.setdefault(node_id, set()).add(operator_id)
+
+    attribution_warnings: list[dict[str, Any]] = []
+    for node in _iter_task_graph_nodes(harness, sid):
+        node_id = str(node.get("id") or "").strip()
+        if not node_id:
+            continue
+        actual_operator_ids = actual_operator_ids_by_node.get(node_id, set())
+        if not actual_operator_ids:
+            continue
+        for selected in _physical_selected_operator_ids(harness, node):
+            selected_operator_id = selected["operator_id"]
+            if selected_operator_id in actual_operator_ids:
+                continue
+            attribution_warnings.append(
+                {
+                    "node_id": node_id,
+                    "reason": "stale_physical_plan_selected_operator",
+                    "selected_operator_id": selected_operator_id,
+                    "selected_operator_source": selected["source"],
+                    "actual_operator_ids": sorted(actual_operator_ids),
+                    "trusted_sources": ["operator_result", "pm_record"],
+                    "diagnostic": "physical_plan_selected_operator_untrusted_for_route_proof",
+                }
+            )
+
     return {
         "ok": not violations,
         "generated_at": _utc_now(),
@@ -244,6 +321,9 @@ def build_route_proof(
         "allowed_providers": sorted(allowed),
         "enforced": enforce,
         "violations": violations,
+        "diagnostics": {
+            "attribution_warnings": attribution_warnings,
+        },
         "stage_count": len(stage_list),
         "stages": stage_list,
     }

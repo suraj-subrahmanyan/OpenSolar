@@ -164,3 +164,42 @@ def test_scheduler_closeout_blocks_route_proof_violation(tmp_path, monkeypatch):
     assert result["route_proof"]["violations"][0]["provider"] == "anthropic"
     status = json.loads((sprints / f"{sid}.status.json").read_text(encoding="utf-8"))
     assert status["status"] == "active"
+
+
+def test_stale_physical_plan_operator_does_not_override_route_proof(tmp_path):
+    harness = tmp_path / "harness"
+    sprints = harness / "sprints"
+    sid = "sprint-stale-physical-plan"
+    _seed_registry(harness)
+    _seed_pm_record(harness, sid, "task-builder", node_id="S1", role="builder", operator_id="codex-builder")
+    _seed_result(harness, sid, "task-builder", node_id="S1", operator_id="codex-builder", provider="openai")
+    physical_plan = sprints / f"{sid}.S1-physical-plan.json"
+    _write_json(physical_plan, {"selected_operator_id": "mini-claude-sonnet-builder"})
+    _write_json(
+        sprints / f"{sid}.task_graph.json",
+        {
+            "sprint_id": sid,
+            "nodes": [
+                {
+                    "id": "S1",
+                    "artifacts": {
+                        "selected_operator_id": "mini-claude-sonnet-builder",
+                        "physical_plan_ir": str(physical_plan),
+                    },
+                }
+            ],
+        },
+    )
+
+    proof = route_proof.write_route_proof(harness, sid)
+
+    assert proof["ok"] is True
+    assert proof["violations"] == []
+    assert proof["stages"][0]["operator_id"] == "codex-builder"
+    assert proof["stages"][0]["provider"] == "openai"
+    warnings = proof["diagnostics"]["attribution_warnings"]
+    assert warnings
+    assert warnings[0]["reason"] == "stale_physical_plan_selected_operator"
+    assert warnings[0]["selected_operator_id"] == "mini-claude-sonnet-builder"
+    assert warnings[0]["actual_operator_ids"] == ["codex-builder"]
+    assert warnings[0]["diagnostic"] == "physical_plan_selected_operator_untrusted_for_route_proof"
