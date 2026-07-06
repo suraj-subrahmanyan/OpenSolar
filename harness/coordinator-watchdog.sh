@@ -179,6 +179,16 @@ do_check() {
     fi
   done
 
+  # Lane 0 PR-3 (F4 / AC-R7.4, M1 rule): a run-terminal marker from the process
+  # registry suppresses respawn — check the resolved sprint's marker when one
+  # resolves, else the harness-global marker; fail-open (respawn) when neither
+  # exists. Defeats the watchdog-respawns-coordinator-past-teardown class (F-043).
+  local _prt="$HARNESS_DIR/run/process-registry"
+  if [[ -f "$_prt/harness.terminal" ]] || { [[ -n "$active_sid" ]] && [[ -f "$_prt/${active_sid}.terminal" ]]; }; then
+    log "Coordinator respawn suppressed: run-terminal marker present (process registry)"
+    return 0
+  fi
+
   bash "$HARNESS_DIR/coordinator.sh" >> "$HARNESS_DIR/.coordinator.log" 2>&1 &
   log "Coordinator 重启已触发 (spawn PID: $!, pidfile 由 coordinator 接管)"
 
