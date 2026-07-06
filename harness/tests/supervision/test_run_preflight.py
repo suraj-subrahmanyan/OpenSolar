@@ -309,6 +309,65 @@ def test_contract_file_missing_fails_closed(tmp_path):
     assert result["ok"] is False
 
 
+def _fake_lane1_module(monkeypatch, compile_result=None, load_raises=None):
+    """Mimic the real Lane 1 API (contract/lane1-compiler):
+    load_contract(path) raising on schema errors, plus
+    compile_checks(contract, capsule_registry, operator_registry) -> error list."""
+    import types
+
+    fake = types.ModuleType("workflow_contract")
+    calls: dict = {}
+
+    def load_contract(path):
+        if load_raises is not None:
+            raise load_raises
+        calls["loaded"] = str(path)
+        return {"workflow_id": "demo", "_source_path": str(path)}
+
+    def compile_checks(contract, capsule_registry, operator_registry, provider_policy=None):
+        calls["compiled"] = contract
+        return list(compile_result or [])
+
+    fake.load_contract = load_contract
+    fake.compile_checks = compile_checks
+    fake.load_capsule_registry = lambda: {}
+    fake.load_operator_registry = lambda: {}
+    monkeypatch.setitem(sys.modules, "workflow_contract", fake)
+    return calls
+
+
+def test_contract_compiles_via_lane1_api(tmp_path, monkeypatch):
+    contract = tmp_path / "demo.workflow.json"
+    contract.write_text("{}")
+    calls = _fake_lane1_module(monkeypatch)
+    result = rp.check_contract_compiles(contract)
+    assert result["ok"] is True
+    assert "compiled" in calls, "must run the real load_contract+compile_checks path"
+
+
+def test_contract_compile_errors_fail_closed(tmp_path, monkeypatch):
+    contract = tmp_path / "demo.workflow.json"
+    contract.write_text("{}")
+    _fake_lane1_module(
+        monkeypatch,
+        compile_result=[
+            {"code": "OBLIGATION_UNSATISFIABLE_FOR_NODE_KIND", "stage_id": "S3"}
+        ],
+    )
+    result = rp.check_contract_compiles(contract)
+    assert result["ok"] is False
+    assert "OBLIGATION_UNSATISFIABLE_FOR_NODE_KIND" in json.dumps(result["detail"])
+
+
+def test_contract_schema_error_fails_closed(tmp_path, monkeypatch):
+    contract = tmp_path / "demo.workflow.json"
+    contract.write_text("{}")
+    _fake_lane1_module(monkeypatch, load_raises=ValueError("bad schema"))
+    result = rp.check_contract_compiles(contract)
+    assert result["ok"] is False
+    assert "bad schema" in json.dumps(result["detail"])
+
+
 # --- full run: fail-closed report written to sprints/<sid>.preflight.json ------
 
 

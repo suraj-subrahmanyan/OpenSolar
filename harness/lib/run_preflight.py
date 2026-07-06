@@ -383,6 +383,36 @@ def check_contract_compiles(contract_path: Optional[Path | str]) -> Dict[str, An
             "this tree has no workflow_contract compiler (Lane 1); a contracted run "
             "must not proceed uncompiled",
         )
+
+    # Lane 1 API (contract/lane1-compiler): load_contract raises on schema errors;
+    # compile_checks(contract, capsule_registry, operator_registry) -> [] iff it compiles
+    load_contract = getattr(workflow_contract, "load_contract", None)
+    compile_checks = getattr(workflow_contract, "compile_checks", None)
+    if callable(load_contract) and callable(compile_checks):
+        try:
+            contract = load_contract(str(path))
+            capsules = getattr(workflow_contract, "load_capsule_registry", dict)()
+            operators = getattr(workflow_contract, "load_operator_registry", dict)()
+            errors = compile_checks(contract, capsules, operators)
+        except Exception as exc:
+            return _check(
+                "contract_compile",
+                False,
+                {"contract": str(path), "error": f"{type(exc).__name__}: {exc}"},
+                f"contract does not load/compile: {exc}",
+            )
+        if errors:
+            return _check(
+                "contract_compile",
+                False,
+                {"contract": str(path), "errors": list(errors)[:10]},
+                f"contract does not compile: {len(errors)} compile error(s)",
+            )
+        return _check(
+            "contract_compile", True, {"contract": str(path), "api": "load_contract+compile_checks"}
+        )
+
+    # API-drift fallback: any single-arg compile entrypoint; still fail-closed
     compile_fn = None
     for name in ("compile_workflow_contract", "compile_contract", "load_and_compile", "compile"):
         candidate = getattr(workflow_contract, name, None)
@@ -406,7 +436,7 @@ def check_contract_compiles(contract_path: Optional[Path | str]) -> Dict[str, An
             {"contract": str(path), "error": f"{type(exc).__name__}: {exc}"},
             f"contract does not compile: {exc}",
         )
-    return _check("contract_compile", True, {"contract": str(path)})
+    return _check("contract_compile", True, {"contract": str(path), "api": "fallback_probe"})
 
 
 # --- report ---------------------------------------------------------------------------

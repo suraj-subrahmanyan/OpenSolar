@@ -20,12 +20,16 @@ unchanged (fail-open for the global harness, fail-closed per run) — flag this 
 ## M2 — `workflow_contract` (Lane 1) does not exist on this base; its compile API is undefined
 
 Design §1.6 requires "contract compile if contracted". Lane 1's `harness/lib/workflow_contract.py`
-is not on `contract/lane0-spine` (also observed by Lane 2). `check_contract_compiles` therefore:
-fails closed when a contract is requested and the module is missing; probes for an entrypoint among
-`compile_workflow_contract` / `compile_contract` / `load_and_compile` / `compile` and fails closed if
-none match. **Lane 1 must confirm the real entrypoint name and preflight must be aligned then** —
-tracked as an integration TODO, test `test_contracted_without_compiler_fails_closed` locks the
-fail-closed side.
+is not on `contract/lane0-spine` (also observed by Lane 2). `check_contract_compiles` therefore
+fails closed when a contract is requested and the module is missing.
+
+**Addendum (same day):** Lane 1 landed on `contract/lane1-compiler` with the real API
+`load_contract(path)` (raises `ContractSchemaError`) + `compile_checks(contract, capsule_registry,
+operator_registry, provider_policy=None)` (empty list ⇔ compiles). Preflight now calls exactly that
+API when present (verified against the Lane 1 branch source; deterministic tests fake the API in
+`sys.modules` since the module is on a sibling branch), with a generic single-arg entrypoint probe
+kept as an API-drift fallback — every path stays fail-closed. A cross-branch integration run of
+`check_contract_compiles` against the real module happens when the lanes merge.
 
 ## M3 — Provider policy is captured at import time in `multi_task_runner`
 
