@@ -1061,18 +1061,25 @@ start_harness() {
     pane_id=$(tmux display-message -p -t "$target" '#{pane_id}')
     tmux send-keys -t "$target" "$(pane_launch_prefix) TMUX_PANE=${pane_id} bash ${_esc_harness}/pane-launcher.sh ${persona} ${_esc_work}" Enter
   }
-  sleep 1
-  launch_persona_pane "$SESSION_NAME:Product Delivery.0" "pm"
-  sleep 1
-  launch_persona_pane "$SESSION_NAME:Product Delivery.1" "planner"
-  if [[ "$mode" == "3" ]]; then
-    sleep 1
-    launch_persona_pane "$SESSION_NAME:Product Delivery.2" "builder"
-    sleep 1
-    launch_persona_pane "$SESSION_NAME:Product Delivery.3" "evaluator"
+  if [[ "${SOLAR_PRODUCT_MODE:-0}" == "1" ]]; then
+    # Product-mode pane gate (Lane 0, R8/AC-R8.1): persona pane DISPATCH is
+    # disabled — the operator pool executes; panes remain viewers only. The
+    # silent pane-fallback hang class (corpus F-044) is unreachable here.
+    echo "[Harness] product mode: persona pane dispatch disabled (operator pool executes)"
   else
     sleep 1
-    launch_persona_pane "$SESSION_NAME:Product Delivery.2" "builder"
+    launch_persona_pane "$SESSION_NAME:Product Delivery.0" "pm"
+    sleep 1
+    launch_persona_pane "$SESSION_NAME:Product Delivery.1" "planner"
+    if [[ "$mode" == "3" ]]; then
+      sleep 1
+      launch_persona_pane "$SESSION_NAME:Product Delivery.2" "builder"
+      sleep 1
+      launch_persona_pane "$SESSION_NAME:Product Delivery.3" "evaluator"
+    else
+      sleep 1
+      launch_persona_pane "$SESSION_NAME:Product Delivery.2" "builder"
+    fi
   fi
 
   # 设置活跃 pane 为 PM (非监控)
@@ -1417,6 +1424,14 @@ start_extension() {
 
 should_epic_decompose_request() {
   local req="$1"
+  # Workflow-contract router stub (Lane 0): a matched workflow contract bypasses
+  # epic decomposition entirely (R1). Inert unless the flag is on AND the Lane 1
+  # module exists — flag-off behavior is bit-identical.
+  if [[ "${SOLAR_WORKFLOW_ROUTER:-0}" == "1" && -f "$HARNESS_DIR/lib/workflow_router.py" ]]; then
+    if python3 "$HARNESS_DIR/lib/workflow_router.py" match --request "$req" >/dev/null 2>&1; then
+      return 1
+    fi
+  fi
   [[ "${SOLAR_EPIC_AUTO_DECOMPOSE:-1}" == "0" ]] && return 1
   local min_chars="${SOLAR_EPIC_MIN_CHARS:-420}"
   local min_lines="${SOLAR_EPIC_MIN_LINES:-4}"
