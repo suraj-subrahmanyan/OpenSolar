@@ -20,6 +20,7 @@ SPINE_OPERATORS = {
     "mini-codex-gpt55-medium-builder-1",
     "mini-codex-gpt53-spark-builder-1",
     "mini-codex-gpt55-medium-evaluator-1",
+    "mini-codex-gpt55-medium-evaluator-2",
 }
 SPINE_PROVIDERS = {"anthropic", "openai"}
 
