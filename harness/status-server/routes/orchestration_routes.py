@@ -58,7 +58,7 @@ HARNESS_DIR = Path(
     or str(Path.home() / ".solar" / "harness")
 ).expanduser()
 SCRIPT_HARNESS_DIR = Path(__file__).resolve().parents[2]
-SPRINTS_DIR = HARNESS_DIR / "sprints"
+SPRINTS_DIR = Path(os.environ.get("HARNESS_SPRINTS_DIR") or (HARNESS_DIR / "sprints"))
 SESSIONS_DIR = HARNESS_DIR / "sessions"
 STATE_DIR = HARNESS_DIR / "state"
 EVENTS_JSONL = HARNESS_DIR / "events.jsonl"
@@ -571,8 +571,11 @@ def _build_node_cards(sid: str, nodes: list[dict], status_state: dict, routing: 
         physical_plan_ir = node.get("physical_plan_ir") if isinstance(node.get("physical_plan_ir"), dict) else {}
         capsule_plan_ir = node.get("capsule_plan_ir") if isinstance(node.get("capsule_plan_ir"), dict) else {}
         selected_operator = (
-            physical_plan.get("selected_operator_id")
+            physical_plan.get("suggested_operator_id")
+            or physical_plan.get("selected_operator_id")
+            or physical_plan_ir.get("suggested_operator_id")
             or physical_plan_ir.get("selected_operator_id")
+            or node.get("suggested_operator_id")
             or node.get("selected_operator_id")
             or ""
         )
@@ -1245,7 +1248,7 @@ def _capability_mismatch_projection(dashboard: dict) -> dict:
             "missing_capabilities": missing or required,
             "logical_operator": node.get("logical_operator") or "",
             "preferred_model": node.get("preferred_model") or "",
-            "selected_operator_id": node.get("selected_operator_id") or "",
+            "selected_operator_id": node.get("suggested_operator_id") or node.get("selected_operator_id") or "",
             "capability_capsule_id": node.get("capability_capsule_id") or "",
             "candidate_workers_seen": bool(node.get("candidate_workers_seen")),
             "role_candidates_seen": bool(node.get("role_candidates_seen")),
