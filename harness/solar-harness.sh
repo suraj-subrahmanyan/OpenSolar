@@ -411,10 +411,21 @@ PY
   runner="$(bg_runner_script "$task_dir" "$id" "$mode" "$title" "$work_dir")"
   bg_write_status "$task_dir" "$id" "queued" "$mode" "$title" "$window" "$work_dir" ""
 
+  # tmux windows inherit the tmux SERVER's environment, not this shell's —
+  # prefix the product flags into the command so flag-gated behavior (gate
+  # ledger, product mode, provider pinning) survives a long-lived server
+  # (P2 smoke 20260707T190540Z: zero route records via this gap).
+  local _penv=""
+  local _pvar
+  for _pvar in SOLAR_GATE_LEDGER SOLAR_PRODUCT_MODE SOLAR_WORKFLOW_ROUTER SOLAR_MULTI_TASK_DEFAULT_PROVIDERS SOLAR_PM_DEFAULT_PROVIDERS HARNESS_SPRINTS_DIR; do
+    if [[ -n "${!_pvar:-}" ]]; then
+      _penv+="$_pvar=$(printf '%q' "${!_pvar}") "
+    fi
+  done
   if tmux has-session -t "$BG_SESSION_NAME" 2>/dev/null; then
-    tmux new-window -d -t "$BG_SESSION_NAME" -n "$window" -c "$work_dir" "bash $(printf '%q' "$runner"); exec \${SHELL:-/bin/zsh}"
+    tmux new-window -d -t "$BG_SESSION_NAME" -n "$window" -c "$work_dir" "${_penv}bash $(printf '%q' "$runner"); exec \${SHELL:-/bin/zsh}"
   else
-    tmux new-session -d -s "$BG_SESSION_NAME" -n "$window" -c "$work_dir" "bash $(printf '%q' "$runner"); exec \${SHELL:-/bin/zsh}"
+    tmux new-session -d -s "$BG_SESSION_NAME" -n "$window" -c "$work_dir" "${_penv}bash $(printf '%q' "$runner"); exec \${SHELL:-/bin/zsh}"
   fi
   ok "bg task queued: $id"
   log "status: $0 bg status"

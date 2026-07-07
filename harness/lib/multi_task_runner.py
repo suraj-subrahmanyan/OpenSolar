@@ -3120,6 +3120,23 @@ def _product_env_exports() -> str:
     return "\n".join(lines)
 
 
+def _product_env_prefix() -> str:
+    """Inline VAR=value prefix for tmux window commands.
+
+    tmux windows inherit the tmux SERVER's environment, not the spawning
+    process's — on a machine with a long-lived server, flag-gated product
+    behavior silently degrades in anything tmux hosts (and in anything those
+    processes auto-kick, e.g. operatord). Prefixing the command itself makes
+    propagation independent of server state (P2 smoke 20260707T190540Z:
+    second consecutive zero-route-record run)."""
+    parts: list[str] = []
+    for var in _PRODUCT_ENV_ALLOWLIST:
+        value = os.environ.get(var)
+        if value is not None and str(value).strip() != "":
+            parts.append(f"{var}={shlex.quote(str(value))}")
+    return (" ".join(parts) + " ") if parts else ""
+
+
 def runner_script(task_dir: Path, payload: dict[str, Any]) -> Path:
     runner = task_dir / "runner.sh"
     dispatch_file = task_dir / "dispatch.md"
@@ -3312,7 +3329,7 @@ exit "$rc"
 def tmux_start(window: str, runner: Path, cwd: Path, dry_run: bool = False) -> None:
     if dry_run:
         return
-    cmd = f"bash {shlex.quote(str(runner))}; exec ${{SHELL:-/bin/zsh}}"
+    cmd = f"{_product_env_prefix()}bash {shlex.quote(str(runner))}; exec ${{SHELL:-/bin/zsh}}"
     if subprocess.run(["tmux", "has-session", "-t", SESSION], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
         subprocess.check_call(["tmux", "new-window", "-d", "-t", SESSION, "-n", window, "-c", str(cwd), cmd])
     else:

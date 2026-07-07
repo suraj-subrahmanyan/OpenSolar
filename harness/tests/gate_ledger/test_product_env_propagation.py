@@ -76,3 +76,53 @@ def test_product_env_exports_are_shell_correct(monkeypatch):
     )
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip() == "1|/tmp/dir with spaces/sprints"
+
+
+def test_tmux_start_injects_product_env_into_window_command(monkeypatch):
+    """Smoke 20260707T190540Z (second consecutive zero-route-record run): the
+    runner-template snapshot only helps when the SCHEDULER has the flags — but
+    tmux-hosted lineages (pool windows, pm loops) inherit the tmux SERVER's
+    environment. tmux_start must inject the product-env allowlist into the
+    window command itself, so any process it hosts (and anything that process
+    auto-kicks, e.g. operatord) carries the flags regardless of server env."""
+    monkeypatch.setenv("SOLAR_GATE_LEDGER", "1")
+    monkeypatch.setenv("SOLAR_MULTI_TASK_DEFAULT_PROVIDERS", "openai")
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        class R:  # noqa: N801
+            returncode = 0
+        return R()
+
+    def fake_check_call(cmd, **kwargs):
+        calls.append(list(cmd))
+        return 0
+
+    monkeypatch.setattr(mtr.subprocess, "run", fake_run)
+    monkeypatch.setattr(mtr.subprocess, "check_call", fake_check_call)
+    mtr.tmux_start("w1", Path("/tmp/r u n/runner.sh"), Path("/tmp"))
+
+    spawn = next(c for c in calls if c[:2] == ["tmux", "new-window"] or c[:2] == ["tmux", "new-session"])
+    command_string = spawn[-1]
+    assert "SOLAR_GATE_LEDGER=1" in command_string, command_string
+    assert "SOLAR_MULTI_TASK_DEFAULT_PROVIDERS=openai" in command_string, command_string
+    assert "runner.sh" in command_string
+
+
+def test_tmux_start_command_unchanged_when_flags_unset(monkeypatch):
+    for var in mtr._PRODUCT_ENV_ALLOWLIST:
+        monkeypatch.delenv(var, raising=False)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        class R:  # noqa: N801
+            returncode = 0
+        return R()
+
+    monkeypatch.setattr(mtr.subprocess, "run", fake_run)
+    monkeypatch.setattr(mtr.subprocess, "check_call", lambda cmd, **k: calls.append(list(cmd)) or 0)
+    mtr.tmux_start("w1", Path("/tmp/runner.sh"), Path("/tmp"))
+    spawn = next(c for c in calls if c[:2] == ["tmux", "new-window"] or c[:2] == ["tmux", "new-session"])
+    assert "SOLAR_GATE_LEDGER" not in spawn[-1]
