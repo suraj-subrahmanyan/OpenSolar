@@ -94,8 +94,12 @@ def validate_plan(
         # historical shapes (analysis / tests / implementationworker /
         # logical-op-map-vs-audit-capsule) all fail here (AC-R2.3).
         capsule_id = str(node.get("capability_capsule_id") or "").strip()
+        capsule = capsule_registry.get(capsule_id) if (capsule_registry and capsule_id) else None
+        # F2: the bound capsule is the node-kind authority. produces_patch tells
+        # classify_node_kind whether the node is even allowed to be code; None
+        # (no registry / unknown capsule) falls back to shape + declared narrowing.
+        capsule_is_code = capsule.get("produces_patch") if capsule else None
         if capsule_registry is not None and capsule_id:
-            capsule = capsule_registry.get(capsule_id)
             if capsule is None:
                 errors.append(wc.compile_error(
                     wc.ERROR_CAPSULE_NOT_REGISTERED, node_id,
@@ -114,8 +118,9 @@ def validate_plan(
 
         # R2(b): obligation legality for the node's (derived) node_kind — the
         # v7 shape: patch_diff obligations on an artifact-authoring node
-        # (AC-R2.1, corpus F-049).
-        node_kind = wc.classify_node_kind(node)
+        # (AC-R2.1, corpus F-049). node_kind is capsule-anchored (F2): a decoy
+        # code file or declared node_kind:"code" cannot re-legalize patch proofs.
+        node_kind = wc.classify_node_kind(node, capsule_is_code=capsule_is_code)
         legal = wc.legal_proof_kinds(node_kind)
         for obligation in node.get("proof_obligations", []) or []:
             if not isinstance(obligation, dict):

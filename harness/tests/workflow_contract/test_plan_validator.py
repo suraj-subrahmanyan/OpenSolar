@@ -76,6 +76,96 @@ def test_v7_s1_derives_artifact_node_kind():
 
 
 # ---------------------------------------------------------------------------
+# F2 (round-2): the planner does NOT own node_kind. A decoy code file in
+# write_scope, or an explicit node_kind:"code", must not flip an artifact-
+# authoring node to code and re-legalize the v7 patch_diff obligations. The
+# bound capsule is the authority; planner-declared node_kind may only narrow.
+# ---------------------------------------------------------------------------
+
+def _v7_s1_graph() -> dict:
+    """The v7 defect isolated to S1 (the only node with a proof contract)."""
+    graph = _load(V7_FIXTURE)
+    graph["nodes"] = [n for n in graph["nodes"] if n["id"] == "S1"]
+    return graph
+
+
+def test_v7_plus_decoy_code_file_still_rejects(
+    capsule_registry, operator_registry, shipped_contracts
+):
+    """Reviewer probe: appending a decoy `helper.py` to the v7 artifact write_scope
+    used to flip node_kind to code and compile clean. It must still reject."""
+    graph = _v7_s1_graph()
+    graph["nodes"][0]["write_scope"].append(
+        "workspace/rsi-deep-research-report/helper.py"
+    )
+    errors = _validate(graph, capsule_registry, operator_registry, shipped_contracts)
+    unsat = [e for e in errors if e["code"] == wc.ERROR_OBLIGATION_UNSATISFIABLE]
+    assert unsat, f"decoy .py must not re-legalize patch proofs; got {errors}"
+    assert all(e["stage_id"] == "S1" for e in unsat)
+    assert all(e["declared"] == wc.PROOF_KIND_PATCH_PROOF for e in unsat)
+
+
+def test_v7_plus_explicit_node_kind_code_still_rejects(
+    capsule_registry, operator_registry, shipped_contracts
+):
+    """Reviewer probe: a planner-declared node_kind:'code' on the v7 artifact
+    node must not escalate it to code — declared node_kind may only narrow."""
+    graph = _v7_s1_graph()
+    graph["nodes"][0]["node_kind"] = "code"
+    errors = _validate(graph, capsule_registry, operator_registry, shipped_contracts)
+    unsat = [e for e in errors if e["code"] == wc.ERROR_OBLIGATION_UNSATISFIABLE]
+    assert unsat, f"declared node_kind:code must not re-legalize patch proofs; got {errors}"
+    assert all(e["stage_id"] == "S1" for e in unsat)
+
+
+def test_non_code_capsule_with_decoy_py_rejects_patch_obligation(
+    capsule_registry, operator_registry, shipped_contracts
+):
+    """The capsule-authority layer: a node bound to the audit capsule (no
+    patch_diff output) can never be a code node, even with a real .py write
+    target and no structured-data deliverable to trip the shape heuristic."""
+    graph = _graph_with({
+        "id": "A1",
+        "goal": "Author the audit report (with a smuggled helper script + patch proof).",
+        "capability_capsule_id": "cap.requirement-compiler-audit",
+        "dispatch_task_type": "reporting",
+        "write_scope": ["workspace/audit/report.md", "workspace/audit/helper.py"],
+        "node_kind": "code",
+        "proof_obligations": [
+            {"kind": "postcondition", "requirement": "output_present", "field": "patch_diff"},
+        ],
+        "depends_on": [],
+    })
+    errors = _validate(graph, capsule_registry, operator_registry, shipped_contracts)
+    unsat = [e for e in errors if e["code"] == wc.ERROR_OBLIGATION_UNSATISFIABLE]
+    assert unsat and unsat[0]["stage_id"] == "A1", errors
+    assert unsat[0]["declared"] == wc.PROOF_KIND_PATCH_PROOF
+
+
+def test_classify_node_kind_declared_code_cannot_escalate_artifact_shape():
+    """Unit: declared node_kind narrows, never escalates."""
+    artifact_node = {
+        "write_scope": ["workspace/x/sources.json"],
+        "node_kind": "code",
+    }
+    assert wc.classify_node_kind(artifact_node) == "artifact"
+
+
+def test_classify_node_kind_decoy_py_does_not_beat_structured_data():
+    """Unit: a structured-data deliverable marks artifact-authoring even with a
+    code file present in write_scope."""
+    node = {"write_scope": ["workspace/x/sources.json", "workspace/x/helper.py"]}
+    assert wc.classify_node_kind(node) == "artifact"
+
+
+def test_classify_node_kind_non_code_capsule_caps_at_artifact():
+    """Unit: a non-code capsule caps the node below code regardless of shape."""
+    node = {"write_scope": ["workspace/x/tool.py"], "node_kind": "code"}
+    assert wc.classify_node_kind(node, capsule_is_code=True) == "code"
+    assert wc.classify_node_kind(node, capsule_is_code=False) == "artifact"
+
+
+# ---------------------------------------------------------------------------
 # AC-R2.2: the v9 replay
 # ---------------------------------------------------------------------------
 

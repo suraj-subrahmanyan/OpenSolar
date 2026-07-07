@@ -80,13 +80,29 @@ SIDECAR_PROOF_FIELDS = {
     "test_log",
 }
 
-# write_scope suffixes that make a planner node a code node (fe2a7d69 rule,
-# generalized): any code target => code, else artifact-authoring.
+# write_scope suffixes that mark a code target (fe2a7d69 rule).
 CODE_FILE_SUFFIXES = {
     ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
     ".sh", ".bash", ".zsh", ".ps1",
     ".go", ".rs", ".java", ".kt", ".scala", ".swift",
     ".c", ".cc", ".cpp", ".h", ".hpp", ".rb", ".php", ".pl", ".lua",
+}
+
+# Structured-data / rendered-report deliverables. Their presence in write_scope
+# marks a node as artifact-authoring even when a code file is ALSO declared —
+# the decoy-`helper.py` resistance the F2 fix needs (a report/inventory node
+# that drops a helper script is still artifact-authoring, not a code node).
+# `.md` is deliberately excluded: it is a code node's common companion (README /
+# handoff) and cannot signal artifact-authoring on its own.
+STRUCTURED_ARTIFACT_SUFFIXES = {
+    ".json", ".jsonl", ".ndjson", ".html", ".htm",
+    ".csv", ".tsv", ".yaml", ".yml", ".xml", ".toml",
+}
+
+# node_kind ordering for the "declared node_kind may only narrow, never escalate
+# to code" rule (F2). Only `code` legalizes patch proofs.
+_NODE_KIND_LEVEL: Dict[str, int] = {
+    "analysis": 0, "artifact": 1, "verify": 1, "publish": 1, "code": 2,
 }
 
 # Compile error codes (design §1.1). The first four are the required set; the
@@ -397,9 +413,33 @@ def load_capsule_registry(config_dir: Optional[os.PathLike] = None) -> Dict[str,
         registry[capsule_id] = {
             "capability_capsule_id": capsule_id,
             "task_type_in": sorted(capsule_admitted_task_types(manifest)),
+            "produces_patch": capsule_produces_patch(manifest),
             "manifest_path": str(path),
         }
     return registry
+
+
+def capsule_produces_patch(manifest: Dict[str, Any]) -> bool:
+    """True when a capsule's OWN contract declares a code patch as a produced
+    output — i.e. it is a code capsule (F2 node-kind authority). Read from the
+    capsule's declared outputs / produced artifacts / patch self-check, never
+    from planner-controlled node fields."""
+    contract = manifest.get("contract") or {}
+    outputs = contract.get("outputs") or {}
+    for output in outputs.get("required", []) or []:
+        if not isinstance(output, dict):
+            continue
+        if str(output.get("name") or "") == "patch_diff" or str(output.get("type") or "") == "diff":
+            return True
+    composition = manifest.get("composition") or {}
+    for produced in composition.get("produces", []) or []:
+        if isinstance(produced, dict) and str(produced.get("type") or "") == "artifact.patch_diff":
+            return True
+    verification = manifest.get("verification") or {}
+    for check in verification.get("self_check", []) or []:
+        if "patch_within_scope" in str(check) or "patch_diff" in str(check):
+            return True
+    return False
 
 
 def capsule_admitted_task_types(manifest: Dict[str, Any]) -> set:
@@ -494,21 +534,42 @@ def classify_obligation(obligation: Dict[str, Any]) -> str:
     return PROOF_KIND_ARTIFACT_PRESENCE
 
 
-def classify_node_kind(node: Dict[str, Any]) -> str:
-    """node_kind for a planner-emitted node: explicit field wins; otherwise the
-    fe2a7d69 write_scope rule — any code target => code, artifact targets only
-    => artifact, no write targets => analysis."""
-    explicit = node.get("node_kind")
-    if explicit in NODE_KINDS:
-        return explicit
-    write_scope = [str(p) for p in node.get("write_scope", []) or []]
-    if not write_scope:
+def _shape_node_kind(write_scope: Iterable[Any]) -> str:
+    """Decoy-resistant write_scope shape (F2). A structured-data/report
+    deliverable marks artifact-authoring even when a code file is also declared,
+    so a lone decoy `helper.py` cannot escalate an inventory/report node to code.
+    No write targets => analysis."""
+    suffixes = [Path(str(p).rstrip("/")).suffix.lower() for p in write_scope or []]
+    if not suffixes:
         return "analysis"
-    for target in write_scope:
-        suffix = Path(target.rstrip("/")).suffix.lower()
-        if suffix in CODE_FILE_SUFFIXES:
-            return "code"
+    if any(s in STRUCTURED_ARTIFACT_SUFFIXES for s in suffixes):
+        return "artifact"
+    if any(s in CODE_FILE_SUFFIXES for s in suffixes):
+        return "code"
     return "artifact"
+
+
+def classify_node_kind(node: Dict[str, Any], capsule_is_code: Optional[bool] = None) -> str:
+    """Effective node_kind for a planner-emitted node (F2 authority correction).
+
+    The bound capsule is the authority — the planner does NOT own node_kind:
+      1. shape: decoy-resistant write_scope classification (_shape_node_kind);
+      2. declared node_kind may only NARROW (an explicit `code` never escalates
+         an artifact shape);
+      3. capsule ceiling: a non-code capsule (capsule_is_code=False) can never
+         yield a code node, regardless of shape or declared node_kind.
+    `capsule_is_code=None` (unknown / no registry) skips the ceiling and relies
+    on shape + declared narrowing alone.
+    """
+    result = _shape_node_kind(node.get("write_scope"))
+    declared = node.get("node_kind")
+    if declared in NODE_KINDS:
+        # narrow only: keep declared when it is at or below the shape's level.
+        if _NODE_KIND_LEVEL.get(declared, 1) <= _NODE_KIND_LEVEL.get(result, 1):
+            result = declared
+    if capsule_is_code is False and _NODE_KIND_LEVEL.get(result, 1) > _NODE_KIND_LEVEL["artifact"]:
+        result = "artifact"
+    return result
 
 
 def legal_proof_kinds(node_kind: str) -> frozenset:
