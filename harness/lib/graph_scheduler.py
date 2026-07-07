@@ -1256,7 +1256,16 @@ def _ensure_required_gate_node_mapping(graph: dict[str, Any]) -> int:
     return assigned
 
 
-def node_status(graph: dict[str, Any], node_id: str) -> str:
+def node_recorded_status(graph: dict[str, Any], node_id: str) -> str:
+    """The node's RECORDED status — the inline/node_results/gate_results fold
+    WITHOUT node_status()'s fail-closed passed-without-required-eval downgrade.
+
+    This is the AC-R4.1 hold discriminator (round-4 G1): the real v5 shape
+    (handoff present, eval.json missing) is exactly the state that produces a
+    mechanical ``research_eval_json_missing`` FAIL, and the downgrade projects
+    it as effective "reviewing" while the writers recorded "passed". Policy
+    rules about "a passed node" must consult what was recorded, not the
+    downgraded view, or they self-bypass on the very shape they exist for."""
     _ensure_required_gate_node_mapping(graph)
     results = _node_results(graph)
     node = _node_map(graph)[node_id]
@@ -1290,7 +1299,11 @@ def node_status(graph: dict[str, Any], node_id: str) -> str:
         status = "passed"
     else:
         status = str(node.get("status", "pending") or "pending").lower()
+    return status
 
+
+def node_status(graph: dict[str, Any], node_id: str) -> str:
+    status = node_recorded_status(graph, node_id)
     if status == "passed" and _passed_without_required_eval(graph, node_id):
         return "reviewing"
     return status
@@ -2370,8 +2383,17 @@ def _ledger_gate_verdict_block(graph: dict[str, Any], gate_node_ids: list[str]) 
             if latest is None:
                 continue
             verdict = str(latest.get("verdict") or "").strip().lower()
-            if verdict in {"fail", "failed", "block", "blocked"}:
-                return node_id, f"ledger_verdict_block:{verdict}"
+            if verdict not in {"fail", "failed", "block", "blocked"}:
+                continue
+            # Round-4 G2: gates consume verdict CONTENT (R4/AC-R4.1). A
+            # mechanical/infrastructure FAIL is evidence-machinery failure, not
+            # a content judgment, and never blocks; a human verdict always
+            # does; a kind-less record keeps the stricter content effect (D6).
+            verdict_kind = str(latest.get("verdict_kind") or "").strip().lower()
+            is_human = str(latest.get("kind") or "") == "human_verdict"
+            if not is_human and verdict_kind in {"mechanical", "infrastructure"}:
+                continue
+            return node_id, f"ledger_verdict_block:{verdict}"
     except Exception:
         return None
     return None

@@ -130,9 +130,35 @@ def test_projection_follows_applied_transitions(tmp_path):
     assert gl.project_node_status(tmp_path, SID, "S1") == "passed"
 
 
-def test_projection_terminal_absorbing_for_non_human_writers(tmp_path):
+def test_projection_applies_recorded_passed_to_failed(tmp_path):
+    # Round-4 G6 (reviewer probe): a REAL recorded passed->failed force-write
+    # (mark_node_result on a content FAIL / parent failure) must project
+    # "failed" — the old pass-only reopen rule laundered it into a stale
+    # "passed", a status-truth lie inside the truth mechanism itself.
+    _append(tmp_path, from_status="reviewing", to_status="passed",
+            author={"type": "scheduler"}, writer="mark_node_result")
+    _append(tmp_path, from_status="passed", to_status="failed",
+            author={"type": "scheduler"}, writer="mark_node_result")
+    assert gl.project_node_status(tmp_path, SID, "S1") == "failed"
+
+
+def test_projection_applies_any_applied_post_terminal_record(tmp_path):
+    # Absorbing means "no exit from terminal without an APPLIED audited
+    # record" — not "the projection may contradict a recorded write". Applied
+    # records exist only via audited writers; they always project.
+    _append(tmp_path, from_status="reviewing", to_status="failed",
+            author={"type": "scheduler"}, writer="mark_node_result")
+    _append(tmp_path, from_status="failed", to_status="pending",
+            author={"type": "scheduler"}, writer="recover_quota_failed_nodes")
+    assert gl.project_node_status(tmp_path, SID, "S1") == "pending"
+
+
+def test_projection_terminal_absorbing_against_unapplied_records(tmp_path):
+    # The absorbing guarantee that REMAINS: neutralized (applied=False)
+    # would-be writes never project, terminal or not.
     _append(tmp_path, from_status="reviewing", to_status="failed", author={"type": "scheduler"})
-    _append(tmp_path, from_status="failed", to_status="running", author={"type": "scheduler"})
+    _append(tmp_path, from_status="failed", to_status="running",
+            author={"type": "doctor"}, applied=False)
     assert gl.project_node_status(tmp_path, SID, "S1") == "failed"
 
 
@@ -199,6 +225,21 @@ def test_stale_generation_not_consumable():
     rec = {"kind": "eval_verdict", "author": {"type": "evaluator", "operator_id": "op-1"},
            "verdict": "PASS", "verdict_kind": "content", "eval_generation": 1}
     assert gl.is_gate_consumable(rec, current_generation=2) is False
+
+
+def test_missing_generation_with_current_generation_not_consumable():
+    # Round-4 G9: a record that cannot prove WHICH generation it evaluated must
+    # not be consumable at any specific generation (fail-closed, AC-R4.4).
+    rec = {"kind": "eval_verdict", "author": {"type": "evaluator", "operator_id": "op-1"},
+           "verdict": "PASS", "verdict_kind": "content"}
+    assert gl.is_gate_consumable(rec, current_generation=5) is False
+
+
+def test_missing_generation_without_current_generation_still_consumable():
+    # No generation filter requested -> the generation check is not in play.
+    rec = {"kind": "eval_verdict", "author": {"type": "evaluator", "operator_id": "op-1"},
+           "verdict": "PASS", "verdict_kind": "content"}
+    assert gl.is_gate_consumable(rec) is True
 
 
 def test_explicit_flag_wins():
