@@ -121,6 +121,65 @@ def test_submit_emits_submitted_route_record_kill_mid_run_evidence(sandbox, monk
     assert row["route"]["started_at"]
 
 
+def test_submit_bootstrap_failure_leaves_no_untruthful_submitted_record(sandbox, monkeypatch):
+    """Round-4 G8: when the operatord auto-kick fails, submit() unlinks the
+    envelope, releases the lease and raises — a 'submitted' route record for a
+    stage that never ran must not survive the rollback."""
+    monkeypatch.setattr(opr, "get_operator_config",
+                        lambda operator_id: {"provider": "openai", "backend": "command",
+                                             "model": "gpt-5.5-medium"})
+    monkeypatch.setattr(opr, "get_operator_runtime_state", lambda operator_id: "idle")
+    monkeypatch.setattr(opr, "resolve_persona", lambda *a, **k: {"persona": "stub"})
+    monkeypatch.setattr(opr, "acquire_operator_lease",
+                        lambda **k: {"expires_at": "2026-07-07T01:00:00Z",
+                                     "leased_at": "2026-07-07T00:00:00Z"})
+    released = []
+    monkeypatch.setattr(opr, "release_operator_lease",
+                        lambda operator_id, reason="": released.append(reason))
+    monkeypatch.setattr(opr, "_auto_kick_enabled", lambda: True)
+
+    def _boom(operator_id):
+        raise RuntimeError("bootstrap boom")
+
+    monkeypatch.setattr(opr, "_kick_operatord_once", _boom)
+    monkeypatch.setattr(opr, "OPERATOR_INBOX_DIR", sandbox / "run" / "operator-inbox")
+
+    with pytest.raises(RuntimeError, match="submit bootstrap failed"):
+        opr.submit({"task_id": "task-g8", "sprint_id": SID, "node_id": "S1",
+                    "operator_id": OP, "task_type": "code", "objective": "x"})
+
+    assert released == ["submit_bootstrap_failed"]
+    assert not (sandbox / "run" / "operator-inbox" / OP / "task-g8.json").exists()
+    rows = gl.read_records(_sprints(sandbox), SID, kind="route_record")
+    submitted = [r for r in rows if r.get("phase") == "submitted"
+                 and r.get("task_id") == "task-g8"]
+    assert not submitted, f"untruthful submitted record survived rollback: {submitted}"
+
+
+def test_submit_with_auto_kick_success_still_records_submitted(sandbox, monkeypatch):
+    """The record moved AFTER the auto-kick block — a successful kick (and the
+    no-kick path, covered above) must still leave the AC-R5.1 evidence."""
+    monkeypatch.setattr(opr, "get_operator_config",
+                        lambda operator_id: {"provider": "openai", "backend": "command",
+                                             "model": "gpt-5.5-medium"})
+    monkeypatch.setattr(opr, "get_operator_runtime_state", lambda operator_id: "idle")
+    monkeypatch.setattr(opr, "resolve_persona", lambda *a, **k: {"persona": "stub"})
+    monkeypatch.setattr(opr, "acquire_operator_lease",
+                        lambda **k: {"expires_at": "2026-07-07T01:00:00Z",
+                                     "leased_at": "2026-07-07T00:00:00Z"})
+    monkeypatch.setattr(opr, "_auto_kick_enabled", lambda: True)
+    monkeypatch.setattr(opr, "_kick_operatord_once", lambda operator_id: 4242)
+    monkeypatch.setattr(opr, "OPERATOR_INBOX_DIR", sandbox / "run" / "operator-inbox")
+
+    result = opr.submit({"task_id": "task-g8b", "sprint_id": SID, "node_id": "S1",
+                         "operator_id": OP, "task_type": "code", "objective": "x"})
+    assert result["status"] == "submitted"
+    assert result["daemon_pid"] == 4242
+    rows = [r for r in gl.read_records(_sprints(sandbox), SID, kind="route_record")
+            if r.get("task_id") == "task-g8b"]
+    assert len(rows) == 1 and rows[0]["phase"] == "submitted"
+
+
 def test_route_records_never_break_the_result_write(sandbox, monkeypatch):
     """Ledger failure must not take down write_result (best-effort contract)."""
     monkeypatch.setattr(gl, "append_route_record", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))

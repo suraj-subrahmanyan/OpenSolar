@@ -636,16 +636,6 @@ def submit(task_envelope: Dict[str, Any]) -> Dict[str, Any]:
         json.dump(payload, f, indent=2)
     os.replace(tmp_path, str(inbox_path))
 
-    # AC-R5.1: the envelope write IS the stage-start route evidence — a run
-    # killed before any result still proves what was routed where.
-    _ledger_route(sprint_id, node_id, task_id, "submitted", {
-        "provider": str((config or {}).get("provider") or ""),
-        "model": str((config or {}).get("model") or ""),
-        "operator_id": operator_id,
-        "backend": str((config or {}).get("backend") or ""),
-        "started_at": submitted_at,
-    })
-
     lease_id = f"{operator_id}:{task_id}:{lease['leased_at']}"
     daemon_pid: Optional[int] = None
     if _auto_kick_enabled():
@@ -664,6 +654,19 @@ def submit(task_envelope: Dict[str, Any]) -> Dict[str, Any]:
             raise RuntimeError(
                 f"Operator '{operator_id}' submit bootstrap failed: unable to start operatord --once: {exc}"
             ) from exc
+
+    # AC-R5.1: the envelope write IS the stage-start route evidence — a run
+    # killed before any result still proves what was routed where. Recorded
+    # AFTER the auto-kick block (round-4 G8): a bootstrap failure rolls the
+    # envelope+lease back, so a 'submitted' record for a stage that never ran
+    # would be untruthful.
+    _ledger_route(sprint_id, node_id, task_id, "submitted", {
+        "provider": str((config or {}).get("provider") or ""),
+        "model": str((config or {}).get("model") or ""),
+        "operator_id": operator_id,
+        "backend": str((config or {}).get("backend") or ""),
+        "started_at": submitted_at,
+    })
 
     result = {
         "task_id": task_id,
