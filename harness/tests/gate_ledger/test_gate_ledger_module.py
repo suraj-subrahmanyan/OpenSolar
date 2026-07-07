@@ -201,6 +201,21 @@ def test_stale_generation_not_consumable():
     assert gl.is_gate_consumable(rec, current_generation=2) is False
 
 
+def test_missing_generation_with_current_generation_not_consumable():
+    # Round-4 G9: a record that cannot prove WHICH generation it evaluated must
+    # not be consumable at any specific generation (fail-closed, AC-R4.4).
+    rec = {"kind": "eval_verdict", "author": {"type": "evaluator", "operator_id": "op-1"},
+           "verdict": "PASS", "verdict_kind": "content"}
+    assert gl.is_gate_consumable(rec, current_generation=5) is False
+
+
+def test_missing_generation_without_current_generation_still_consumable():
+    # No generation filter requested -> the generation check is not in play.
+    rec = {"kind": "eval_verdict", "author": {"type": "evaluator", "operator_id": "op-1"},
+           "verdict": "PASS", "verdict_kind": "content"}
+    assert gl.is_gate_consumable(rec) is True
+
+
 def test_explicit_flag_wins():
     rec = {"kind": "eval_verdict", "author": {"type": "evaluator", "operator_id": "op-1"},
            "verdict": "PASS", "verdict_kind": "content", "eval_generation": 2,

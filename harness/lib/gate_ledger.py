@@ -301,7 +301,9 @@ def is_gate_consumable(record: Dict[str, Any], *, current_generation: Optional[i
             return False
         if current_generation is not None:
             generation = record.get("eval_generation")
-            if generation is not None and int(generation) != int(current_generation):
+            # Fail-closed (round-4 G9): a record that cannot prove which
+            # generation it evaluated is not consumable at any specific one.
+            if generation is None or int(generation) != int(current_generation):
                 return False
         return True
     except Exception:
