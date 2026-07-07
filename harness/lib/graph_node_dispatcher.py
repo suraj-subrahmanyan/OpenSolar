@@ -2457,6 +2457,13 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
             str(status or "").strip().lower(),
         )
         if late_pre_repair_eval_archived:
+            _ledger_record(
+                sid, node_id=node_id, kind="eval_verdict",
+                author={"type": "evaluator"},
+                repair_attempt=_node_repair_attempts(node),
+                gate_consumable=False, archived=True,
+                stale_reason="late_pre_repair_eval_output_archived",
+            )
             repaired.append(
                 {
                     "node": node_id,
@@ -2474,6 +2481,13 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
             str(status or "").strip().lower(),
         ) if not late_pre_repair_eval_archived else {}
         if stale_eval_archived:
+            _ledger_record(
+                sid, node_id=node_id, kind="eval_verdict",
+                author={"type": "evaluator"},
+                repair_attempt=_node_repair_attempts(node),
+                gate_consumable=False, archived=True,
+                stale_reason="repair_handoff_newer_than_eval_sidecar",
+            )
             repaired.append(
                 {
                     "node": node_id,
