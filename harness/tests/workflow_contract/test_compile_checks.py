@@ -112,9 +112,10 @@ def test_patch_diff_obligation_on_research_stage_rejects(
 
 def test_patch_diff_is_legal_on_code_stages(shipped_contracts, capsule_registry, operator_registry):
     """The v7 distinction in the other direction: real code stages KEEP patch proofs."""
-    contract = shipped_contracts["code.cli_smoke"]
-    errors = wc.compile_checks(contract, capsule_registry, operator_registry)
-    assert not [e for e in errors if e["code"] == wc.ERROR_OBLIGATION_UNSATISFIABLE]
+    for workflow_id in ("code.cli_smoke", "code.cli_smoke_anthropic"):
+        contract = shipped_contracts[workflow_id]
+        errors = wc.compile_checks(contract, capsule_registry, operator_registry)
+        assert not [e for e in errors if e["code"] == wc.ERROR_OBLIGATION_UNSATISFIABLE]
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +228,21 @@ def test_research_routes_resolve_openai_only(shipped_contracts, operator_registr
         assert resolved, stage["id"]
         for operator_id in resolved:
             assert operator_registry[operator_id]["provider"] == "openai", (stage["id"], operator_id)
+
+
+def test_anthropic_cli_routes_resolve_anthropic_only(shipped_contracts, operator_registry):
+    contract = shipped_contracts["code.cli_smoke_anthropic"]
+    policy = contract["provider_policy"]
+    assert policy["allowed_providers"] == ["anthropic"]
+    for stage in contract["stages"]:
+        allowed = stage["allowed_operators"]
+        assert allowed.get("providers") == ["anthropic"]
+        resolved = wc.resolve_role_operators(
+            allowed["role"], allowed.get("providers"), operator_registry, policy
+        )
+        assert resolved, stage["id"]
+        for operator_id in resolved:
+            assert operator_registry[operator_id]["provider"] == "anthropic", (stage["id"], operator_id)
 
 
 def test_generic_contract_required_roles_resolve(shipped_contracts, capsule_registry, operator_registry):

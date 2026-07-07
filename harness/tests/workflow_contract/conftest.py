@@ -58,7 +58,7 @@ def operator_registry():
 @pytest.fixture(scope="session")
 def shipped_contracts():
     contracts = wc.load_all_contracts(WORKFLOWS_DIR)
-    assert len(contracts) == 3
+    assert len(contracts) == 4
     return {contract["workflow_id"]: contract for contract in contracts}
 
 

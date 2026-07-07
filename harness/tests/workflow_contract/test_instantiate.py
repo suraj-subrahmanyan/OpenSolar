@@ -25,6 +25,11 @@ def cli_graph(shipped_contracts):
     return wc.instantiate(shipped_contracts["code.cli_smoke"], CLI_INPUTS)
 
 
+@pytest.fixture(scope="module")
+def cli_anthropic_graph(shipped_contracts):
+    return wc.instantiate(shipped_contracts["code.cli_smoke_anthropic"], CLI_INPUTS)
+
+
 # ---------------------------------------------------------------------------
 # R3: byte-identical twice + committed goldens
 # ---------------------------------------------------------------------------
@@ -33,6 +38,7 @@ def test_instantiation_byte_identical_twice(shipped_contracts):
     for workflow_id, inputs in (
         ("research.deepdive.rsi_demo", RSI_INPUTS),
         ("code.cli_smoke", CLI_INPUTS),
+        ("code.cli_smoke_anthropic", CLI_INPUTS),
     ):
         contract = shipped_contracts[workflow_id]
         first = wc.canonical_graph_json(wc.instantiate(contract, dict(inputs)))
@@ -45,6 +51,7 @@ def test_instantiation_byte_identical_twice(shipped_contracts):
     [
         ("research.deepdive.rsi_demo", RSI_INPUTS, "research.deepdive.rsi_demo.instantiated.golden.json"),
         ("code.cli_smoke", CLI_INPUTS, "code.cli_smoke.instantiated.golden.json"),
+        ("code.cli_smoke_anthropic", CLI_INPUTS, "code.cli_smoke_anthropic.instantiated.golden.json"),
     ],
 )
 def test_instantiation_matches_committed_golden(shipped_contracts, workflow_id, inputs, golden_name):
@@ -62,13 +69,16 @@ def test_instantiation_matches_committed_golden(shipped_contracts, workflow_id, 
 # enum preserved in dag_variant, hash detects tampering.
 # ---------------------------------------------------------------------------
 
-def test_graph_identity_is_workflow_contract_id_not_dag_variant(rsi_graph, cli_graph):
+def test_graph_identity_is_workflow_contract_id_not_dag_variant(rsi_graph, cli_graph, cli_anthropic_graph):
     assert rsi_graph["workflow_contract_id"] == "research.deepdive.rsi_demo"
     assert rsi_graph["workflow_contract_version"] == "1.0"
     assert rsi_graph["dag_variant"] == "research"
     assert cli_graph["workflow_contract_id"] == "code.cli_smoke"
     assert cli_graph["dag_variant"] == "short"
-    for graph in (rsi_graph, cli_graph):
+    assert cli_anthropic_graph["workflow_contract_id"] == "code.cli_smoke_anthropic"
+    assert cli_anthropic_graph["workflow_contract_version"] == "1.0"
+    assert cli_anthropic_graph["dag_variant"] == "short"
+    for graph in (rsi_graph, cli_graph, cli_anthropic_graph):
         assert graph["dag_variant"] in wc.DAG_VARIANT_ENUM
         assert graph["dag_variant"] != graph["workflow_contract_id"]
 
