@@ -15,6 +15,10 @@ Usage:
 
 Options:
   --task TEXT             Task to submit through /intake.
+  --workflow-id ID        Route intake through the named workflow contract
+                          (explicit-id contracts like code.cli_smoke; fail-closed
+                          on unknown ids — no generic-path fallback). Default:
+                          empty = legacy generic intake.
   --timeout-seconds N    Overall live wait timeout. Default: 1800.
   --poll-seconds N       Poll cadence. Default: 30.
   --sandbox DIR          Use an existing/new sandbox directory instead of mktemp.
@@ -30,6 +34,8 @@ USAGE
 
 default_task="Write a Python command-line tool uniqwords.py that reads a UTF-8 text file and prints the number of unique case-insensitive words. Include a small pytest test file and a short README note explaining usage."
 task="$default_task"
+workflow_id="${SOLAR_LIVE_E2E_WORKFLOW_ID:-}"
+workflow_inputs=()
 timeout_seconds="${SOLAR_LIVE_E2E_TIMEOUT_SECONDS:-1800}"
 poll_seconds="${SOLAR_LIVE_E2E_POLL_SECONDS:-30}"
 prepare_only=0
@@ -44,6 +50,12 @@ while [[ $# -gt 0 ]]; do
     --task)
       [[ -n "${2:-}" ]] || { echo "--task requires text" >&2; exit 2; }
       task="$2"; shift 2 ;;
+    --workflow-id)
+      [[ -n "${2:-}" ]] || { echo "--workflow-id requires an id" >&2; exit 2; }
+      workflow_id="$2"; shift 2 ;;
+    --workflow-input)
+      [[ "${2:-}" == *"="* ]] || { echo "--workflow-input requires KEY=VALUE" >&2; exit 2; }
+      workflow_inputs+=("$2"); shift 2 ;;
     --timeout-seconds)
       [[ "${2:-}" =~ ^[0-9]+$ ]] || { echo "--timeout-seconds requires an integer" >&2; exit 2; }
       timeout_seconds="$2"; shift 2 ;;
@@ -409,10 +421,20 @@ wait_for_status_server() {
 submit_intake() {
   local base_url="$1"
   local request_id="live-e2e-${run_id}"
-  python3 - "$base_url/intake" "$task" "$request_id" "$evidence_dir/intake-response.json" <<'PY'
+  python3 - "$base_url/intake" "$task" "$request_id" "$evidence_dir/intake-response.json" "$workflow_id" ${workflow_inputs[@]+"${workflow_inputs[@]}"} <<'PY'
 import json, sys, urllib.request
-url, task, request_id, out_path = sys.argv[1:5]
-body = json.dumps({"task": task, "request_id": request_id}).encode("utf-8")
+url, task, request_id, out_path, workflow_id = sys.argv[1:6]
+payload_body = {"task": task, "request_id": request_id}
+if workflow_id.strip():
+    payload_body["workflow_id"] = workflow_id.strip()
+    inputs = {}
+    for item in sys.argv[6:]:
+        key, _, value = item.partition("=")
+        if key.strip():
+            inputs[key.strip()] = value
+    if inputs:
+        payload_body["workflow_inputs"] = inputs
+body = json.dumps(payload_body).encode("utf-8")
 req = urllib.request.Request(url, data=body, headers={"content-type": "application/json"}, method="POST")
 try:
     with urllib.request.urlopen(req, timeout=240) as resp:

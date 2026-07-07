@@ -896,6 +896,17 @@ def _intake_command(task: str) -> list[str]:
 def _intake_payload(data: dict) -> dict:
     task = str(data.get("task") or data.get("request") or "").strip()
     request_id = re.sub(r"[^A-Za-z0-9_.:-]", "-", str(data.get("request_id") or "").strip())[:96]
+    # P2 contracted intake: an explicit workflow_id is forwarded to the intake
+    # CLI via env; the solar-harness contract branch fails closed on unknown
+    # ids (never a silent fall-through to the generic planner path).
+    workflow_id = re.sub(r"[^A-Za-z0-9_.-]", "", str(data.get("workflow_id") or "").strip())[:96]
+    workflow_inputs: dict = {}
+    raw_inputs = data.get("workflow_inputs")
+    if isinstance(raw_inputs, dict):
+        for key, value in list(raw_inputs.items())[:16]:
+            key = str(key).strip()
+            if re.fullmatch(r"[a-z_][a-z0-9_]*", key):
+                workflow_inputs[key] = str(value)[:200]
     if not request_id:
         request_id = f"intake-{int(time.time() * 1000)}-{secrets.token_hex(4)}"
     if not task:
@@ -912,6 +923,7 @@ def _intake_payload(data: dict) -> dict:
         (req_dir / f"{request_id}.json").write_text(json.dumps({
             "request_id": request_id,
             "task_preview": task[:500],
+            "workflow_id": workflow_id,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     except OSError:
@@ -919,6 +931,10 @@ def _intake_payload(data: dict) -> dict:
     env = dict(os.environ)
     env["HARNESS_DIR"] = str(HARNESS_DIR)
     env["SOLAR_INTAKE_REQUEST_ID"] = request_id
+    if workflow_id:
+        env["SOLAR_INTAKE_WORKFLOW_ID"] = workflow_id
+        if workflow_inputs:
+            env["SOLAR_INTAKE_WORKFLOW_INPUTS"] = json.dumps(workflow_inputs, ensure_ascii=False)
     try:
         proc = subprocess.run(
             cmd,

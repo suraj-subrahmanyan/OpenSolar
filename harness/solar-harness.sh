@@ -1649,6 +1649,31 @@ intake_request() {
   [[ -n "$req" ]] || { err "intake 需要需求文本"; return 1; }
 
   ensure_dirs
+
+  # P2 contracted intake (design §0): an explicit workflow_id routes through the
+  # contract compiler — fail-closed, never a silent fall-through to the generic
+  # planner path (smoke 20260707T180639Z ran a 5-node planner DAG because this
+  # seam did not exist and code.cli_smoke's trigger is explicit-workflow_id-only).
+  if [[ -n "${SOLAR_INTAKE_WORKFLOW_ID:-}" ]]; then
+    if [[ "${SOLAR_WORKFLOW_ROUTER:-0}" != "1" || ! -f "$HARNESS_DIR/lib/workflow_intake.py" ]]; then
+      err "SOLAR_INTAKE_WORKFLOW_ID is set but the workflow router is unavailable (need SOLAR_WORKFLOW_ROUTER=1 and lib/workflow_intake.py) — refusing generic fallback"
+      return 1
+    fi
+    local wf_out wf_rc
+    set +e
+    wf_out=$(python3 "$HARNESS_DIR/lib/workflow_intake.py" \
+      --workflow-id "$SOLAR_INTAKE_WORKFLOW_ID" \
+      --request "$req" \
+      ${SOLAR_INTAKE_WORKSPACE_ROOT:+--workspace-root "$SOLAR_INTAKE_WORKSPACE_ROOT"} 2>&1)
+    wf_rc=$?
+    set -e
+    if [[ "$wf_rc" != "0" ]]; then
+      err "contract intake failed (rc=$wf_rc): $wf_out"
+      return 1
+    fi
+    printf '%s\n' "$wf_out"
+    return 0
+  fi
   local out rc raw_file autopilot_out autopilot_rc intent_out intent_rc intent_id sid_from_out consumer_out consumer_rc consumer_status planner_handoff_status
   intent_out=""
   intent_rc=0
