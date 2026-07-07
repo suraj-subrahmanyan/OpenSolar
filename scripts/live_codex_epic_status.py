@@ -125,9 +125,24 @@ def _normalize_provider(value: Any) -> str:
     return aliases.get(raw, raw)
 
 
+def _resolved_sprints_dir(harness_dir: Path | None = None) -> Path:
+    env_sprints = str(os.environ.get("HARNESS_SPRINTS_DIR") or "").strip()
+    if env_sprints:
+        return Path(env_sprints)
+    if harness_dir is not None:
+        return Path(harness_dir) / "sprints"
+    env_harness = str(os.environ.get("HARNESS_DIR") or "").strip()
+    if env_harness:
+        return Path(env_harness) / "sprints"
+    env_solar = str(os.environ.get("SOLAR_HARNESS_DIR") or "").strip()
+    if env_solar:
+        return Path(env_solar) / "sprints"
+    return Path.home() / ".solar" / "harness" / "sprints"
+
+
 def result_type(harness_dir: Path, run_id: str) -> str:
     run_id = str(run_id or "").strip()
-    if run_id.startswith("epic-") or (harness_dir / "sprints" / f"{run_id}.epic.json").exists():
+    if run_id.startswith("epic-") or (_resolved_sprints_dir(harness_dir) / f"{run_id}.epic.json").exists():
         return "epic"
     return "sprint"
 
@@ -144,7 +159,7 @@ def _coerce_child_id(item: Any) -> str:
 
 
 def discover_child_sprints(harness_dir: Path, epic_id: str) -> list[str]:
-    sprints_dir = harness_dir / "sprints"
+    sprints_dir = _resolved_sprints_dir(harness_dir)
     meta = _read_json(sprints_dir / f"{epic_id}.epic.json")
     graph = _read_json(sprints_dir / f"{epic_id}.task_graph.json")
     child_ids: list[str] = []
@@ -184,7 +199,7 @@ def detect_role_pool_wedge(harness_dir: Path, run_ids: list[str]) -> list[dict[s
     operator rather than making progress. This is a read-only file check: it does
     not dispatch operators or mutate any state.
     """
-    sprints_dir = harness_dir / "sprints"
+    sprints_dir = _resolved_sprints_dir(harness_dir)
     wedged: list[dict[str, Any]] = []
     for sid in run_ids:
         marker = sprints_dir / f"{sid}.role_pool_inflight_timeout.json"
@@ -210,7 +225,7 @@ def detect_builder_stall(harness_dir: Path, run_ids: list[str]) -> list[dict[str
     Its presence at terminal means the builder orchestration failed -- NOT a
     report/model quality failure. Read-only file check.
     """
-    sprints_dir = harness_dir / "sprints"
+    sprints_dir = _resolved_sprints_dir(harness_dir)
     stalled: list[dict[str, Any]] = []
     for sid in run_ids:
         marker = sprints_dir / f"{sid}.builder_node_stalled.json"
@@ -291,8 +306,9 @@ def _artifact_resolution_roots(
     `rsi-deep-research-report/...` artifacts land under the workdir instead of the
     shared workspace (the v9 case)."""
     roots: list[tuple[Path, str]] = [(workspace, "workspace")]
+    sprints_dir = _resolved_sprints_dir(harness_dir)
     for sid in run_ids:
-        roots.append((harness_dir / "sprints" / str(sid) / "workdir",
+        roots.append((sprints_dir / str(sid) / "workdir",
                       "child_workdir" if kind == "epic" else "sprint_workdir"))
     return roots
 
@@ -322,7 +338,7 @@ def _contract_root_path(
     if parts and parts[0] == "workspace" and workspace is not None:
         return workspace.joinpath(*parts[1:])
     if parts and parts[0] == "sprints" and harness_dir is not None:
-        return harness_dir.joinpath(*parts)
+        return _resolved_sprints_dir(harness_dir).joinpath(*parts[1:])
     return raw
 
 
@@ -642,7 +658,7 @@ def _stage_count(proof: dict[str, Any]) -> int:
 
 
 def _child_summary(harness_dir: Path, sid: str) -> dict[str, Any]:
-    sprints_dir = harness_dir / "sprints"
+    sprints_dir = _resolved_sprints_dir(harness_dir)
     status_path = sprints_dir / f"{sid}.status.json"
     graph_path = sprints_dir / f"{sid}.task_graph.json"
     route_path, route_proof = _load_route_proof(sprints_dir, sid)
@@ -810,7 +826,7 @@ def _producer_nodes_for_artifacts(
     An empty result (no write_scope info / no overlap) means 'no active producer' -- the
     existing artifact-mode behavior for simple completed outputs (e.g. paperfilter)."""
     producers: list[dict[str, Any]] = []
-    sprints_dir = harness_dir / "sprints"
+    sprints_dir = _resolved_sprints_dir(harness_dir)
     for sid in run_ids:
         graph = _read_json(sprints_dir / f"{sid}.task_graph.json")
         nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
@@ -1161,7 +1177,7 @@ def summarize_epic(
     task: str,
     required_child_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    sprints_dir = harness_dir / "sprints"
+    sprints_dir = _resolved_sprints_dir(harness_dir)
     meta_path = sprints_dir / f"{epic_id}.epic.json"
     graph_path = sprints_dir / f"{epic_id}.task_graph.json"
     children = discover_child_sprints(harness_dir, epic_id)

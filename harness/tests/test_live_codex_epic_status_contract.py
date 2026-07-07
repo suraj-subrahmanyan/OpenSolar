@@ -25,6 +25,11 @@ def _contract_path(workflow_id: str) -> Path:
     return ROOT / "config" / "workflows" / f"{workflow_id}.workflow.json"
 
 
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 def test_contract_options_derive_artifacts_roots_terminal_states_and_validator():
     mod = _load_module()
 
@@ -112,3 +117,46 @@ def test_artifact_check_contract_load_failure_exits_distinctly(tmp_path):
     assert summary["reason"] == "contract_load_failed"
     assert summary["failure_class"] == "contract_load_failed"
     assert summary["test_result"]["ran"] is False
+
+
+def test_artifact_validation_uses_harness_sprints_dir(monkeypatch, tmp_path):
+    mod = _load_module()
+    sid = "sprint-custom-sprints"
+    harness_dir = tmp_path / "harness"
+    custom_sprints = tmp_path / "custom-sprints"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "ok.txt").write_text("ok\n", encoding="utf-8")
+    _write_json(custom_sprints / f"{sid}.status.json", {"sprint_id": sid, "status": "passed"})
+    _write_json(
+        custom_sprints / f"{sid}.route-proof.json",
+        {
+            "ok": True,
+            "selected_runtime": "codex",
+            "allowed_providers": ["openai"],
+            "stage_count": 1,
+            "stages": [{"id": "S1", "provider": "openai"}],
+            "violations": [],
+        },
+    )
+    _write_json(
+        custom_sprints / f"{sid}.task_graph.json",
+        {"nodes": [{"id": "S1", "status": "passed", "write_scope": ["ok.txt"]}]},
+    )
+    monkeypatch.setenv("HARNESS_SPRINTS_DIR", str(custom_sprints))
+
+    summary = mod.summarize_artifact_validation(
+        harness_dir,
+        sid,
+        workspace=workspace,
+        task="",
+        expected_artifacts=["ok.txt"],
+        test_command=f"{sys.executable} -c \"from pathlib import Path; assert Path('ok.txt').is_file()\"",
+        terminal=True,
+        stability_state_path=tmp_path / "stability.json",
+        min_stable_polls=1,
+        min_stable_seconds=0,
+    )
+
+    assert summary["state"] == "passed", summary
+    assert summary["route_proof"]["runs"][0]["status_path"].startswith(str(custom_sprints))
