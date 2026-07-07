@@ -902,6 +902,11 @@ start_coordinator_sync() {
     nohup "$BASH4" "$HARNESS_DIR/coordinator.sh" >> "$HARNESS_DIR/.coordinator.log" 2>&1 </dev/null &
     disown 2>/dev/null || true
   fi
+  # Lane 0 fix (round-3 Finding C): register the spawned daemon so teardown can
+  # reap it (AC-R7.4). Module-guarded; inert until Lane 0.5 merges.
+  if [[ -f "$HARNESS_DIR/lib/run_process_registry.py" ]]; then
+    python3 "$HARNESS_DIR/lib/run_process_registry.py" register --run-id harness --role coordinator --pid $! >/dev/null 2>&1 || true
+  fi
 
   # 等待 pidfile 出现 (最多 3 秒)
   local waited=0
@@ -947,6 +952,11 @@ start_watchdog_sync() {
   else
     nohup "$BASH4" "$HARNESS_DIR/coordinator-watchdog.sh" start >> "$HARNESS_DIR/.watchdog.log" 2>&1 </dev/null &
     disown 2>/dev/null || true
+  fi
+  # Lane 0 fix (round-3 Finding C): register the watchdog — teardown kills
+  # watchdog-first, so this registration is what makes AC-R7.4 real.
+  if [[ -f "$HARNESS_DIR/lib/run_process_registry.py" ]]; then
+    python3 "$HARNESS_DIR/lib/run_process_registry.py" register --run-id harness --role watchdog --pid $! >/dev/null 2>&1 || true
   fi
 
   sleep 0.5
