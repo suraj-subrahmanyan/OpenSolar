@@ -1529,7 +1529,19 @@ def ready_nodes(graph: dict[str, Any]) -> list[dict[str, Any]]:
         if status not in READY_STATUSES:
             continue
         deps = _internal_depends_on(ids[node_id])
-        if all(_is_passed(graph, dep) for dep in deps):
+        if all(
+            _is_passed(graph, dep)
+            or (
+                # warn_and_continue (design §2 change 2): a needs_human_review dep
+                # with the non-blocking contract policy does not gate readiness —
+                # without this half, the policy would trade the skip-cascade for a
+                # silent pending wedge (an R7 violation).
+                dep in ids
+                and node_status(graph, dep) == "needs_human_review"
+                and not _human_review_blocks_dependents(graph, ids.get(dep))
+            )
+            for dep in deps
+        ):
             ready.append(deepcopy(ids[node_id]))
     return ready
 
@@ -2297,6 +2309,36 @@ def _ledger_transition(graph: dict[str, Any], node_id: str, from_status: str, to
         pass
 
 
+def _human_review_blocks_dependents(graph: dict[str, Any], dep_node: dict[str, Any]) -> bool:
+    """Per-node on_human_review policy consult (design §2 change 2 / review 7.2).
+
+    On the contracted path (SOLAR_GATE_LEDGER + workflow_contract_id) a dep in
+    needs_human_review blocks dependents per ITS OWN contract policy:
+    warn_and_continue lets dependents proceed; block_dependents (or an absent
+    policy) keeps the legacy behavior. Off the contracted path, needs_human_review
+    always blocks — the global DEPENDENCY_BLOCK_STATUSES set is untouched.
+    """
+    if _gate_ledger is None:
+        return True
+    try:
+        if not _gate_ledger.enabled() or not _gate_ledger.contracted(graph):
+            return True
+    except Exception:
+        return True
+    policy = str((dep_node or {}).get("on_human_review") or "").strip().lower()
+    return policy != "warn_and_continue"
+
+
+def _dependency_blocks(graph: dict[str, Any], ids: dict[str, Any], dep_id: str) -> bool:
+    """Whether a dependency's status blocks its dependents (skip-propagation rule)."""
+    dep_status = node_status(graph, dep_id)
+    if dep_status not in DEPENDENCY_BLOCK_STATUSES:
+        return False
+    if dep_status == "needs_human_review" and not _human_review_blocks_dependents(graph, ids.get(dep_id)):
+        return False
+    return True
+
+
 def _ledger_gate_verdict_block(graph: dict[str, Any], gate_node_ids: list[str]) -> tuple[str, str] | None:
     """Ledger consult for gate aggregation (AC-R4.2, contracted path only).
 
@@ -2477,7 +2519,7 @@ def terminalize_dependency_blocked_nodes(graph: dict[str, Any]) -> list[dict[str
         blockers = [
             dep_id
             for dep_id in _internal_depends_on(node)
-            if dep_id in ids and node_status(graph, dep_id) in DEPENDENCY_BLOCK_STATUSES
+            if dep_id in ids and _dependency_blocks(graph, ids, dep_id)
         ]
         if not blockers:
             continue

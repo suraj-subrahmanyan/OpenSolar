@@ -79,6 +79,78 @@ except Exception:  # pragma: no cover
     _artifact_manifest = None
 
 
+def _workflow_contract_guard(graph: dict[str, Any]) -> dict[str, Any] | None:
+    """C1+C2 net-new dispatcher guard (design §1.2), Lane 3 serialized item.
+
+    A graph claiming a ``workflow_contract_id`` must correspond to a registered
+    contract: same version, and (for fixed-stage contracts) the same
+    contract-determined node structure. Planner-generated contracts are checked
+    for registration+version only — their stages are plan_validator's job.
+    Fail-closed under SOLAR_GATE_LEDGER; returns None when the guard passes,
+    is inapplicable, or the flag is off.
+    """
+    if not _ledger_enabled():
+        return None
+    contract_id = str((graph or {}).get("workflow_contract_id") or "").strip()
+    if not contract_id:
+        return None
+    errors: list[str] = []
+    try:
+        import workflow_contract as wc
+    except Exception:
+        return {
+            "ok": False,
+            "reason": "workflow_contract_guard_failed",
+            "workflow_contract_id": contract_id,
+            "errors": ["WORKFLOW_CONTRACT_MODULE_MISSING"],
+        }
+    try:
+        workflows_dir = globals().get("WORKFLOWS_DIR") or (HARNESS_DIR / "config" / "workflows")
+        contract = wc.find_contract(contract_id, workflows_dir)
+    except Exception:
+        contract = None
+    if contract is None:
+        errors.append(f"WORKFLOW_CONTRACT_UNREGISTERED:{contract_id}")
+    else:
+        graph_version = str(graph.get("workflow_contract_version") or "")
+        contract_version = str(contract.get("version") or "")
+        if graph_version != contract_version:
+            errors.append(
+                f"WORKFLOW_CONTRACT_VERSION_MISMATCH:{graph_version}!={contract_version}"
+            )
+        planner_generated = contract.get("stages_mode") == getattr(wc, "STAGES_MODE_PLANNER", "planner_generated")
+        if not planner_generated and not errors:
+            stages = {str(s.get("id") or ""): s for s in contract.get("stages") or []}
+            nodes = {str(n.get("id") or ""): n for n in graph.get("nodes") or []}
+            if set(stages) != set(nodes):
+                errors.append(
+                    "WORKFLOW_CONTRACT_STRUCTURE_MISMATCH:node_ids:"
+                    f"{sorted(set(nodes) ^ set(stages))}"
+                )
+            for node_id in sorted(set(stages) & set(nodes)):
+                stage, node = stages[node_id], nodes[node_id]
+                if list(node.get("depends_on") or []) != list(stage.get("depends_on") or []):
+                    errors.append(f"WORKFLOW_CONTRACT_STRUCTURE_MISMATCH:{node_id}:depends_on")
+                if str(node.get("task_type") or "") != str(stage.get("task_type") or ""):
+                    errors.append(f"WORKFLOW_CONTRACT_STRUCTURE_MISMATCH:{node_id}:task_type")
+                allowed = [str(x) for x in (stage.get("allowed_capsules") or [])]
+                capsule = str(node.get("capability_capsule_id") or "")
+                if allowed and capsule and capsule not in allowed:
+                    errors.append(f"WORKFLOW_CONTRACT_STRUCTURE_MISMATCH:{node_id}:capability_capsule_id")
+                stage_gate = str((stage.get("evaluator_gate") or {}).get("kind") or "none")
+                node_gate = str((node.get("evaluator_gate") or {}).get("kind") or "none")
+                if node_gate != stage_gate:
+                    errors.append(f"WORKFLOW_CONTRACT_STRUCTURE_MISMATCH:{node_id}:evaluator_gate.kind")
+    if not errors:
+        return None
+    return {
+        "ok": False,
+        "reason": "workflow_contract_guard_failed",
+        "workflow_contract_id": contract_id,
+        "errors": errors,
+    }
+
+
 def _manifest_presence(sid: str, node_id: str) -> dict[str, Any]:
     """The node's manifest presence view (design §1.5), or {} off the contracted path.
 
@@ -1195,6 +1267,14 @@ def _model_registry() -> dict[str, Any]:
 
 
 def _normalize_model_alias(alias: str) -> str:
+    # AC-R8.3 (Lane 3 serialized item): in product mode a bare "sonnet" resolves
+    # Anthropic — never the legacy GLM fallback below, and regardless of any
+    # machine-local registry remap. Flag-off keeps the table bit-identical.
+    if (
+        str(os.environ.get("SOLAR_PRODUCT_MODE") or "").strip() == "1"
+        and str(alias or "").strip().lower() == "sonnet"
+    ):
+        return "claude-sonnet"
     reg = _model_registry()
     if _normalize_model is not None:
         try:
@@ -8151,6 +8231,15 @@ def dispatch_ready(graph_path: str, dry_run: bool = False, ttl: int = 900,
         return {"ok": False, "reason": "no_dispatch_flag", "graph": graph_path, "enqueue": {}, "drain": {}}
     graph = load_graph(graph_path)
     sid = graph.get("sprint_id") or Path(graph_path).stem.replace(".task_graph", "")
+    guard = _workflow_contract_guard(graph)
+    if guard is not None:
+        _append_event(str(sid), {
+            "event": "workflow_contract_guard_failed",
+            "by": "graph-dispatch",
+            "severity": "error",
+            "data": {"graph": str(graph_path), **guard},
+        })
+        return {**guard, "graph": graph_path, "enqueue": {}, "drain": {}}
     effective_max_parallel = int(max_parallel) if max_parallel is not None else _effective_graph_max_parallel(8)
     reconciled: list[dict[str, Any]] = []
     if not dry_run:
