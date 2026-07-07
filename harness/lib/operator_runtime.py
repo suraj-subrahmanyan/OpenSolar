@@ -19,6 +19,30 @@ from typing import Any, Dict, List, Optional
 
 from operator_persona import resolve_persona
 
+try:  # Lane 3 gate ledger (R5/AC-R5.1): route records at the operatord seam (F7)
+    import gate_ledger as _gate_ledger
+except Exception:  # pragma: no cover
+    _gate_ledger = None
+
+
+def _ledger_route(sprint_id: str, node_id: str, task_id: str, phase: str,
+                  route: Dict[str, Any]) -> None:
+    """Append a route record to the sprint's gate ledger.
+
+    No-op unless SOLAR_GATE_LEDGER=1; best-effort — route evidence must never
+    break the operator hot path."""
+    if _gate_ledger is None:
+        return
+    try:
+        if not _gate_ledger.enabled():
+            return
+        _gate_ledger.append_route_record(
+            HARNESS_DIR / "sprints", sprint_id,
+            node_id=node_id, task_id=task_id, phase=phase, route=route,
+        )
+    except Exception:
+        pass
+
 HOME = Path.home()
 HARNESS_DIR = Path(os.environ.get("HARNESS_DIR", HOME / ".solar" / "harness"))
 OPERATOR_LEASE_DIR = HARNESS_DIR / "run" / "operator-leases"
@@ -591,6 +615,16 @@ def submit(task_envelope: Dict[str, Any]) -> Dict[str, Any]:
         json.dump(payload, f, indent=2)
     os.replace(tmp_path, str(inbox_path))
 
+    # AC-R5.1: the envelope write IS the stage-start route evidence — a run
+    # killed before any result still proves what was routed where.
+    _ledger_route(sprint_id, node_id, task_id, "submitted", {
+        "provider": str((config or {}).get("provider") or ""),
+        "model": str((config or {}).get("model") or ""),
+        "operator_id": operator_id,
+        "backend": str((config or {}).get("backend") or ""),
+        "started_at": submitted_at,
+    })
+
     lease_id = f"{operator_id}:{task_id}:{lease['leased_at']}"
     daemon_pid: Optional[int] = None
     if _auto_kick_enabled():
@@ -778,6 +812,23 @@ def write_result(
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2)
     os.replace(tmp_path, str(result_path))
+
+    route = dict(model_route or {})
+    try:
+        config = get_operator_config(operator_id) or {}
+    except Exception:
+        config = {}
+    _ledger_route(sprint_id, node_id, task_id, "completed", {
+        "provider": str(route.get("effective_provider") or config.get("provider") or ""),
+        "model": str(route.get("effective_model") or route.get("routing_model")
+                     or route.get("requested_model") or config.get("model") or ""),
+        "operator_id": operator_id,
+        "backend": str(config.get("backend") or ""),
+        "exit_code": exit_code,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "result_status": status,
+    })
     return result_path
 
 
