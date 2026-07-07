@@ -19,7 +19,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 HOME = Path.home()
 
@@ -48,6 +48,10 @@ except Exception:  # pragma: no cover
 
 def _ledger_enabled() -> bool:
     return _gate_ledger is not None and _gate_ledger.enabled()
+
+
+def _product_mode_enabled() -> bool:
+    return str(os.environ.get("SOLAR_PRODUCT_MODE") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _ledger_transition(sid: str, node_id: str, from_status: str, to_status: str, writer: str,
@@ -6617,6 +6621,59 @@ def _provider_policy_values_from_env(env: dict[str, str]) -> set[str]:
     return {item.strip().lower() for item in str(raw).split(",") if item.strip()}
 
 
+def _provider_aliases(values: Iterable[Any]) -> set[str]:
+    aliases: set[str] = set()
+    for value in values:
+        text = str(value or "").strip().lower()
+        if not text:
+            continue
+        aliases.add(text)
+        if any(marker in text for marker in ("openai", "codex", "gpt")):
+            aliases.update({"openai", "codex", "gpt"})
+        if any(marker in text for marker in ("anthropic", "claude", "sonnet", "opus")):
+            aliases.update({"anthropic", "claude", "claude-code"})
+        if any(marker in text for marker in ("google", "gemini")):
+            aliases.update({"google", "gemini"})
+    return aliases
+
+
+def _provider_policy_values_from_graph(graph: dict[str, Any]) -> set[str]:
+    policy = graph.get("provider_policy") if isinstance(graph.get("provider_policy"), dict) else {}
+    return _provider_aliases((policy or {}).get("allowed_providers") or [])
+
+
+def _worker_provider_aliases(worker: dict[str, Any]) -> set[str]:
+    values: list[Any] = []
+    for key in ("provider", "vendor", "effective_provider", "backend", "operator_id", "actor_id", "pane", "title"):
+        values.append(worker.get(key))
+    models = worker.get("models")
+    if isinstance(models, list):
+        values.extend(models)
+    else:
+        values.append(models)
+    return _provider_aliases(values)
+
+
+def _worker_matches_graph_provider_policy(worker: dict[str, Any], providers: set[str]) -> bool:
+    if not providers:
+        return True
+    return bool(_worker_provider_aliases(worker) & providers)
+
+
+def _filter_workers_for_graph_provider_policy(
+    graph: dict[str, Any],
+    workers: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not (_ledger_enabled() or _product_mode_enabled()):
+        return workers
+    if not str((graph or {}).get("workflow_contract_id") or "").strip():
+        return workers
+    providers = _provider_policy_values_from_graph(graph)
+    if not providers:
+        return workers
+    return [worker for worker in workers if _worker_matches_graph_provider_policy(worker, providers)]
+
+
 def _operator_matches_provider_policy_for_graph(op: dict[str, Any], providers: set[str]) -> bool:
     if not providers:
         return True
@@ -8277,10 +8334,11 @@ def dispatch_ready(graph_path: str, dry_run: bool = False, ttl: int = 900,
         reconciled = _reconcile_existing_dispatches(graph, graph_path)
         if reconciled:
             save_graph(graph_path, graph)
+    workers = _filter_workers_for_graph_provider_policy(graph, _discover_workers(dry_run))
     enqueue_result = enqueue_ready(
         graph,
         graph_path,
-        _discover_workers(dry_run),
+        workers,
         max_parallel=effective_max_parallel,
         lease=not dry_run,
         ttl=ttl,
