@@ -2562,6 +2562,31 @@ def terminalize_dependency_blocked_nodes(graph: dict[str, Any]) -> list[dict[str
     return changed
 
 
+def _enforce_contract_capsule_authority(graph: dict[str, Any], node: dict[str, Any],
+                                        capsule_plan_ir: dict[str, Any]) -> None:
+    """On a contracted graph the workflow contract is the capsule authority.
+
+    The APO plan compiler re-classifies nodes from goal text at dispatch time
+    (P2 smoke-4: code.cli_smoke S2, a 'code' node, classified TestRunner ->
+    cap.requirement-compiler-verification). Letting that overwrite the
+    contract-assigned capsule fails capsule task_type admission at operator
+    submit AND trips _workflow_contract_guard on every subsequent dispatch
+    attempt — a permanent assigned->pending wedge. The compiler's pick is
+    preserved as apo_suggested_capsule_id for audit; uncontracted graphs keep
+    the legacy behavior untouched."""
+    if not str(graph.get("workflow_contract_id") or "").strip():
+        return
+    contract_capsule = str(node.get("capability_capsule_id") or "").strip()
+    if not contract_capsule:
+        return
+    suggested = str(capsule_plan_ir.get("capability_capsule_id") or "").strip()
+    if not suggested or suggested == contract_capsule:
+        return
+    capsule_plan_ir["apo_suggested_capsule_id"] = suggested
+    capsule_plan_ir["capsule_authority"] = "workflow_contract"
+    capsule_plan_ir["capability_capsule_id"] = contract_capsule
+
+
 def enqueue_ready(graph: dict[str, Any], graph_path: str, workers: list[dict[str, Any]],
                   max_parallel: int | None = None, lease: bool = False,
                   ttl: int = 600, dry_run: bool = False) -> dict[str, Any]:
@@ -2603,6 +2628,7 @@ def enqueue_ready(graph: dict[str, Any], graph_path: str, workers: list[dict[str
                 operators_path=HARNESS_DIR / "config" / "physical-operators.json",
             )
             capsule_plan_ir = dict(compiled_plan.get("capsule_plan") or {})
+            _enforce_contract_capsule_authority(graph, node, capsule_plan_ir)
             physical_plan_ir = dict(compiled_plan.get("physical_plan") or {})
             plan_artifacts = materialize_execution_plan_artifacts(
                 sid,

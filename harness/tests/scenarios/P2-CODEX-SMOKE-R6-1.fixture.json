@@ -6,7 +6,7 @@
   "runtime": "codex",
   "sprint_id": "",
   "sandbox": "/tmp/solar-live-p2-codex-20260707T172158Z",
-  "log": "/home/ssubr/opensolar-state/run-archive/p2-smoke-codex/20260707T172157Z/codex-smoke.log",
+  "log": "$RUN_ARCHIVE/p2-smoke-codex/20260707T172157Z/codex-smoke.log",
   "captured_at": "2026-07-07T17:22:08Z",
   "failed": [
     "harness_path_consistency",

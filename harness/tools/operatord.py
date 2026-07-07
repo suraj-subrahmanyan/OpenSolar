@@ -45,10 +45,17 @@ PHYSICAL_OPERATORS_PATH = Path(
     )
 )
 
-# Insert lib directory so the shared persona resolver can be imported regardless
-# of the working directory from which operatord is invoked.
+# Force the sibling lib directory to the FRONT of sys.path. The tools dir is
+# sys.path[0] when operatord runs as a script and shadows shared-name lib
+# modules with stale copies; an inherited PYTHONPATH that merely CONTAINS
+# harness/lib (the live-e2e sandbox env) used to satisfy the membership guard
+# here without granting precedence, so `from operator_runtime import ...`
+# resolved the tools copy — the one whose write_result has no route-record
+# hook (P2 smoke-4: zero 'completed' route records).
 _LIB_DIR = Path(__file__).resolve().parent.parent / "lib"
-if str(_LIB_DIR) not in sys.path:
+if sys.path and sys.path[0] != str(_LIB_DIR):
+    while str(_LIB_DIR) in sys.path:
+        sys.path.remove(str(_LIB_DIR))
     sys.path.insert(0, str(_LIB_DIR))
 
 from operator_persona import (  # noqa: E402  (import after path setup)

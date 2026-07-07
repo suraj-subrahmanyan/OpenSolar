@@ -3920,6 +3920,21 @@ def _evaluate_proof_obligations(sid: str, node: dict[str, Any], eval_json: str |
                 reason = "eval_json_missing" if not satisfied else ""
             elif requirement == "output_present" and field:
                 satisfied = presence.get(field, False)
+                if not satisfied:
+                    # Contract obligations name the bare output file (e.g.
+                    # '<tool>.py' -> 'uniqwords.py') while the manifest
+                    # presence map keys rows by the full declared relpath
+                    # (output:sprints/<sid>/workdir/uniqwords.py). Match the
+                    # node's own declared outputs by name (P2 smoke-4 S1:
+                    # proof_obligations_failed with every output present).
+                    matches = [
+                        bool(value) for key, value in presence.items()
+                        if key.startswith("output:")
+                        and (key[len("output:"):] == field
+                             or key[len("output:"):].endswith("/" + field))
+                    ]
+                    if matches:
+                        satisfied = any(matches)
                 reason = f"{field}_missing" if not satisfied else ""
                 if not satisfied and field == "guard_decision":
                     _gf = _node_sidecar_file(sid, str(node.get("id") or ""), "guard_decision")

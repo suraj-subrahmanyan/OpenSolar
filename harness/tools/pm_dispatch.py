@@ -35,6 +35,19 @@ from typing import Any
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+# The tools dir is sys.path[0] when this file runs as a script, and it shadows
+# ~150 shared-name lib modules with stale copies. An inherited PYTHONPATH that
+# merely CONTAINS harness/lib (the live-e2e sandbox env) satisfies the usual
+# 'if lib not in sys.path' guard without granting PRECEDENCE, so
+# `import operator_runtime` still resolved the tools copy — the one without
+# the Lane 3 route-record hooks (P2 smoke-4: zero route records while every
+# other ledger kind landed). Force this script's sibling lib to the front.
+_PM_LIB_DIR = str(Path(__file__).resolve().parents[1] / "lib")
+if sys.path and sys.path[0] != _PM_LIB_DIR:
+    while _PM_LIB_DIR in sys.path:
+        sys.path.remove(_PM_LIB_DIR)
+    sys.path.insert(0, _PM_LIB_DIR)
+
 HOME = Path.home()
 HARNESS_DIR = Path(
     os.environ.get("HARNESS_DIR")
