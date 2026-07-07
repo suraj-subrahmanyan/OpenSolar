@@ -105,7 +105,7 @@ iso_harness="$home_dir/.solar/harness"
 workspace="$sandbox/workspace"
 evidence_dir="$sandbox/evidence"
 logs_dir="$evidence_dir/logs"
-bin_dir="$sandbox/bin"
+bin_dir="$home_dir/.solar/bin"
 archive_dir="$sandbox/archive"
 env_file="$evidence_dir/e2e.env"
 manifest="$evidence_dir/manifest.json"
@@ -119,16 +119,27 @@ status_pid=""
 interrupted=0
 
 classify_codex_auth_source() {
-  if [[ -n "${OPENAI_API_KEY:-}" ]]; then
-    codex_auth_source="OPENAI_API_KEY"
-    return 0
-  fi
   if [[ -s "$codex_home/auth.json" ]]; then
     codex_auth_source="CODEX_HOME/auth.json"
     return 0
   fi
+  if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+    codex_auth_source="OPENAI_API_KEY"
+    return 0
+  fi
   codex_auth_source="missing"
   return 1
+}
+
+provision_sandbox_codex_auth() {
+  local source_auth="$codex_home/auth.json"
+  local target_dir="$home_dir/.codex"
+  local target_auth="$target_dir/auth.json"
+  if [[ ! -s "$source_auth" ]]; then
+    return 0
+  fi
+  mkdir -p "$target_dir"
+  ln -sfn "$source_auth" "$target_auth"
 }
 
 write_invalid_marker() {
@@ -282,6 +293,8 @@ prepare_isolated_harness() {
 }
 JSON
 
+  provision_sandbox_codex_auth
+
   cat > "$bin_dir/solar" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -305,6 +318,7 @@ export CODEX_HOME=$(printf '%q' "$codex_home")
 export HARNESS_DIR=$(printf '%q' "$iso_harness")
 export SOLAR_HARNESS_DIR=$(printf '%q' "$iso_harness")
 export SPRINTS_DIR=$(printf '%q' "$iso_harness/sprints")
+export PYTHONPATH=$(printf '%q' "$iso_harness/lib")
 export SOLAR_PANE_RUNTIME=codex
 export SOLAR_PM_DEFAULT_PROVIDERS=openai
 export SOLAR_MULTI_TASK_DEFAULT_PROVIDERS=openai
@@ -559,6 +573,7 @@ export CODEX_HOME="$codex_home"
 export HARNESS_DIR="$iso_harness"
 export SOLAR_HARNESS_DIR="$iso_harness"
 export SPRINTS_DIR="$iso_harness/sprints"
+export PYTHONPATH="$iso_harness/lib"
 export SOLAR_PANE_RUNTIME=codex
 export SOLAR_PM_DEFAULT_PROVIDERS=openai
 export SOLAR_MULTI_TASK_DEFAULT_PROVIDERS=openai
