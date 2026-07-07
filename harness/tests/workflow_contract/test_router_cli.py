@@ -100,15 +100,15 @@ def test_list_skips_malformed_contract(tmp_path):
     assert ids == ["research.deepdive.rsi_demo"]
 
 
-def test_list_shows_all_three_contracts():
+def test_list_shows_all_shipped_contracts():
     result = _run("list")
     assert result.returncode == 0
     ids = [line.split("\t")[0] for line in result.stdout.strip().splitlines()]
-    assert ids == ["code.cli_smoke", "pm.generic.v1", "research.deepdive.rsi_demo"]
+    assert ids == ["code.cli_smoke", "code.cli_smoke_anthropic", "pm.generic.v1", "research.deepdive.rsi_demo"]
 
 
 def test_compile_subcommand_clean_on_all_shipped_contracts():
-    for workflow_id in ("research.deepdive.rsi_demo", "code.cli_smoke", "pm.generic.v1"):
+    for workflow_id in ("research.deepdive.rsi_demo", "code.cli_smoke", "code.cli_smoke_anthropic", "pm.generic.v1"):
         result = _run("compile", "--workflow-id", workflow_id)
         assert result.returncode == 0, (workflow_id, result.stdout, result.stderr)
         assert "compile clean" in result.stdout

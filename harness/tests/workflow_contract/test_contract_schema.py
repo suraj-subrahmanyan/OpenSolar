@@ -22,6 +22,7 @@ def test_all_shipped_contracts_schema_valid(shipped_contracts):
     assert set(shipped_contracts) == {
         "research.deepdive.rsi_demo",
         "code.cli_smoke",
+        "code.cli_smoke_anthropic",
         "pm.generic.v1",
     }
     for contract in shipped_contracts.values():
@@ -31,6 +32,7 @@ def test_all_shipped_contracts_schema_valid(shipped_contracts):
 def test_rsi_contract_declares_research_dag_variant(shipped_contracts):
     assert shipped_contracts["research.deepdive.rsi_demo"]["dag_variant"] == "research"
     assert shipped_contracts["code.cli_smoke"]["dag_variant"] == "short"
+    assert shipped_contracts["code.cli_smoke_anthropic"]["dag_variant"] == "short"
 
 
 def _mutate(contract, path, value):
