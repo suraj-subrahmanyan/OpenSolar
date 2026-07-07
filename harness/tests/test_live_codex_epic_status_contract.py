@@ -160,3 +160,41 @@ def test_artifact_validation_uses_harness_sprints_dir(monkeypatch, tmp_path):
 
     assert summary["state"] == "passed", summary
     assert summary["route_proof"]["runs"][0]["status_path"].startswith(str(custom_sprints))
+
+
+def test_no_contract_artifact_validation_omits_contract_key(tmp_path):
+    mod = _load_module()
+    sid = "sprint-no-contract-shape"
+    harness_dir = tmp_path / "harness"
+    sprints_dir = harness_dir / "sprints"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    (workspace / "ok.txt").write_text("ok\n", encoding="utf-8")
+    _write_json(sprints_dir / f"{sid}.status.json", {"sprint_id": sid, "status": "passed"})
+    _write_json(
+        sprints_dir / f"{sid}.route-proof.json",
+        {
+            "ok": True,
+            "selected_runtime": "codex",
+            "allowed_providers": ["openai"],
+            "stage_count": 1,
+            "stages": [{"id": "S1", "provider": "openai"}],
+            "violations": [],
+        },
+    )
+
+    summary = mod.summarize_artifact_validation(
+        harness_dir,
+        sid,
+        workspace=workspace,
+        task="",
+        expected_artifacts=["ok.txt"],
+        test_command=f"{sys.executable} -c \"from pathlib import Path; assert Path('ok.txt').is_file()\"",
+        terminal=True,
+        stability_state_path=tmp_path / "stability.json",
+        min_stable_polls=1,
+        min_stable_seconds=0,
+    )
+
+    assert summary["state"] == "passed", summary
+    assert "contract" not in summary

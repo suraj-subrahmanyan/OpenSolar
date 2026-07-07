@@ -1063,7 +1063,7 @@ def summarize_artifact_validation(
         or (builder_stall[0]["reason"] if builder_stall else None)
     )
 
-    return {
+    summary = {
         "ok": state == "passed",
         "state": state,
         "failure_class": failure_class,
@@ -1093,7 +1093,6 @@ def summarize_artifact_validation(
         "producers": producers,
         "active_producers": active_producers,
         "artifact_stability": stability,
-        "contract": contract_summary or {},
         "blocking_failures": blocking_failures,
         "pending_reasons": pending_reasons,
         "explanation": (
@@ -1101,6 +1100,9 @@ def summarize_artifact_validation(
             "It is not full epic product proof."
         ),
     }
+    if contract_summary is not None:
+        summary["contract"] = contract_summary
+    return summary
 
 
 def write_artifact_validation_outputs(evidence_dir: Path, summary: dict[str, Any], *, marker_mode: str = "none") -> None:
