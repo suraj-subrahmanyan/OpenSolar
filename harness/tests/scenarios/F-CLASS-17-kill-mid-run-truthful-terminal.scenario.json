@@ -14,8 +14,9 @@
   "expect": [
     { "fact": "saw_running", "op": "truthy" },
     { "fact": "envelope_recorded", "op": "truthy" },
-    { "fact": "final_heartbeat_state", "op": "eq", "value": "idle" }
+    { "fact": "final_heartbeat_state", "op": "eq", "value": "idle" },
+    { "fact": "result_has_model_route", "op": "truthy" }
   ],
   "fault": { "kill_signal": "SIGKILL" },
-  "notes": "GREEN: the daemon is SIGTERM'd while the worker is running; its handler drains gracefully, writes the result, and the finally-block resets the heartbeat to 'idle' (operatord.py:574-594,1068-1070). The stage's envelope.json (route/stage evidence) is written at stage start (operatord.py:812) so it survives the kill. RED: fault SIGKILLs the daemon (no graceful drain) -> the heartbeat is frozen at 'running' (a stale lie) -> the final_heartbeat_state=='idle' assertion fails while saw_running/envelope_recorded stay true."
+  "notes": "GREEN: the daemon is SIGTERM'd while the worker is running; its handler drains gracefully, writes the result WITH its model_route (route proof), and the finally-block resets the heartbeat to 'idle' (operatord.py:574-594,809,1068-1070). The stage's envelope.json (route/stage evidence) is written at stage start (operatord.py:812) so it survives the kill. RED: fault SIGKILLs the daemon (no graceful drain) -> no result.json is written (result_has_model_route falsy) AND the heartbeat is frozen at 'running' (a stale lie) -> both the final_heartbeat_state=='idle' and result_has_model_route assertions fail while saw_running/envelope_recorded stay true. ROUTE-PROOF ASSERTION (F5, spec-review round 2): result_has_model_route was added because the prior 3 assertions were a tautology w.r.t. class 17 ('route proof missing on dead runs') — a dead run whose result.json carries no model_route still passed green. Proven red-first: with model_route stripped from the drained result.json the old 3-assertion expect stays green while this assertion flips it red (see docs/product/opensolar-spec-review-dispositions-round2.md F5). DEFERRED: the post-Lane-3 append-only kind:route_record ledger assertion (AC-R5.1) is not addable until Lane 3's gate_ledger exists (catalog class 18)."
 }

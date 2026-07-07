@@ -1,16 +1,26 @@
 {
-  "_comment": "Lane 2 fault-catalog ledger — every taxonomy class vs its scenario status on THIS branch (feat/p0-gui-react). See docs/product/lane2-spec-mismatches.md for why the plan's '30 always-green JSON files' is replaced by 'runnable scenario for classes whose retiring mechanism exists here + honest pending rows for the rest'. status: verified_here (red-green proven now) | pending_lane_N (fix unbuilt; scenario would be red-only) | non_hermetic_p1_6 | delegated_lane_6.",
-  "generated_for_branch": "feat/p0-gui-react",
+  "_comment": "Lane 2 fault-catalog ledger — every taxonomy class vs its verification status. Refreshed for the INTEGRATED tree (contract/lane0-spine + contract/lane05-supervision + contract/lane1-compiler + contract/lane2-harness) per spec-review round 2 F5. See docs/product/lane2-spec-mismatches.md for why the plan's '30 always-green JSON files' is replaced by 'runnable scenario for classes whose retiring mechanism exists here + honest pending/cross-lane rows for the rest'. status: verified_here (red-green proven by a scenario in THIS branch's engine) | partial (a scenario proves one half; the rest is pending — see pending_remainder) | verified_lane_1 / verified_lane_0_5 (proven by another lane's committed suite — see verified_by for cited test paths; NOT runnable from this worktree until integration) | pending_lane_N (retiring seam unbuilt on any branch; a scenario would be red-only) | delegated_lane_6. The verified_by citations name real committed tests on the cited lane branch@commit; run them there to reproduce.",
+  "generated_for_branch": "contract/lane2-harness",
+  "integrated_tree": [
+    "contract/lane0-spine",
+    "contract/lane05-supervision",
+    "contract/lane1-compiler",
+    "contract/lane2-harness"
+  ],
   "engine": "harness/tests/run_scenario.py",
   "operator_seam": "operator-pool command backend (operator_runtime.submit -> operatord daemon --once -> result.json)",
   "classes": [
     {
       "class": 1,
       "name": "Planner DAG nondeterminism",
-      "status": "pending_lane_1",
+      "status": "verified_lane_1",
       "scenario": null,
       "required_seam": "harness/lib/workflow_contract.py byte-identical instantiation + golden diff",
-      "note": "R3/AC-R3.1 golden-file; compiler absent on all branches."
+      "verified_by": [
+        "contract/lane1-compiler@0a204749 harness/tests/workflow_contract/test_instantiate.py::test_instantiation_byte_identical_twice",
+        "contract/lane1-compiler@0a204749 harness/tests/workflow_contract/test_instantiate.py::test_instantiation_matches_committed_golden (goldens: harness/tests/workflow_contract/goldens/code.cli_smoke.instantiated.golden.json, harness/tests/workflow_contract/goldens/research.deepdive.rsi_demo.instantiated.golden.json)"
+      ],
+      "note": "R3/AC-R3.1 golden-file determinism. Proven by Lane 1's committed suite (compiler lives on contract/lane1-compiler, not runnable from this worktree); flips from pending_lane_1 on the integrated tree."
     },
     {
       "class": 2,
@@ -31,18 +41,26 @@
     {
       "class": 4,
       "name": "task_type admission (fixed 4x)",
-      "status": "pending_lane_1",
+      "status": "verified_lane_1",
       "scenario": null,
       "required_seam": "harness/lib/plan_validator.py task_type_in check",
-      "note": "R2/AC-R2.3; validator absent."
+      "verified_by": [
+        "contract/lane1-compiler@0a204749 harness/tests/workflow_contract/test_plan_validator.py::test_four_historical_admission_shapes_all_rejected"
+      ],
+      "note": "R2/AC-R2.3; the four historical admission shapes (F-019/F-030/...) all reject. Proven by Lane 1's committed suite (contract/lane1-compiler); flips from pending_lane_1 on the integrated tree."
     },
     {
       "class": 5,
       "name": "Artifact node x patch-diff proof",
-      "status": "pending_lane_1",
+      "status": "verified_lane_1",
       "scenario": null,
       "required_seam": "plan_validator obligation-satisfiability (patch_diff => code only)",
-      "note": "R2/AC-R2.1 v7 replay rejection."
+      "verified_by": [
+        "contract/lane1-compiler@0a204749 harness/tests/workflow_contract/test_plan_validator.py::test_v7_graph_rejected_with_obligation_unsatisfiable",
+        "contract/lane1-compiler@0a204749 harness/tests/workflow_contract/test_plan_validator.py::test_v7_s1_derives_artifact_node_kind",
+        "contract/lane1-compiler@0a204749 harness/tests/workflow_contract/test_plan_validator.py::test_cli_rejects_v7_fixture_exit_3 (fixture: harness/tests/workflow_contract/fixtures/v7-rsi-demo-bf66d46b.task_graph.json)"
+      ],
+      "note": "R2/AC-R2.1 v7 replay rejection (OBLIGATION_UNSATISFIABLE_FOR_NODE_KIND). Proven by Lane 1's committed suite (contract/lane1-compiler); flips from pending_lane_1 on the integrated tree."
     },
     {
       "class": 6,
@@ -55,18 +73,23 @@
     {
       "class": 7,
       "name": "Obligation mismatch by artifact type",
-      "status": "pending_lane_1",
+      "status": "verified_lane_1",
       "scenario": null,
       "required_seam": "plan_validator obligation<->declared-output check",
-      "note": "R2."
+      "verified_by": [
+        "contract/lane1-compiler@0a204749 harness/tests/workflow_contract/test_plan_validator.py::test_real_code_node_keeps_patch_obligations",
+        "contract/lane1-compiler@0a204749 harness/tests/workflow_contract/test_plan_validator.py::test_v8_shaped_artifact_plan_compiles"
+      ],
+      "note": "R2 obligation<->declared-output (code node keeps patch obligations; artifact plan compiles with presence obligations). Proven by Lane 1's committed suite (contract/lane1-compiler); flips from pending_lane_1 on the integrated tree."
     },
     {
       "class": 8,
       "name": "Evaluator capacity / human-review cascade",
-      "status": "verified_here",
+      "status": "partial",
       "scenario": "F-CLASS-08-busy-singleton-classified-busy-not-absent.scenario.json",
-      "required_seam": null,
-      "note": "Classification half (busy!=absent) verified via lease state. Bounded-wait half = F-CLASS-28; evaluator_gate.on_capacity_unavailable=wait policy is pending_lane_1."
+      "required_seam": "harness/lib/plan_validator.py evaluator_gate.on_capacity_unavailable=wait bounded-wait policy (Lane 1)",
+      "pending_remainder": "The human-review cascade / bounded-wait half is not exercisable here: only the classification half (busy!=absent) is red-green proven by the scenario via lease state. The evaluator_gate.on_capacity_unavailable=wait policy that drives the cascade is pending_lane_1, and bounded-wait timing is separately covered by F-CLASS-28.",
+      "note": "Classification half (busy!=absent) verified_here via lease state; recatalogued partial per spec-review round 2 F5 because the human-review cascade is not exercisable until Lane 1's evaluator_gate lands."
     },
     {
       "class": 9,
@@ -175,10 +198,16 @@
     {
       "class": 22,
       "name": "Orphan coordinator/watchdog/process residue",
-      "status": "non_hermetic_p1_6",
+      "status": "verified_lane_0_5",
       "scenario": null,
       "required_seam": "harness/lib/run_process_registry.py + real-daemon teardown (Lane 0.5)",
-      "note": "R7/AC-R7.4; runs at the non-hermetic real-daemon tier (real processes, still no models). Not hermetic-catalog scope."
+      "tier": "non_hermetic_p1_6",
+      "verified_by": [
+        "contract/lane05-supervision@95aaa0f0 harness/tests/supervision/test_run_teardown_real_processes.py::test_real_teardown_kills_all_and_suppresses_respawn (opt-in: SOLAR_P16_REAL_PROCESS=1)",
+        "contract/lane05-supervision@95aaa0f0 harness/tests/supervision/test_run_teardown_real_processes.py::test_real_teardown_idempotent",
+        "contract/lane05-supervision@95aaa0f0 harness/tests/supervision/test_run_teardown_real_processes.py::test_real_registry_status_reports_live_then_dead"
+      ],
+      "note": "R7/AC-R7.4. Runs at the non-hermetic real-process (P1.6) tier — real sleep/watchdog processes, still no models/network — so it is opt-in (SOLAR_P16_REAL_PROCESS=1), not default-CI. Proven by Lane 0.5's committed suite (contract/lane05-supervision); flips from non_hermetic_p1_6 pending on the integrated tree."
     },
     {
       "class": 23,
@@ -246,12 +275,14 @@
     }
   ],
   "summary": {
-    "verified_here": [8, 12, 17, 19, 20, 27, 28],
+    "verified_here": [12, 17, 19, 20, 27, 28],
+    "partial": [8],
+    "verified_lane_1": [1, 4, 5, 7],
+    "verified_lane_0_5": [22],
     "pending_lane_0": ["19-allowlist-half"],
-    "pending_lane_1": [1, 2, 3, 4, 5, 7, 11, 25, 26],
+    "pending_lane_1": [2, 3, 11, 25, 26],
     "pending_lane_3": [6, 9, 10, 13, 16, 18, 21, 23, 29, 30],
     "pending_lane_5": [14, 15],
-    "non_hermetic_p1_6": [22],
     "delegated_lane_6": [24]
   }
 }
