@@ -36,6 +36,13 @@ Disposition: relabel the non-forbidden physical-plan artifact writer in
 summary, orchestration route projection). The graph-scheduler inline artifact key remains legacy
 until a lane that owns `graph_scheduler.py` can change it.
 
+Round 5 amendment: the committed `harness/tools` copies are reachable because installed harnesses
+chmod `harness/tools/*.py`, and tools such as `harness/tools/codex_pm_router.py` and
+`harness/tools/actor_runtime.py` import `apo_plan_compiler` from the tools script directory. Lane 5
+therefore applies the same product-mode relabel to `harness/tools/apo_plan_compiler.py` and the same
+reader tolerance to `harness/tools/symphony/status-server.py`; `test_plan_artifact_relabel.py` now
+loads those exact files by path.
+
 ## D4 — planner-generated contracts have no fixed stages to render
 
 `pm.generic.v1` is a valid shipped contract but declares `stages_mode: planner_generated` and an empty
@@ -44,4 +51,3 @@ until a lane that owns `graph_scheduler.py` can change it.
 Disposition: for contracted sprints with fixed stages, the endpoint renders contract stages. For
 planner-generated or uncontracted graphs, it falls back to graph node ids/statuses while still
 returning a graceful legacy shape.
-
