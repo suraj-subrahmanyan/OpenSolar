@@ -234,3 +234,48 @@ def test_generic_contract_required_roles_resolve(shipped_contracts, capsule_regi
     assert contract["required_roles"] == ["planner", "builder", "evaluator"]
     errors = wc.compile_checks(contract, capsule_registry, operator_registry)
     assert errors == []
+
+
+# ---------------------------------------------------------------------------
+# F1 (round-2): an EMPTY stage∩policy provider intersection must resolve to
+# ZERO operators (=> ROUTE_UNRESOLVABLE), never fall through the falsy-empty-set
+# short-circuit and "resolve all". The reviewer's ▶EXECUTED probe: the RSI
+# contract (every stage pins providers=["openai"]) compiled under an
+# anthropic-only run policy compiled CLEAN — a cross-provider plan that would
+# have exploded at the first live dispatch.
+# ---------------------------------------------------------------------------
+
+def test_empty_stage_policy_intersection_fails_compile(shipped_contracts, capsule_registry, operator_registry):
+    """RSI's openai stages under an anthropic-only run policy must NOT compile."""
+    contract = shipped_contracts["research.deepdive.rsi_demo"]
+    anthropic_only = {"allowed_providers": ["anthropic"]}
+    errors = wc.compile_checks(contract, capsule_registry, operator_registry, provider_policy=anthropic_only)
+    route_errors = [e for e in errors if e["code"] == wc.ERROR_ROUTE_UNRESOLVABLE]
+    assert route_errors, "empty openai∩anthropic intersection must reject, not resolve-all"
+    assert any(e["stage_id"] == "D1" for e in route_errors)
+    assert all("Remediation" in e["message"] for e in route_errors)
+
+
+def test_resolve_role_operators_empty_intersection_resolves_nothing(operator_registry):
+    """Unit: stage providers=[openai] ∩ policy=[anthropic] = ∅ => [] (not all)."""
+    resolved = wc.resolve_role_operators(
+        "builder", ["openai"], operator_registry, {"allowed_providers": ["anthropic"]}
+    )
+    assert resolved == [], resolved
+
+
+def test_resolve_role_operators_unconstrained_still_resolves(operator_registry):
+    """The genuinely-unconstrained case (no stage providers, no policy) must
+    still resolve every healthy builder — the empty-set fix must not over-reject."""
+    resolved = wc.resolve_role_operators("builder", None, operator_registry, None)
+    assert resolved, "no provider constraint at all must resolve healthy operators"
+
+
+def test_resolve_role_operators_nonempty_intersection_filters(operator_registry):
+    """A NON-empty intersection still filters to the intersected providers."""
+    resolved = wc.resolve_role_operators(
+        "builder", ["openai", "anthropic"], operator_registry, {"allowed_providers": ["openai"]}
+    )
+    assert resolved
+    for operator_id in resolved:
+        assert operator_registry[operator_id]["provider"] == "openai", operator_id

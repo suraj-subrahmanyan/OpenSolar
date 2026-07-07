@@ -402,13 +402,30 @@ def resolve_role_operators(
     operator_registry: Dict[str, Dict[str, Any]],
     provider_policy: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
-    """Enabled + healthy + non-deprecated operators for a role under policy (R2d)."""
-    allowed = set(providers or [])
+    """Enabled + healthy + non-deprecated operators for a role under policy (R2d).
+
+    Provider constraint (R2d): the effective allowed-provider set is stage∩policy
+    when both are declared, else whichever is declared. F1 (round-2): an EMPTY
+    effective set that arose from a NON-empty constraint (e.g. stage=[openai] under
+    policy=[anthropic]) means no provider satisfies both — it must resolve to
+    ZERO operators (=> ROUTE_UNRESOLVABLE), never fall through a falsy-empty-set
+    short-circuit and "resolve all". Only the genuinely-unconstrained case (no
+    stage providers AND no policy) skips the provider filter.
+    """
+    stage_allowed = set(providers or [])
     policy_allowed = set((provider_policy or {}).get("allowed_providers") or [])
-    if allowed and policy_allowed:
-        allowed &= policy_allowed
+    if stage_allowed and policy_allowed:
+        allowed = stage_allowed & policy_allowed
+        constrained = True
+    elif stage_allowed:
+        allowed = stage_allowed
+        constrained = True
     elif policy_allowed:
         allowed = policy_allowed
+        constrained = True
+    else:
+        allowed = set()
+        constrained = False
     resolved: List[str] = []
     for operator_id, operator in sorted((operator_registry or {}).items()):
         if not isinstance(operator, dict):
@@ -423,7 +440,7 @@ def resolve_role_operators(
         roles.update(str(r) for r in operator.get("roles", []) or [])
         if role not in roles:
             continue
-        if allowed and str(operator.get("provider") or "") not in allowed:
+        if constrained and str(operator.get("provider") or "") not in allowed:
             continue
         resolved.append(operator_id)
     return resolved
