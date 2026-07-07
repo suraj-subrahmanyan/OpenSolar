@@ -965,6 +965,12 @@ start_harness() {
   local work_dir="${2:-$(pwd)}"
   local skip_doctor="${3:-}"
 
+  # Lane 0 fix (round-3 Finding B, HIGH): clear stale run-terminal markers from a
+  # previous stop BEFORE the watchdog launches — otherwise the d5858918 respawn
+  # gate reads last run's marker forever and the watchdog never respawns a
+  # crashed coordinator again.
+  rm -f "$HARNESS_DIR/run/process-registry"/*.terminal 2>/dev/null || true
+
   # Fix 4: clean-start opt-in for an ALREADY-RUNNING cockpit (a fresh session always
   # resets). Triggered by SOLAR_HARNESS_CLEAN_START=1 or a --clean argument.
   local clean_start=0 _a
