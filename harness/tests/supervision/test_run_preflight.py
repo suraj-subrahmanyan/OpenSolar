@@ -24,6 +24,7 @@ import operator_flow_control
 
 
 SID = "sprint-20260706-preflight"
+_HARNESS_DIR = Path(rp.__file__).resolve().parents[1]
 
 
 def _write_operators(path: Path, operators: dict) -> Path:
@@ -326,6 +327,7 @@ def _fake_lane1_module(monkeypatch, compile_result=None, load_raises=None):
 
     def compile_checks(contract, capsule_registry, operator_registry, provider_policy=None):
         calls["compiled"] = contract
+        calls["provider_policy"] = provider_policy
         return list(compile_result or [])
 
     fake.load_contract = load_contract
@@ -366,6 +368,127 @@ def test_contract_schema_error_fails_closed(tmp_path, monkeypatch):
     result = rp.check_contract_compiles(contract)
     assert result["ok"] is False
     assert "bad schema" in json.dumps(result["detail"])
+
+
+# --- F13: preflight compiles against the RUN policy, not the embedded one ------
+
+
+def test_check_contract_compiles_threads_run_policy_to_compiler(tmp_path, monkeypatch):
+    """F13: the RUN provider policy — not the contract's embedded provider_policy —
+    must reach the Lane 1 compiler, so preflight's contract gate judges the stage
+    under the same policy the run will execute under. Shaped as the compiler's
+    ``{"allowed_providers": [...]}`` policy object."""
+    contract = tmp_path / "demo.workflow.json"
+    contract.write_text("{}")
+    calls = _fake_lane1_module(monkeypatch)
+    result = rp.check_contract_compiles(contract, provider_policy=("Anthropic", "openai"))
+    assert result["ok"] is True
+    assert calls["provider_policy"] == {"allowed_providers": ["anthropic", "openai"]}, (
+        "check_contract_compiles must pass the RUN policy (normalized) into compile_checks"
+    )
+
+
+def test_check_contract_compiles_empty_policy_falls_back_to_embedded(tmp_path, monkeypatch):
+    """An absent/empty run policy imposes no wall: the compiler falls back to the
+    contract's own embedded policy (backward-compatible pre-F13 behavior), never a
+    fabricated empty allow-list."""
+    contract = tmp_path / "demo.workflow.json"
+    contract.write_text("{}")
+    calls = _fake_lane1_module(monkeypatch)
+    rp.check_contract_compiles(contract, provider_policy=())
+    assert calls["provider_policy"] is None
+    rp.check_contract_compiles(contract)  # default arg: also no override
+    assert calls["provider_policy"] is None
+
+
+def test_run_preflight_threads_run_policy_into_contract_compile(tmp_path, ops_fixture, monkeypatch):
+    """End-to-end wiring: run_preflight feeds its resolved provider policy to the
+    contract compile check, not the contract's embedded policy (F13 call site)."""
+    ops_fixture(FULL_SPINE)
+    contract = tmp_path / "demo.workflow.json"
+    contract.write_text("{}")
+    calls = _fake_lane1_module(monkeypatch)
+    worktree = tmp_path / "checkout" / "harness"
+    (worktree / "lib").mkdir(parents=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    env = dict(_consistent_env(worktree))
+
+    rp.run_preflight(
+        SID,
+        providers=("anthropic",),
+        contract_path=contract,
+        expected_harness_dir=worktree,
+        home=home,
+        env=env,
+        session_alive=True,
+        solar_harness_path=None,
+        modules={},
+        write=False,
+    )
+    assert calls["provider_policy"] == {"allowed_providers": ["anthropic"]}
+
+
+def test_preflight_and_compiler_agree_on_openai_stage_under_anthropic_policy():
+    """F13 disagreement regression (preflight vs. the real Lane 1 compiler must
+    agree on the same stage): an openai-only contract compiles clean under its
+    embedded openai policy, but under an anthropic-only RUN policy every openai
+    stage is unroutable — the compiler must reject it, and preflight, fed the same
+    run policy, must fail closed on the same stage.
+
+    xfail-until-Lane-1-F1-merges: while the empty stage∩policy intersection
+    short-circuits the provider filter (workflow_contract.py:406-428, disposition
+    F1), the compiler still resolves an openai stage under an anthropic-only
+    policy, so this rejection is not yet in force. Detected at runtime so the test
+    self-heals into a real green regression once F1 lands — nothing to unmark.
+
+    Skips on the standalone Lane 0.5 branch, where neither the Lane 1
+    ``workflow_contract`` module nor the shipped contracts are present; it becomes
+    live on the integrated tree.
+    """
+    wc = pytest.importorskip("workflow_contract")
+    rsi = _HARNESS_DIR / "config" / "workflows" / "research.deepdive.rsi_demo.workflow.json"
+    if not rsi.is_file():
+        pytest.skip("shipped RSI contract absent on this tree (pre-integration)")
+
+    capsules = wc.load_capsule_registry()
+    operators = wc.load_operator_registry()
+    contract = wc.load_contract(str(rsi))
+
+    # Baseline: the openai contract compiles clean under its embedded openai policy.
+    if wc.compile_checks(contract, capsules, operators):
+        pytest.skip("RSI baseline does not compile clean under embedded policy on this tree")
+
+    run_policy = {"allowed_providers": ["anthropic"]}
+
+    # xfail-until-F1: the empty-intersection short-circuit still resolves the route.
+    if wc.resolve_role_operators("builder", ["openai"], operators, run_policy):
+        pytest.xfail(
+            "Lane 1 F1 not merged: empty stage∩policy intersection short-circuits "
+            "the provider filter (workflow_contract.py:406-428), so an openai stage "
+            "still resolves under an anthropic-only run policy"
+        )
+
+    # F1 has landed -> the compiler rejects the openai stages under the run policy...
+    compiler_errors = wc.compile_checks(contract, capsules, operators, provider_policy=run_policy)
+    compiler_route_stages = {
+        e.get("stage_id")
+        for e in compiler_errors
+        if e.get("code") == wc.ERROR_ROUTE_UNRESOLVABLE
+    }
+    assert compiler_route_stages, "compiler must reject openai stages under anthropic-only run policy"
+
+    # ...and preflight, fed the SAME run policy, must agree on the same stage(s).
+    result = rp.check_contract_compiles(rsi, provider_policy=("anthropic",))
+    assert result["ok"] is False
+    preflight_route_stages = {
+        e.get("stage_id")
+        for e in result["detail"].get("errors", [])
+        if e.get("code") == wc.ERROR_ROUTE_UNRESOLVABLE
+    }
+    assert compiler_route_stages & preflight_route_stages, (
+        "preflight and the compiler must fail closed on the same openai stage under the run policy"
+    )
 
 
 # --- full run: fail-closed report written to sprints/<sid>.preflight.json ------

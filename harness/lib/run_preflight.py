@@ -24,8 +24,10 @@ Before a run dispatches anything, prove the ground it stands on:
   4. live_capacity — the multi-task pool session is up, or is auto-startable
      (tmux present). Zero capacity fails closed (the "no live workers" wall).
   5. contract_compile — when the run is contracted, the workflow contract must
-     compile via the Lane 1 ``workflow_contract`` module; a contracted run on a
-     tree without the compiler fails closed, never silently skips.
+     compile via the Lane 1 ``workflow_contract`` module, against THIS run's
+     provider policy (not the contract's embedded one), so the contract gate and
+     the run resolve the same stage the same way; a contracted run on a tree
+     without the compiler fails closed, never silently skips.
 
 Output: ``$SPRINTS_DIR/<sid>.preflight.json`` (SPRINTS_DIR -> HARNESS_SPRINTS_DIR
 -> $HARNESS_DIR/sprints), written atomically; ``ok`` is the AND of every check
@@ -362,7 +364,22 @@ def check_live_capacity(
 # --- 5. contract compile (fail-closed when contracted) ------------------------------
 
 
-def check_contract_compiles(contract_path: Optional[Path | str]) -> Dict[str, Any]:
+def _compiler_policy_arg(provider_policy: Optional[Sequence[str]]) -> Optional[Dict[str, Any]]:
+    """Shape the RUN provider policy into the Lane 1 compiler's policy object
+    (``{"allowed_providers": [...]}``). A non-empty run policy is authoritative and
+    overrides the contract's embedded provider_policy (F13 — compile the contract
+    against the policy the run will actually execute under). An absent/empty run
+    policy imposes no wall, so we pass None and let compile_checks fall back to the
+    contract's own embedded policy (pre-F13 behavior; matches check_role_routes'
+    empty-policy semantics)."""
+    providers = [str(p).strip().lower() for p in (provider_policy or ()) if str(p).strip()]
+    return {"allowed_providers": providers} if providers else None
+
+
+def check_contract_compiles(
+    contract_path: Optional[Path | str],
+    provider_policy: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
     if not contract_path:
         return _check("contract_compile", True, {"skipped": "not_contracted"})
     path = Path(contract_path)
@@ -385,7 +402,9 @@ def check_contract_compiles(contract_path: Optional[Path | str]) -> Dict[str, An
         )
 
     # Lane 1 API (contract/lane1-compiler): load_contract raises on schema errors;
-    # compile_checks(contract, capsule_registry, operator_registry) -> [] iff it compiles
+    # compile_checks(contract, capsule_registry, operator_registry, provider_policy)
+    # -> [] iff it compiles. Passing the RUN policy (not the contract's embedded one)
+    # is F13: the contract must compile against the policy the run executes under.
     load_contract = getattr(workflow_contract, "load_contract", None)
     compile_checks = getattr(workflow_contract, "compile_checks", None)
     if callable(load_contract) and callable(compile_checks):
@@ -393,7 +412,10 @@ def check_contract_compiles(contract_path: Optional[Path | str]) -> Dict[str, An
             contract = load_contract(str(path))
             capsules = getattr(workflow_contract, "load_capsule_registry", dict)()
             operators = getattr(workflow_contract, "load_operator_registry", dict)()
-            errors = compile_checks(contract, capsules, operators)
+            errors = compile_checks(
+                contract, capsules, operators,
+                provider_policy=_compiler_policy_arg(provider_policy),
+            )
         except Exception as exc:
             return _check(
                 "contract_compile",
@@ -499,7 +521,7 @@ def run_preflight(
         check_auth_presence(policy, home=home, env=env_map),
         check_role_routes(roles=roles, providers=policy),
         check_live_capacity(session_alive=session_alive, tmux_available=tmux_available),
-        check_contract_compiles(contract_path),
+        check_contract_compiles(contract_path, provider_policy=policy),
     ]
     failed = [c["check"] for c in checks if not c["ok"]]
     report: Dict[str, Any] = {
