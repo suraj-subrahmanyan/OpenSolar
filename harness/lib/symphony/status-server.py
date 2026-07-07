@@ -612,6 +612,17 @@ def _sprint_contract_payload(sid: str) -> dict:
         return {"ok": False, "status": "error", "error": "invalid sprint id", "sprint_id": sid}
 
     graph, graph_path = _sprint_contract_graph(sid)
+    if graph_path is None:
+        return {
+            "ok": False,
+            "status": "not_found",
+            "error": "sprint_not_found",
+            "contracted": False,
+            "sprint_id": sid,
+            "graph_path": "",
+            "contract": {},
+            "stages": [],
+        }
     workflow_id = str(graph.get("workflow_contract_id") or graph.get("contract_id") or "").strip()
     workflow_version = str(graph.get("workflow_contract_version") or graph.get("contract_version") or "").strip()
     gate_ledger = _load_harness_lib_module("gate_ledger")
@@ -14057,7 +14068,8 @@ class StatusHandler(BaseHTTPRequestHandler):
         elif re.match(r"^/api/sprints/[^/]+/contract$", path):
             sid = urllib.parse.unquote(path.split("/api/sprints/", 1)[1].split("/contract", 1)[0])
             try:
-                self._send_json(_sprint_contract_payload(sid))
+                payload = _sprint_contract_payload(sid)
+                self._send_json(payload, status=404 if payload.get("status") == "not_found" else 200)
             except Exception as exc:
                 self._send_json({"ok": False, "status": "error", "error": f"{type(exc).__name__}: {exc}"}, status=500)
 

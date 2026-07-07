@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,10 @@ SECRET_PATTERNS = (
     re.compile(r"\b(code|codex|openai|anthropic)[-_]?(token|key|secret)[=:][A-Za-z0-9_\-./+=]{8,}\b", re.IGNORECASE),
     re.compile(r"\bBearer\s+[A-Za-z0-9_\-./+=]{8,}\b", re.IGNORECASE),
 )
+
+
+class ContractArtifactOptionsError(ValueError):
+    """Raised when --contract cannot be schema-loaded and registry-confirmed."""
 
 
 def _utc_now() -> str:
@@ -120,9 +125,24 @@ def _normalize_provider(value: Any) -> str:
     return aliases.get(raw, raw)
 
 
+def _resolved_sprints_dir(harness_dir: Path | None = None) -> Path:
+    env_sprints = str(os.environ.get("HARNESS_SPRINTS_DIR") or "").strip()
+    if env_sprints:
+        return Path(env_sprints)
+    if harness_dir is not None:
+        return Path(harness_dir) / "sprints"
+    env_harness = str(os.environ.get("HARNESS_DIR") or "").strip()
+    if env_harness:
+        return Path(env_harness) / "sprints"
+    env_solar = str(os.environ.get("SOLAR_HARNESS_DIR") or "").strip()
+    if env_solar:
+        return Path(env_solar) / "sprints"
+    return Path.home() / ".solar" / "harness" / "sprints"
+
+
 def result_type(harness_dir: Path, run_id: str) -> str:
     run_id = str(run_id or "").strip()
-    if run_id.startswith("epic-") or (harness_dir / "sprints" / f"{run_id}.epic.json").exists():
+    if run_id.startswith("epic-") or (_resolved_sprints_dir(harness_dir) / f"{run_id}.epic.json").exists():
         return "epic"
     return "sprint"
 
@@ -139,7 +159,7 @@ def _coerce_child_id(item: Any) -> str:
 
 
 def discover_child_sprints(harness_dir: Path, epic_id: str) -> list[str]:
-    sprints_dir = harness_dir / "sprints"
+    sprints_dir = _resolved_sprints_dir(harness_dir)
     meta = _read_json(sprints_dir / f"{epic_id}.epic.json")
     graph = _read_json(sprints_dir / f"{epic_id}.task_graph.json")
     child_ids: list[str] = []
@@ -179,7 +199,7 @@ def detect_role_pool_wedge(harness_dir: Path, run_ids: list[str]) -> list[dict[s
     operator rather than making progress. This is a read-only file check: it does
     not dispatch operators or mutate any state.
     """
-    sprints_dir = harness_dir / "sprints"
+    sprints_dir = _resolved_sprints_dir(harness_dir)
     wedged: list[dict[str, Any]] = []
     for sid in run_ids:
         marker = sprints_dir / f"{sid}.role_pool_inflight_timeout.json"
@@ -205,7 +225,7 @@ def detect_builder_stall(harness_dir: Path, run_ids: list[str]) -> list[dict[str
     Its presence at terminal means the builder orchestration failed -- NOT a
     report/model quality failure. Read-only file check.
     """
-    sprints_dir = harness_dir / "sprints"
+    sprints_dir = _resolved_sprints_dir(harness_dir)
     stalled: list[dict[str, Any]] = []
     for sid in run_ids:
         marker = sprints_dir / f"{sid}.builder_node_stalled.json"
@@ -286,8 +306,9 @@ def _artifact_resolution_roots(
     `rsi-deep-research-report/...` artifacts land under the workdir instead of the
     shared workspace (the v9 case)."""
     roots: list[tuple[Path, str]] = [(workspace, "workspace")]
+    sprints_dir = _resolved_sprints_dir(harness_dir)
     for sid in run_ids:
-        roots.append((harness_dir / "sprints" / str(sid) / "workdir",
+        roots.append((sprints_dir / str(sid) / "workdir",
                       "child_workdir" if kind == "epic" else "sprint_workdir"))
     return roots
 
@@ -317,8 +338,48 @@ def _contract_root_path(
     if parts and parts[0] == "workspace" and workspace is not None:
         return workspace.joinpath(*parts[1:])
     if parts and parts[0] == "sprints" and harness_dir is not None:
-        return harness_dir.joinpath(*parts)
+        return _resolved_sprints_dir(harness_dir).joinpath(*parts[1:])
     return raw
+
+
+def _workflow_contract_module():
+    harness_lib = Path(__file__).resolve().parents[1] / "harness" / "lib"
+    lib_text = str(harness_lib)
+    if lib_text not in sys.path:
+        sys.path.insert(0, lib_text)
+    try:
+        import workflow_contract  # type: ignore[import-not-found]
+    except Exception as exc:  # noqa: BLE001
+        raise ContractArtifactOptionsError(f"contract_module_unavailable: {type(exc).__name__}: {exc}") from exc
+    return workflow_contract
+
+
+def _load_registered_contract(contract_path: Path, harness_dir: Path | None) -> dict[str, Any]:
+    workflow_contract = _workflow_contract_module()
+    try:
+        contract = workflow_contract.load_contract(contract_path)
+    except Exception as exc:  # noqa: BLE001
+        raise ContractArtifactOptionsError(f"contract_schema_invalid: {type(exc).__name__}: {exc}") from exc
+
+    workflow_id = str(contract.get("workflow_id") or "").strip()
+    version = str(contract.get("version") or "").strip()
+    workflows_dir = (
+        Path(harness_dir) / "config" / "workflows"
+        if harness_dir is not None
+        else workflow_contract.default_workflows_dir()
+    )
+    registered = workflow_contract.find_contract(workflow_id, workflows_dir)
+    if not registered:
+        raise ContractArtifactOptionsError(
+            f"contract_unregistered: workflow_id {workflow_id!r} not found in {workflows_dir}"
+        )
+    registered_version = str(registered.get("version") or "").strip()
+    if registered_version != version:
+        raise ContractArtifactOptionsError(
+            "contract_version_mismatch: "
+            f"{workflow_id!r} loaded version {version!r}, registry version {registered_version!r}"
+        )
+    return contract
 
 
 def contract_artifact_options(
@@ -331,10 +392,10 @@ def contract_artifact_options(
 ) -> dict[str, Any]:
     """Read artifact validation inputs from one workflow contract.
 
-    This is intentionally a small JSON reader instead of importing the runtime
-    contract module; the live wrapper must stay usable from a partial checkout.
+    Contract mode is fail-closed: the file must pass the Lane 1 schema loader
+    and its workflow_id/version must match the shipped workflow registry.
     """
-    contract = _read_json(Path(contract_path))
+    contract = _load_registered_contract(Path(contract_path), harness_dir)
     workflow_id = str(contract.get("workflow_id") or "")
     version = str(contract.get("version") or "")
     roots_doc = contract.get("artifact_roots") if isinstance(contract.get("artifact_roots"), dict) else {}
@@ -597,7 +658,7 @@ def _stage_count(proof: dict[str, Any]) -> int:
 
 
 def _child_summary(harness_dir: Path, sid: str) -> dict[str, Any]:
-    sprints_dir = harness_dir / "sprints"
+    sprints_dir = _resolved_sprints_dir(harness_dir)
     status_path = sprints_dir / f"{sid}.status.json"
     graph_path = sprints_dir / f"{sid}.task_graph.json"
     route_path, route_proof = _load_route_proof(sprints_dir, sid)
@@ -765,7 +826,7 @@ def _producer_nodes_for_artifacts(
     An empty result (no write_scope info / no overlap) means 'no active producer' -- the
     existing artifact-mode behavior for simple completed outputs (e.g. paperfilter)."""
     producers: list[dict[str, Any]] = []
-    sprints_dir = harness_dir / "sprints"
+    sprints_dir = _resolved_sprints_dir(harness_dir)
     for sid in run_ids:
         graph = _read_json(sprints_dir / f"{sid}.task_graph.json")
         nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
@@ -1002,7 +1063,7 @@ def summarize_artifact_validation(
         or (builder_stall[0]["reason"] if builder_stall else None)
     )
 
-    return {
+    summary = {
         "ok": state == "passed",
         "state": state,
         "failure_class": failure_class,
@@ -1032,7 +1093,6 @@ def summarize_artifact_validation(
         "producers": producers,
         "active_producers": active_producers,
         "artifact_stability": stability,
-        "contract": contract_summary or {},
         "blocking_failures": blocking_failures,
         "pending_reasons": pending_reasons,
         "explanation": (
@@ -1040,6 +1100,9 @@ def summarize_artifact_validation(
             "It is not full epic product proof."
         ),
     }
+    if contract_summary is not None:
+        summary["contract"] = contract_summary
+    return summary
 
 
 def write_artifact_validation_outputs(evidence_dir: Path, summary: dict[str, Any], *, marker_mode: str = "none") -> None:
@@ -1116,7 +1179,7 @@ def summarize_epic(
     task: str,
     required_child_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    sprints_dir = harness_dir / "sprints"
+    sprints_dir = _resolved_sprints_dir(harness_dir)
     meta_path = sprints_dir / f"{epic_id}.epic.json"
     graph_path = sprints_dir / f"{epic_id}.task_graph.json"
     children = discover_child_sprints(harness_dir, epic_id)
@@ -1364,6 +1427,43 @@ def _parse_contract_substitutions(values: list[str]) -> dict[str, str]:
     return substitutions
 
 
+def _contract_load_failed_summary(
+    *,
+    run_id: str,
+    contract_path: str,
+    error: str,
+    terminal: bool,
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "state": "failed",
+        "failure_class": "contract_load_failed",
+        "classification": "CONTRACT_LOAD_FAILED",
+        "reason": "contract_load_failed",
+        "run_id": run_id,
+        "run_type": "sprint",
+        "generated_at": _utc_now(),
+        "terminal": terminal,
+        "not_product_proof": True,
+        "not_full_epic_product_proof": False,
+        "active_or_drafting_runs": [],
+        "raw_expected_artifacts": [],
+        "expected_artifacts": [],
+        "artifact_manifest": {"workspace": "", "roots": [], "expected_artifacts": [], "path_errors": []},
+        "artifact_root_conflicts": [],
+        "artifact_conflict_resolution": "",
+        "test_result": {"ran": False, "ok": False, "reason": "contract_load_failed", "command": ""},
+        "route_proof": {"ok": False, "reason": "contract_load_failed", "run_ids": [run_id]},
+        "producers": [],
+        "active_producers": [],
+        "artifact_stability": {"stable": False, "reason": "contract_load_failed"},
+        "contract": {"source_path": contract_path, "error": error},
+        "blocking_failures": [{"reason": "contract_load_failed", "error": error}],
+        "pending_reasons": [],
+        "explanation": "Contract artifact validation failed before legacy artifact inference.",
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -1407,13 +1507,24 @@ def main(argv: list[str] | None = None) -> int:
         test_command = args.test_command
         if str(args.contract or "").strip():
             substitutions = _parse_contract_substitutions(list(args.contract_substitution or []))
-            contract_options = contract_artifact_options(
-                Path(args.contract),
-                sid=args.id,
-                substitutions=substitutions,
-                harness_dir=Path(args.harness_dir),
-                workspace=Path(args.workspace),
-            )
+            try:
+                contract_options = contract_artifact_options(
+                    Path(args.contract),
+                    sid=args.id,
+                    substitutions=substitutions,
+                    harness_dir=Path(args.harness_dir),
+                    workspace=Path(args.workspace),
+                )
+            except ContractArtifactOptionsError as exc:
+                summary = _contract_load_failed_summary(
+                    run_id=args.id,
+                    contract_path=str(args.contract),
+                    error=str(exc),
+                    terminal=args.marker_mode == "terminal",
+                )
+                _write_json(Path(args.evidence_dir) / "artifact-validation-summary.json", summary)
+                print(json.dumps(summary, ensure_ascii=False, indent=2))
+                return 2
             expected_artifacts = list(contract_options.get("expected_artifacts") or [])
             contract_roots = [
                 (row["root"], row["type"])
