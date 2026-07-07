@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,3 +53,62 @@ def test_contract_options_derive_artifacts_roots_terminal_states_and_validator()
     assert generic["roots"][0]["root"].as_posix().endswith("workspace")
     assert [row["type"] for row in generic["roots"]] == ["contract_canonical", "contract_alias", "contract_alias"]
 
+
+def test_contract_options_reject_unregistered_contract(tmp_path):
+    mod = _load_module()
+    contract = json.loads(_contract_path("code.cli_smoke").read_text(encoding="utf-8"))
+    contract["workflow_id"] = "evil.unregistered.contract"
+    contract["version"] = "666"
+    path = tmp_path / "fake.workflow.json"
+    path.write_text(json.dumps(contract), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unregistered"):
+        mod.contract_artifact_options(path, sid="sprint-fake-contract")
+
+
+def test_contract_options_reject_malformed_contract(tmp_path):
+    mod = _load_module()
+    path = tmp_path / "malformed.workflow.json"
+    path.write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="schema|unreadable|invalid"):
+        mod.contract_artifact_options(path, sid="sprint-fake-contract")
+
+
+def test_artifact_check_contract_load_failure_exits_distinctly(tmp_path):
+    harness_dir = tmp_path / "harness"
+    workspace = tmp_path / "workspace"
+    evidence_dir = tmp_path / "evidence"
+    for path in (harness_dir, workspace, evidence_dir):
+        path.mkdir()
+    contract_path = tmp_path / "malformed.workflow.json"
+    contract_path.write_text("{not-json", encoding="utf-8")
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(MODULE_PATH),
+            "artifact-check",
+            "--harness-dir",
+            str(harness_dir),
+            "--id",
+            "sprint-fake-contract",
+            "--evidence-dir",
+            str(evidence_dir),
+            "--workspace",
+            str(workspace),
+            "--contract",
+            str(contract_path),
+            "--marker-mode",
+            "terminal",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert proc.returncode == 2
+    summary = json.loads((evidence_dir / "artifact-validation-summary.json").read_text(encoding="utf-8"))
+    assert summary["state"] == "failed"
+    assert summary["reason"] == "contract_load_failed"
+    assert summary["failure_class"] == "contract_load_failed"
+    assert summary["test_result"]["ran"] is False

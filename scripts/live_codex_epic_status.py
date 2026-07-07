@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,10 @@ SECRET_PATTERNS = (
     re.compile(r"\b(code|codex|openai|anthropic)[-_]?(token|key|secret)[=:][A-Za-z0-9_\-./+=]{8,}\b", re.IGNORECASE),
     re.compile(r"\bBearer\s+[A-Za-z0-9_\-./+=]{8,}\b", re.IGNORECASE),
 )
+
+
+class ContractArtifactOptionsError(ValueError):
+    """Raised when --contract cannot be schema-loaded and registry-confirmed."""
 
 
 def _utc_now() -> str:
@@ -321,6 +326,46 @@ def _contract_root_path(
     return raw
 
 
+def _workflow_contract_module():
+    harness_lib = Path(__file__).resolve().parents[1] / "harness" / "lib"
+    lib_text = str(harness_lib)
+    if lib_text not in sys.path:
+        sys.path.insert(0, lib_text)
+    try:
+        import workflow_contract  # type: ignore[import-not-found]
+    except Exception as exc:  # noqa: BLE001
+        raise ContractArtifactOptionsError(f"contract_module_unavailable: {type(exc).__name__}: {exc}") from exc
+    return workflow_contract
+
+
+def _load_registered_contract(contract_path: Path, harness_dir: Path | None) -> dict[str, Any]:
+    workflow_contract = _workflow_contract_module()
+    try:
+        contract = workflow_contract.load_contract(contract_path)
+    except Exception as exc:  # noqa: BLE001
+        raise ContractArtifactOptionsError(f"contract_schema_invalid: {type(exc).__name__}: {exc}") from exc
+
+    workflow_id = str(contract.get("workflow_id") or "").strip()
+    version = str(contract.get("version") or "").strip()
+    workflows_dir = (
+        Path(harness_dir) / "config" / "workflows"
+        if harness_dir is not None
+        else workflow_contract.default_workflows_dir()
+    )
+    registered = workflow_contract.find_contract(workflow_id, workflows_dir)
+    if not registered:
+        raise ContractArtifactOptionsError(
+            f"contract_unregistered: workflow_id {workflow_id!r} not found in {workflows_dir}"
+        )
+    registered_version = str(registered.get("version") or "").strip()
+    if registered_version != version:
+        raise ContractArtifactOptionsError(
+            "contract_version_mismatch: "
+            f"{workflow_id!r} loaded version {version!r}, registry version {registered_version!r}"
+        )
+    return contract
+
+
 def contract_artifact_options(
     contract_path: Path,
     *,
@@ -331,10 +376,10 @@ def contract_artifact_options(
 ) -> dict[str, Any]:
     """Read artifact validation inputs from one workflow contract.
 
-    This is intentionally a small JSON reader instead of importing the runtime
-    contract module; the live wrapper must stay usable from a partial checkout.
+    Contract mode is fail-closed: the file must pass the Lane 1 schema loader
+    and its workflow_id/version must match the shipped workflow registry.
     """
-    contract = _read_json(Path(contract_path))
+    contract = _load_registered_contract(Path(contract_path), harness_dir)
     workflow_id = str(contract.get("workflow_id") or "")
     version = str(contract.get("version") or "")
     roots_doc = contract.get("artifact_roots") if isinstance(contract.get("artifact_roots"), dict) else {}
@@ -1364,6 +1409,43 @@ def _parse_contract_substitutions(values: list[str]) -> dict[str, str]:
     return substitutions
 
 
+def _contract_load_failed_summary(
+    *,
+    run_id: str,
+    contract_path: str,
+    error: str,
+    terminal: bool,
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "state": "failed",
+        "failure_class": "contract_load_failed",
+        "classification": "CONTRACT_LOAD_FAILED",
+        "reason": "contract_load_failed",
+        "run_id": run_id,
+        "run_type": "sprint",
+        "generated_at": _utc_now(),
+        "terminal": terminal,
+        "not_product_proof": True,
+        "not_full_epic_product_proof": False,
+        "active_or_drafting_runs": [],
+        "raw_expected_artifacts": [],
+        "expected_artifacts": [],
+        "artifact_manifest": {"workspace": "", "roots": [], "expected_artifacts": [], "path_errors": []},
+        "artifact_root_conflicts": [],
+        "artifact_conflict_resolution": "",
+        "test_result": {"ran": False, "ok": False, "reason": "contract_load_failed", "command": ""},
+        "route_proof": {"ok": False, "reason": "contract_load_failed", "run_ids": [run_id]},
+        "producers": [],
+        "active_producers": [],
+        "artifact_stability": {"stable": False, "reason": "contract_load_failed"},
+        "contract": {"source_path": contract_path, "error": error},
+        "blocking_failures": [{"reason": "contract_load_failed", "error": error}],
+        "pending_reasons": [],
+        "explanation": "Contract artifact validation failed before legacy artifact inference.",
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -1407,13 +1489,24 @@ def main(argv: list[str] | None = None) -> int:
         test_command = args.test_command
         if str(args.contract or "").strip():
             substitutions = _parse_contract_substitutions(list(args.contract_substitution or []))
-            contract_options = contract_artifact_options(
-                Path(args.contract),
-                sid=args.id,
-                substitutions=substitutions,
-                harness_dir=Path(args.harness_dir),
-                workspace=Path(args.workspace),
-            )
+            try:
+                contract_options = contract_artifact_options(
+                    Path(args.contract),
+                    sid=args.id,
+                    substitutions=substitutions,
+                    harness_dir=Path(args.harness_dir),
+                    workspace=Path(args.workspace),
+                )
+            except ContractArtifactOptionsError as exc:
+                summary = _contract_load_failed_summary(
+                    run_id=args.id,
+                    contract_path=str(args.contract),
+                    error=str(exc),
+                    terminal=args.marker_mode == "terminal",
+                )
+                _write_json(Path(args.evidence_dir) / "artifact-validation-summary.json", summary)
+                print(json.dumps(summary, ensure_ascii=False, indent=2))
+                return 2
             expected_artifacts = list(contract_options.get("expected_artifacts") or [])
             contract_roots = [
                 (row["root"], row["type"])
