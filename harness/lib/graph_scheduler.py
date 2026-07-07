@@ -27,6 +27,11 @@ from typing import Any
 
 from prerequisite_resolver import evaluate_prerequisite, iter_blocked
 
+try:  # Lane 3 gate ledger (R4); optional so a partial install never breaks scheduling
+    import gate_ledger as _gate_ledger
+except Exception:  # pragma: no cover
+    _gate_ledger = None
+
 HOME = Path.home()
 HARNESS_DIR = Path(
     os.environ.get("HARNESS_DIR")
@@ -2269,6 +2274,67 @@ def _node_gate_verdict_ok(node: dict[str, Any]) -> tuple[bool, str]:
     return True, "verdict_ok"
 
 
+def _ledger_transition(graph: dict[str, Any], node_id: str, from_status: str, to_status: str,
+                       writer: str, *, applied: bool = True, author_type: str = "scheduler",
+                       note: str | None = None) -> None:
+    """Report a node-status write to the gate ledger (Lane 3, R4).
+
+    No-op unless SOLAR_GATE_LEDGER=1; never raises into the scheduling hot path."""
+    if _gate_ledger is None:
+        return
+    try:
+        if not _gate_ledger.enabled():
+            return
+        sid = _sprint_id_for_graph(graph)
+        if not sid:
+            return
+        _gate_ledger.record_status_transition(
+            SPRINTS_DIR, sid, node_id,
+            from_status=from_status, to_status=to_status,
+            author_type=author_type, writer=writer, applied=applied, note=note,
+        )
+    except Exception:
+        pass
+
+
+def _ledger_gate_verdict_block(graph: dict[str, Any], gate_node_ids: list[str]) -> tuple[str, str] | None:
+    """Ledger consult for gate aggregation (AC-R4.2, contracted path only).
+
+    A gate-consumable verdict record saying FAIL/block blocks the gate even when
+    the member node's *status* is passed — the 5fcff602 verdict-content semantics
+    locked structurally. Fail-open to legacy behavior off the contracted path."""
+    if _gate_ledger is None:
+        return None
+    try:
+        if not _gate_ledger.enabled() or not _gate_ledger.contracted(graph):
+            return None
+        sid = _sprint_id_for_graph(graph)
+        if not sid:
+            return None
+        ids = _node_map(graph)
+        for node_id in gate_node_ids:
+            node = ids.get(node_id)
+            generation = None
+            if isinstance(node, dict):
+                attempts = node.get("repair_attempts")
+                if attempts is not None:
+                    try:
+                        generation = int(attempts)
+                    except Exception:
+                        generation = None
+            latest = _gate_ledger.latest_consumable_verdict(
+                SPRINTS_DIR, sid, node_id, current_generation=generation
+            )
+            if latest is None:
+                continue
+            verdict = str(latest.get("verdict") or "").strip().lower()
+            if verdict in {"fail", "failed", "block", "blocked"}:
+                return node_id, f"ledger_verdict_block:{verdict}"
+    except Exception:
+        return None
+    return None
+
+
 def _gate_verdicts_ok(graph: dict[str, Any], gate_node_ids: list[str]) -> tuple[bool, str, str]:
     """Aggregate verdict-consumption across a gate's member nodes.
 
@@ -2283,6 +2349,9 @@ def _gate_verdicts_ok(graph: dict[str, Any], gate_node_ids: list[str]) -> tuple[
         ok, detail = _node_gate_verdict_ok(node)
         if not ok:
             return False, node_id, detail
+    ledger_block = _ledger_gate_verdict_block(graph, gate_node_ids)
+    if ledger_block is not None:
+        return False, ledger_block[0], ledger_block[1]
     return True, "", "verdict_ok"
 
 
@@ -2293,6 +2362,7 @@ def mark_node_result(graph: dict[str, Any], node_id: str, status: str,
     if node_id not in ids:
         raise ValueError(f"unknown node: {node_id}")
     _assert_pass_mark_allowed(graph, node_id, status)
+    _ledger_previous_status = node_status(graph, node_id)
 
     updated_at = _now()
     graph.setdefault("node_results", {})
@@ -2304,6 +2374,7 @@ def mark_node_result(graph: dict[str, Any], node_id: str, status: str,
         graph["node_results"][node_id]["note"] = note
     ids[node_id]["status"] = status
     ids[node_id]["updated_at"] = updated_at
+    _ledger_transition(graph, node_id, _ledger_previous_status, status, "mark_node_result", note=note)
 
     gate = ids[node_id].get("gate")
     if gate and status in {"failed", "cancelled"}:
@@ -2388,6 +2459,7 @@ def set_node_status(graph: dict[str, Any], node_id: str, status: str,
         gate_results = graph.get("gate_results")
         if isinstance(gate_results, dict) and gate in gate_results:
             gate_results.pop(gate, None)
+    _ledger_transition(graph, node_id, current, status, "set_node_status")
 
 
 def terminalize_dependency_blocked_nodes(graph: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2878,6 +2950,30 @@ def doctor_graph(graph: dict[str, Any], repair: bool = False) -> dict[str, Any]:
     """
     issues: list[dict[str, Any]] = []
     repairs: list[dict[str, Any]] = []
+    suppressed: list[dict[str, Any]] = []
+    # Lane 3 (R4 / review 3.1): on the contracted path the doctor is neutralized —
+    # its would-be status writes become author.type=doctor, gate_consumable=false
+    # ledger records (applied=false), never direct status.
+    doctor_neutralized = bool(
+        repair
+        and _gate_ledger is not None
+        and _gate_ledger.enabled()
+        and _gate_ledger.contracted(graph)
+    )
+
+    def _doctor_write_suppressed(node_id: str, from_status: str, to_status: str, repair_name: str) -> None:
+        _ledger_transition(
+            graph, node_id, from_status, to_status, "doctor_graph",
+            applied=False, author_type="doctor", note=repair_name,
+        )
+        suppressed.append({
+            "node": node_id,
+            "would_write": to_status,
+            "from": from_status,
+            "repair": repair_name,
+            "reason": "doctor_neutralized_on_contracted_path",
+        })
+
     ids = _node_map(graph)
     results = _node_results(graph)
 
@@ -2899,8 +2995,12 @@ def doctor_graph(graph: dict[str, Any], repair: bool = False) -> dict[str, Any]:
                 "effective_status": "reviewing",
             }
             issues.append(issue)
-            if repair:
+            if repair and doctor_neutralized:
+                _doctor_write_suppressed(node_id, node_status(graph, node_id), "reviewing", "reopened_passed_missing_eval")
+            elif repair:
                 now = _now()
+                _ledger_transition(graph, node_id, node_status(graph, node_id), "reviewing",
+                                   "doctor_graph", author_type="doctor", note="reopened_passed_missing_eval")
                 node["status"] = "reviewing"
                 node["updated_at"] = now
                 graph.setdefault("node_results", {})
@@ -2927,25 +3027,44 @@ def doctor_graph(graph: dict[str, Any], repair: bool = False) -> dict[str, Any]:
         if not repair:
             continue
 
+        if doctor_neutralized:
+            if inline_ts and result_ts and inline_ts > result_ts:
+                _doctor_write_suppressed(node_id, effective, inline_status, "node_results_updated_from_inline")
+            elif result_ts and inline_ts and result_ts > inline_ts:
+                _doctor_write_suppressed(node_id, effective, result_status, "inline_updated_from_node_results")
+            elif inline_status == "passed":
+                _doctor_write_suppressed(node_id, effective, inline_status, "node_results_updated_from_inline_passed")
+            elif result_status == "passed":
+                _doctor_write_suppressed(node_id, effective, result_status, "inline_updated_from_node_results_passed")
+            continue
+
         if inline_ts and result_ts and inline_ts > result_ts:
+            _ledger_transition(graph, node_id, effective, inline_status, "doctor_graph",
+                               author_type="doctor", note="node_results_updated_from_inline")
             result["status"] = inline_status
             result["updated_at"] = node.get("updated_at")
             repairs.append({**issue, "repair": "node_results_updated_from_inline"})
         elif result_ts and inline_ts and result_ts > inline_ts:
+            _ledger_transition(graph, node_id, effective, result_status, "doctor_graph",
+                               author_type="doctor", note="inline_updated_from_node_results")
             node["status"] = result_status
             node["updated_at"] = result.get("updated_at")
             repairs.append({**issue, "repair": "inline_updated_from_node_results"})
         elif inline_status == "passed":
+            _ledger_transition(graph, node_id, effective, inline_status, "doctor_graph",
+                               author_type="doctor", note="node_results_updated_from_inline_passed")
             result["status"] = inline_status
             result["updated_at"] = node.get("updated_at") or result.get("updated_at") or _now()
             repairs.append({**issue, "repair": "node_results_updated_from_inline_passed"})
         elif result_status == "passed":
+            _ledger_transition(graph, node_id, effective, result_status, "doctor_graph",
+                               author_type="doctor", note="inline_updated_from_node_results_passed")
             node["status"] = result_status
             node["updated_at"] = result.get("updated_at") or node.get("updated_at") or _now()
             repairs.append({**issue, "repair": "inline_updated_from_node_results_passed"})
 
     parent = parent_ready_check(graph)
-    return {
+    result_payload = {
         "ok": not issues,
         "sprint_id": graph.get("sprint_id"),
         "issues": issues,
@@ -2953,6 +3072,9 @@ def doctor_graph(graph: dict[str, Any], repair: bool = False) -> dict[str, Any]:
         "parent": parent,
         "repaired": bool(repairs),
     }
+    if suppressed:
+        result_payload["suppressed"] = suppressed
+    return result_payload
 
 
 def _workers_from_file(path: str | None) -> list[dict[str, Any]]:

@@ -33,6 +33,44 @@ HARNESS_DIR = _harness_dir()
 if str(HARNESS_DIR / "lib") not in sys.path:
     sys.path.insert(0, str(HARNESS_DIR / "lib"))
 SPRINTS_DIR = HARNESS_DIR / "sprints"
+
+try:  # Lane 3 gate ledger (R4/R5); optional so a partial install never breaks dispatch
+    import gate_ledger as _gate_ledger
+except Exception:  # pragma: no cover
+    _gate_ledger = None
+
+
+def _ledger_enabled() -> bool:
+    return _gate_ledger is not None and _gate_ledger.enabled()
+
+
+def _ledger_transition(sid: str, node_id: str, from_status: str, to_status: str, writer: str,
+                       *, author_type: str = "scheduler", operator_id: str | None = None,
+                       note: str | None = None, **extra: Any) -> None:
+    """Report a dispatcher-side node-status write to the gate ledger (Lane 3, R4).
+
+    No-op unless SOLAR_GATE_LEDGER=1; never raises into the dispatch hot path."""
+    if not _ledger_enabled():
+        return
+    try:
+        _gate_ledger.record_status_transition(
+            SPRINTS_DIR, sid, node_id,
+            from_status=from_status or "", to_status=to_status,
+            author_type=author_type, writer=writer, operator_id=operator_id,
+            note=note, **extra,
+        )
+    except Exception:
+        pass
+
+
+def _ledger_record(sid: str, **kwargs: Any) -> None:
+    """Append an arbitrary gate-ledger record (eval_verdict/gate_check/repair_*)."""
+    if not _ledger_enabled():
+        return
+    try:
+        _gate_ledger.append_record(SPRINTS_DIR, sid, **kwargs)
+    except Exception:
+        pass
 MULTI_TASK_RUN_DIR = HARNESS_DIR / "run" / "multi-task"
 SESSION = os.environ.get("SOLAR_HARNESS_SESSION", "solar-harness")
 NO_DISPATCH_FLAG = HARNESS_DIR / "run" / "no-dispatch.flag"
@@ -66,6 +104,17 @@ PANE_QUOTA_EXHAUSTED_RE = re.compile(
 PANE_RATE_LIMIT_FALLBACK_SEC = int(os.environ.get("SOLAR_PANE_RATE_LIMIT_FALLBACK_SEC", "900"))
 OPERATOR_CONTRACT_CLOSEOUT_COOLDOWN_SEC = int(os.environ.get("SOLAR_GRAPH_OPERATOR_CONTRACT_CLOSEOUT_COOLDOWN_SEC", "900"))
 GRAPH_NODE_REPAIR_MAX_ATTEMPTS = int(os.environ.get("SOLAR_GRAPH_NODE_REPAIR_MAX_ATTEMPTS", "1"))
+# AC-R4.1: the gate runner's own vocabulary of mechanical/infrastructure failure
+# reasons. A FAIL verdict carrying one of these is evidence-machinery failure, not
+# a content judgment, and must never flip a policy-passed node on the contracted path.
+MECHANICAL_EVAL_REASONS = {
+    "research_eval_json_missing",
+    "eval_json_missing",
+    "eval_json_unreadable",
+    "evaluator_temporarily_busy",
+    "eval_dispatch_unavailable",
+    "eval_closeout_invalid",
+}
 # Bounded eval-dispatch failure escalation. A node whose evaluator dispatch keeps failing for a
 # capacity reason (e.g. no evaluator pane in the pool) would otherwise sit in `reviewing` forever
 # (Run D: 246x no_available_evaluator with no terminal state). After this many consecutive
@@ -1058,6 +1107,10 @@ def _prepare_human_search_handoff(sid: str, graph_path: str | Path, node: dict[s
 
     graph = load_graph(graph_path)
     live = next((n for n in graph.get("nodes", []) if n.get("id") == node_id), node)
+    _ledger_transition(
+        str(graph.get("sprint_id") or Path(str(graph_path)).stem.replace(".task_graph", "")),
+        node_id, str(live.get("status") or ""), "waiting_human_search", "human_search_wait",
+    )
     live["status"] = "waiting_human_search"
     live["human_search"] = {
         "provider": "human-in-the-loop",
@@ -1977,6 +2030,9 @@ def _start_node_repair_from_eval_fail(
     if prior_attempts >= max_attempts:
         # Repair budget exhausted: the reconcile caller falls through and marks this node terminal
         # `failed`. Record the (otherwise silent) exhaustion so the terminal cause is provable from disk.
+        _ledger_record(sid, node_id=node_id, kind="repair_exhausted",
+                       author={"type": "policy"}, repair_attempt=prior_attempts,
+                       note="repair_budget_exhausted")
         _record_node_runstate(sid, node_id, {
             "repair_attempt": prior_attempts,
             "max_repair_attempts": max_attempts,
@@ -2024,6 +2080,11 @@ def _start_node_repair_from_eval_fail(
         artifacts.pop("eval_json", None)
         artifacts.pop("handoff_md", None)
 
+    _ledger_record(sid, node_id=node_id, kind="repair_start", author={"type": "policy"},
+                   repair_attempt=attempt, eval_generation=attempt,
+                   note=f"repair_requested_from_eval_sidecar:{Path(eval_json_path).name}")
+    _ledger_transition(sid, node_id, str(node.get("status") or ""), "failed_review",
+                       "_start_node_repair_from_eval_fail")
     node["status"] = "failed_review"
     node["repair_attempts"] = attempt
     node["repair_context"] = repair_context
@@ -2327,6 +2388,18 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
         eval_payload = {} if (late_pre_repair_eval_archived or stale_eval_archived) else (_read_json_file_safe(eval_json_path) if eval_json_path else {})
         stale_eval_generation_reason = _eval_payload_stale_for_current_repair(node, eval_payload)
         if stale_eval_generation_reason:
+            # AC-R4.4: stale-generation verdict evidence is archived, never applied —
+            # recorded in the gate ledger as a non-consumable eval_verdict.
+            _ledger_record(
+                sid, node_id=node_id, kind="eval_verdict",
+                author={"type": "evaluator"},
+                verdict=str(eval_payload.get("verdict") or eval_payload.get("status") or "") or None,
+                eval_generation=_eval_payload_generation(eval_payload),
+                repair_attempt=_node_repair_attempts(node),
+                generation_mode=str(eval_payload.get("generation_mode") or "") or None,
+                gate_consumable=False, archived=True,
+                stale_reason=stale_eval_generation_reason,
+            )
             archived_generation_eval = _archive_current_repair_stale_eval_sidecars(
                 sid,
                 node,
@@ -2541,6 +2614,8 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
                 if operator_cooldown:
                     node["last_operator_cooldown_after_closeout"] = operator_cooldown
                 node["updated_at"] = _utc_now()
+                _ledger_transition(sid, node_id, status, "pending", "_reconcile_existing_dispatches",
+                                   note=str(closeout["reason"]))
                 node["status"] = "pending"
                 graph.setdefault("node_results", {}).pop(node_id, None)
                 _append_dispatch_ledger(
@@ -2606,6 +2681,8 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
                     node.pop("dispatch_id", None)
                     node["dispatch_retry_reason"] = unavailable_reason
                     node["updated_at"] = _utc_now()
+                    _ledger_transition(sid, node_id, status, "pending", "_reconcile_existing_dispatches",
+                                       note=str(unavailable_reason))
                     node["status"] = "pending"
                     graph.setdefault("node_results", {}).pop(node_id, None)
                     _append_dispatch_ledger(
@@ -2634,6 +2711,8 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
                         node.pop("dispatch_id", None)
                         node["dispatch_retry_reason"] = "submit_ack_idle_no_worker_activity"
                         node["updated_at"] = _utc_now()
+                        _ledger_transition(sid, node_id, status, "pending", "_reconcile_existing_dispatches",
+                                           note="submit_ack_idle_no_worker_activity")
                         node["status"] = "pending"
                         graph.setdefault("node_results", {}).pop(node_id, None)
                         repaired.append(
@@ -2661,6 +2740,8 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
                         node.pop("dispatch_id", None)
                         node["dispatch_retry_reason"] = "live_lease_idle_without_submit_ack"
                         node["updated_at"] = _utc_now()
+                        _ledger_transition(sid, node_id, status, "pending", "_reconcile_existing_dispatches",
+                                           note="live_lease_idle_without_submit_ack")
                         node["status"] = "pending"
                         graph.setdefault("node_results", {}).pop(node_id, None)
                         repaired.append(
@@ -2683,6 +2764,8 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
                     node.pop("dispatch_id", None)
                     node["dispatch_retry_reason"] = dispatch_prompt_reason or unavailable_reason or "stale_submit_ack_without_live_lease"
                     node["updated_at"] = _utc_now()
+                    _ledger_transition(sid, node_id, status, "pending", "_reconcile_existing_dispatches",
+                                       note=str(node["dispatch_retry_reason"]))
                     node["status"] = "pending"
                     graph.setdefault("node_results", {}).pop(node_id, None)
                     repaired.append(
@@ -2702,6 +2785,8 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
                     node["dispatch_retry_reason"] = unavailable_reason
                     node["updated_at"] = _utc_now()
                     if _recoverable_pane_blocker(unavailable_reason):
+                        _ledger_transition(sid, node_id, status, "pending", "_reconcile_existing_dispatches",
+                                           note=str(unavailable_reason))
                         node["status"] = "pending"
                         graph.setdefault("node_results", {}).pop(node_id, None)
                         _append_dispatch_ledger(
@@ -2727,6 +2812,8 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
                         "updated_at": node["updated_at"],
                         "blocking_reason": unavailable_reason,
                     }
+                    _ledger_transition(sid, node_id, status, "worker_blocked", "_reconcile_existing_dispatches",
+                                       note=str(unavailable_reason))
                     node["status"] = "worker_blocked"
                     repaired.append(
                         {
@@ -2861,6 +2948,9 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
             node.pop("dispatch_id", None)
             node["dispatch_retry_reason"] = unavailable_reason or "stale_submit_ack_without_live_lease"
             node["updated_at"] = _utc_now()
+            _ledger_transition(sid, node_id, str(node.get("status") or ""), "pending",
+                               "_reconcile_existing_dispatches",
+                               note=str(node["dispatch_retry_reason"]))
             node["status"] = "pending"
             graph.setdefault("node_results", {}).pop(node_id, None)
             repaired.append(
@@ -3854,6 +3944,10 @@ def _mark_graph_node(graph_path: str, node_id: str, status: str,
             if node.get("id") != node_id:
                 continue
             updated_at = _utc_now()
+            _ledger_transition(
+                str(graph.get("sprint_id") or Path(str(graph_path)).stem.replace(".task_graph", "")),
+                node_id, str(node.get("status") or ""), status, "_mark_graph_node",
+            )
             node["status"] = status
             node["updated_at"] = updated_at
             results = graph.setdefault("node_results", {})
@@ -7899,6 +7993,7 @@ def dispatch_node_evals(graph_path: str, dry_run: bool = False, ttl: int = 900,
             })
             continue
 
+        _ledger_transition(sid, node_id, node_status(graph, node_id), "reviewing", "dispatch_node_evals")
         node["status"] = "reviewing"
         node["eval_dispatch_group_id"] = dispatch_group_id
         # A successful dispatch clears the consecutive-failure streak so a later transient
@@ -7970,6 +8065,8 @@ def _account_eval_dispatch_failures(
             # Set node + node_results directly: graph_scheduler._status_rank ranks reviewing(4) above
             # needs_human_review(0), so set_node_status would refuse this transition. This mirrors the
             # direct-write pattern already used by _start_node_repair_from_eval_fail.
+            _ledger_transition(sid, node_id, current, "needs_human_review",
+                               "_account_eval_dispatch_failures", note=blocked_reason)
             node["status"] = "needs_human_review"
             node["eval_blocked_reason"] = blocked_reason
             node["next_action"] = next_action
@@ -8054,7 +8151,7 @@ def dispatch_ready(graph_path: str, dry_run: bool = False, ttl: int = 900,
 
 def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
                  eval_json: str = "", dry_run: bool = False, ttl: int = 900,
-                 dispatch_downstream: bool = True) -> dict[str, Any]:
+                 dispatch_downstream: bool = True, verdict_kind: str = "") -> dict[str, Any]:
     graph = load_graph(graph_path)
     sid = str(graph.get("sprint_id") or Path(graph_path).stem.replace(".task_graph", ""))
     node = _node_by_id(graph, node_id)
@@ -8069,6 +8166,53 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
     else:
         return {"ok": False, "reason": "invalid_verdict", "verdict": verdict}
 
+    # AC-R4.1: the gate runner (this function) sets verdict_kind explicitly; when a
+    # caller does not, classification uses the runner-owned mechanical vocabulary,
+    # never free-text inference.
+    effective_verdict_kind = str(verdict_kind or "").strip().lower()
+    if effective_verdict_kind not in {"content", "mechanical", "infrastructure"}:
+        effective_verdict_kind = (
+            "mechanical" if str(reason or "").strip().lower() in MECHANICAL_EVAL_REASONS else "content"
+        )
+    _eval_generation = _node_repair_attempts(node)
+    _assignment_pm_task_id = next(
+        (str(item.get("pm_task_id") or "").strip()
+         for item in (node.get("eval_assignments") or [])
+         if isinstance(item, dict) and str(item.get("pm_task_id") or "").strip()),
+        None,
+    )
+    if (
+        status == "failed"
+        and effective_verdict_kind in {"mechanical", "infrastructure"}
+        and _ledger_enabled()
+        and _gate_ledger.contracted(graph)
+        and node_status(graph, node_id) == "passed"
+    ):
+        # v5 replay (AC-R4.1): a mechanical/infrastructure FAIL must not flip a
+        # policy-passed node — archive the verdict, never apply it.
+        _ledger_record(sid, node_id=node_id, kind="eval_verdict",
+                       author={"type": "evaluator"}, verdict="FAIL",
+                       verdict_kind=effective_verdict_kind,
+                       eval_generation=_eval_generation, repair_attempt=_eval_generation,
+                       pm_task_id=_assignment_pm_task_id,
+                       gate_consumable=False, archived=True, note=reason or None)
+        _ledger_record(sid, node_id=node_id, kind="gate_check", author={"type": "policy"},
+                       verdict="hold", verdict_kind=effective_verdict_kind,
+                       note="mechanical_fail_cannot_flip_passed_node")
+        return {
+            "ok": False,
+            "reason": "mechanical_fail_cannot_flip_passed_node",
+            "node": node_id,
+            "status": "passed",
+            "verdict_kind": effective_verdict_kind,
+        }
+    _ledger_record(sid, node_id=node_id, kind="eval_verdict",
+                   author={"type": "evaluator"},
+                   verdict="PASS" if status == "passed" else "FAIL",
+                   verdict_kind=effective_verdict_kind,
+                   eval_generation=_eval_generation, repair_attempt=_eval_generation,
+                   pm_task_id=_assignment_pm_task_id, note=reason or None)
+
     proof_gate: dict[str, Any] = {"required": False}
     if status == "passed":
         resolved_eval_json = eval_json or _eval_json_file(sid, node_id)
@@ -8078,6 +8222,8 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
                 resolved_eval_json = backfilled_eval
         observed_handoff = _existing_node_handoff(sid, node, graph) or _handoff_file(sid, node_id)
         if observed_handoff and not Path(str(resolved_eval_json)).expanduser().exists():
+            _ledger_record(sid, node_id=node_id, kind="gate_check", author={"type": "policy"},
+                           verdict="block", note="missing_eval_json_for_pass")
             return {
                 "ok": False,
                 "reason": "missing_eval_json_for_pass",
@@ -8092,6 +8238,8 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
         _emit_node_proof_sidecars(sid, node)
         proof_gate = _evaluate_proof_obligations(sid, node, eval_json=resolved_eval_json)
         if proof_gate.get("required") and not proof_gate.get("ok"):
+            _ledger_record(sid, node_id=node_id, kind="gate_check", author={"type": "policy"},
+                           verdict="block", note="proof_obligations_failed")
             return {
                 "ok": False,
                 "reason": "proof_obligations_failed",
@@ -8114,6 +8262,8 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
                 **_deepresearch_quality_gate_auto_run(sid, node, resolved_eval_json),
             }
             if not research_quality_gate.get("present"):
+                _ledger_record(sid, node_id=node_id, kind="gate_check", author={"type": "policy"},
+                               verdict="block", note="missing_deepresearch_quality_gate")
                 return {
                     "ok": False,
                     "reason": "missing_deepresearch_quality_gate",
@@ -8124,6 +8274,8 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
                     "research_quality_gate": research_quality_gate,
                 }
         if not research_quality_gate.get("ok"):
+            _ledger_record(sid, node_id=node_id, kind="gate_check", author={"type": "policy"},
+                           verdict="block", note="deepresearch_quality_gate_failed")
             return {
                 "ok": False,
                 "reason": "deepresearch_quality_gate_failed",
@@ -8204,6 +8356,9 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
     # per-node eval). Closes the eval-backfill false-positive vector at the node_verdict entry point.
     self_graded_handoff = _existing_node_handoff(sid, node, graph)
     if status == "passed" and self_graded_handoff and _node_eval_self_graded(sid, node_id):
+        _ledger_record(sid, node_id=node_id, kind="gate_check", author={"type": "policy"},
+                       verdict="block", self_graded=True,
+                       note="self_graded_eval_requires_independent_report")
         return {
             "ok": False,
             "reason": "self_graded_eval_requires_independent_report",
