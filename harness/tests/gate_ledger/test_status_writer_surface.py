@@ -196,14 +196,21 @@ def test_mark_node_result_records_forced_write(sandbox):
 
 
 def test_terminal_statuses_absorbing_in_projection(sandbox):
+    """Absorbing = no exit from terminal without an APPLIED audited record
+    (round-4 G6 semantics): unapplied would-be writes never project; a real
+    applied record — scheduler or human — always does."""
     graph = _graph()
     gs.mark_node_result(graph, "S1", "failed")
-    # A post-terminal scheduler-authored downgrade is recorded but not projected.
+    # A neutralized (applied=False) post-terminal write is recorded but not projected.
     gl.record_status_transition(sandbox, SID, "S1", from_status="failed", to_status="pending",
-                                author_type="scheduler", writer="test_force")
+                                author_type="scheduler", writer="test_force", applied=False)
     assert gl.project_node_status(sandbox, SID, "S1") == "failed"
+    # An APPLIED post-terminal record projects — the writer really performed it.
+    gl.record_status_transition(sandbox, SID, "S1", from_status="failed", to_status="pending",
+                                author_type="scheduler", writer="recover_quota_failed_nodes")
+    assert gl.project_node_status(sandbox, SID, "S1") == "pending"
     # A human-authored reopen is projected.
-    gl.record_status_transition(sandbox, SID, "S1", from_status="failed", to_status="reviewing",
+    gl.record_status_transition(sandbox, SID, "S1", from_status="pending", to_status="reviewing",
                                 author_type="human", writer="human_verdict")
     assert gl.project_node_status(sandbox, SID, "S1") == "reviewing"
 

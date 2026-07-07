@@ -27,6 +27,21 @@ no-transition-without-record, rank-guard suppression records nothing, and termin
 Flag-off byte-parity is proven (`~/opensolar-state/run-archive/lane3-ledger/flag-off-bit-parity.diff`
 — the only diff line is the sandbox tmp path embedded in a sidecar path).
 
+## D1a — "terminal statuses absorbing" means absorbing against unrecorded/unapplied writes (round-4 G6)
+
+AC-R4.3's wording "terminal statuses are absorbing" is implemented in
+`project_node_status` as: a terminal status absorbs **unrecorded** writes
+(they leave no record, so they cannot project) and **neutralized** would-be
+writes (`applied: false`, the doctor-on-contract shape). Any APPLIED record —
+including terminal→terminal (`passed→failed` on a real content FAIL) and
+terminal→non-terminal (quota-fallback reopen) — projects, because applied
+records exist only via audited writers and a projection that contradicts a
+recorded write is itself a status-truth lie (the round-4 G6 finding: the
+pass-only reopen rule laundered a real `passed→failed` force-write into a
+stale "passed"). Disposition: **absorbing = no exit from a terminal status
+without an applied audited record.** Consumers (Lane 5 dashboard endpoint)
+inherit these semantics.
+
 ## D2 — author enum extended with `operator`
 
 Design §1.4's `author.type` enum (`evaluator|doctor|policy|human|scheduler`) predates the F7
