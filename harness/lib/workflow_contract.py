@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -323,19 +324,43 @@ def load_contract(path: os.PathLike) -> Dict[str, Any]:
     return doc
 
 
-def load_all_contracts(workflows_dir: Optional[os.PathLike] = None) -> List[Dict[str, Any]]:
-    """Load every *.workflow.json in the registry dir, sorted by filename."""
+def load_all_contracts(
+    workflows_dir: Optional[os.PathLike] = None,
+    skip_invalid: bool = False,
+) -> List[Dict[str, Any]]:
+    """Load every *.workflow.json in the registry dir, sorted by filename.
+
+    With skip_invalid=True (the router path, F12), a malformed contract file is
+    skipped and logged to stderr rather than aborting the whole load — one
+    poisoned file must not break routing for every request. Strict callers
+    (compile/instantiate of a named contract) keep the default and surface the
+    ContractSchemaError.
+    """
     directory = Path(workflows_dir) if workflows_dir else default_workflows_dir()
     contracts: List[Dict[str, Any]] = []
     if not directory.is_dir():
         return contracts
     for path in sorted(directory.glob(f"*{CONTRACT_FILE_SUFFIX}")):
-        contracts.append(load_contract(path))
+        try:
+            contracts.append(load_contract(path))
+        except ContractSchemaError as exc:
+            if not skip_invalid:
+                raise
+            print(
+                f"workflow_contract: skipping malformed contract {path.name}: {exc}",
+                file=sys.stderr,
+            )
     return contracts
 
 
-def find_contract(workflow_id: str, workflows_dir: Optional[os.PathLike] = None) -> Optional[Dict[str, Any]]:
-    for contract in load_all_contracts(workflows_dir):
+def find_contract(
+    workflow_id: str,
+    workflows_dir: Optional[os.PathLike] = None,
+    skip_invalid: bool = True,
+) -> Optional[Dict[str, Any]]:
+    """Locate one contract by id. Malformed SIBLINGS are skipped (F12) so a
+    poisoned file elsewhere in the registry can't hide a healthy target."""
+    for contract in load_all_contracts(workflows_dir, skip_invalid=skip_invalid):
         if contract.get("workflow_id") == workflow_id:
             return contract
     return None

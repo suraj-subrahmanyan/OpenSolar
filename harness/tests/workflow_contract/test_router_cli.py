@@ -54,15 +54,50 @@ def test_match_demo_mode_marker_prompt_still_routes_exit_0():
     assert result.stdout.strip() == "research.deepdive.rsi_demo"
 
 
-def test_match_failure_is_fail_safe_nonzero(tmp_path):
-    """A broken contract registry must exit non-zero (stub falls back to legacy),
-    never a spurious match."""
+def test_match_all_contracts_broken_is_fail_safe_nomatch(tmp_path):
+    """A registry whose ONLY contract is malformed resolves to no match (exit 1,
+    stub falls back to the generic/legacy path) — never a spurious match. F12
+    made the malformed file skipped-and-logged rather than fatal, so an
+    all-broken dir is a clean no-match (1) instead of a load error (2)."""
     bad_dir = tmp_path / "workflows"
     bad_dir.mkdir()
     (bad_dir / "broken.workflow.json").write_text("{not json", encoding="utf-8")
     result = _run("match", "--request", RSI_PROMPT, "--workflows-dir", str(bad_dir))
-    assert result.returncode == 2, (result.returncode, result.stdout)
+    assert result.returncode == 1, (result.returncode, result.stdout)
     assert result.stdout.strip() == ""
+
+
+def test_one_malformed_contract_does_not_break_routing_for_others(tmp_path):
+    """F12 (round-2): a single poisoned contract file must NOT take down routing
+    for every request. The router skips it (logged to stderr) and keeps matching
+    the healthy contracts. Reviewer probe: RSI_PROMPT still routes with a broken
+    sibling in the registry."""
+    poisoned = tmp_path / "workflows"
+    poisoned.mkdir()
+    rsi_src = HARNESS_DIR / "config" / "workflows" / "research.deepdive.rsi_demo.workflow.json"
+    (poisoned / "research.deepdive.rsi_demo.workflow.json").write_text(
+        rsi_src.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (poisoned / "aaa-broken.workflow.json").write_text("{not json", encoding="utf-8")
+    result = _run("match", "--request", RSI_PROMPT, "--workflows-dir", str(poisoned))
+    assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+    assert result.stdout.strip() == "research.deepdive.rsi_demo"
+    assert "aaa-broken.workflow.json" in result.stderr
+
+
+def test_list_skips_malformed_contract(tmp_path):
+    """`list` likewise skips the malformed file and shows the healthy one."""
+    poisoned = tmp_path / "workflows"
+    poisoned.mkdir()
+    rsi_src = HARNESS_DIR / "config" / "workflows" / "research.deepdive.rsi_demo.workflow.json"
+    (poisoned / "research.deepdive.rsi_demo.workflow.json").write_text(
+        rsi_src.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (poisoned / "zzz-broken.workflow.json").write_text("{not json", encoding="utf-8")
+    result = _run("list", "--workflows-dir", str(poisoned))
+    assert result.returncode == 0
+    ids = [line.split("\t")[0] for line in result.stdout.strip().splitlines()]
+    assert ids == ["research.deepdive.rsi_demo"]
 
 
 def test_list_shows_all_three_contracts():

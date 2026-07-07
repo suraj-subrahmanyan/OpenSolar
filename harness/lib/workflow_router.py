@@ -37,7 +37,8 @@ def _workflows_dir(args: argparse.Namespace) -> Path:
 
 
 def cmd_match(args: argparse.Namespace) -> int:
-    contracts = wc.load_all_contracts(_workflows_dir(args))
+    # F12: a single malformed contract must not break routing for every request.
+    contracts = wc.load_all_contracts(_workflows_dir(args), skip_invalid=True)
     workflow_id = wc.match_trigger(
         args.request,
         env=os.environ,
@@ -51,7 +52,7 @@ def cmd_match(args: argparse.Namespace) -> int:
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    for contract in wc.load_all_contracts(_workflows_dir(args)):
+    for contract in wc.load_all_contracts(_workflows_dir(args), skip_invalid=True):
         print(
             f"{contract.get('workflow_id')}\t{contract.get('version')}\t"
             f"{contract.get('stages_mode', 'fixed')}\t{contract.get('title', '')}"
