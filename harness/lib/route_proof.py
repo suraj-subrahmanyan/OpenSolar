@@ -135,14 +135,17 @@ def _physical_selected_operator_ids(harness_dir: Path, node: dict[str, Any]) -> 
             selected.append({"operator_id": operator_id, "source": source})
 
     artifacts = node.get("artifacts") if isinstance(node.get("artifacts"), dict) else {}
+    add(artifacts.get("suggested_operator_id"), "task_graph.artifacts.suggested_operator_id")
     add(artifacts.get("selected_operator_id"), "task_graph.artifacts.selected_operator_id")
 
     inline = node.get("physical_plan_ir") if isinstance(node.get("physical_plan_ir"), dict) else {}
+    add(inline.get("suggested_operator_id"), "task_graph.physical_plan_ir.suggested_operator_id")
     add(inline.get("selected_operator_id"), "task_graph.physical_plan_ir.selected_operator_id")
 
     physical_path = _artifact_path(harness_dir, artifacts.get("physical_plan_ir"))
     if physical_path is not None:
         physical = _read_json(physical_path)
+        add(physical.get("suggested_operator_id"), f"physical_plan_ir.suggested_operator_id:{physical_path}")
         add(physical.get("selected_operator_id"), f"physical_plan_ir:{physical_path}")
 
     deduped: list[dict[str, str]] = []

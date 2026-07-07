@@ -49,6 +49,51 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> str:
     return str(path)
 
 
+def _product_mode_enabled() -> bool:
+    return str(os.environ.get("SOLAR_PRODUCT_MODE", "") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _operator_suggestion_id(physical_plan: Dict[str, Any]) -> str:
+    return str(
+        physical_plan.get("suggested_operator_id")
+        or physical_plan.get("selected_operator_id")
+        or physical_plan.get("operator_id")
+        or physical_plan.get("actor_id")
+        or ""
+    ).strip()
+
+
+def _operator_suggestion_host_type(physical_plan: Dict[str, Any], operator_id: str) -> str:
+    explicit = str(physical_plan.get("host_type") or "").strip()
+    if explicit:
+        return explicit
+    for key in ("execution_candidates", "candidates"):
+        candidates = physical_plan.get(key)
+        if not isinstance(candidates, list):
+            continue
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            if str(candidate.get("operator_id") or "").strip() != operator_id:
+                continue
+            host_type = str(candidate.get("host_type") or candidate.get("backend") or "").strip()
+            if host_type:
+                return host_type
+    return "unknown"
+
+
+def _physical_plan_artifact_payload(physical_plan: Dict[str, Any]) -> Dict[str, Any]:
+    if not _product_mode_enabled():
+        return physical_plan
+    payload = dict(physical_plan)
+    suggestion = _operator_suggestion_id(payload)
+    payload.pop("selected_operator_id", None)
+    if suggestion:
+        payload["suggested_operator_id"] = suggestion
+    payload["host_type"] = _operator_suggestion_host_type(payload, suggestion)
+    return payload
+
+
 def _load_yaml(path: Path) -> Dict[str, Any]:
     if not path.exists():
         return {}
@@ -734,17 +779,18 @@ def enumerate_physical_candidates(
             priority += 20
         if default_profile and (op_id == default_profile or str(spec.get("profile", "")) == default_profile):
             priority += 8
-        candidates.append(
-            {
-                "operator_id": op_id,
-                "priority": priority,
-                "role": role,
-                "task_type": task_type,
-                "profile": spec.get("profile"),
-                "model": spec.get("model"),
-                "preferred_for": spec.get("preferred_for", []),
-            }
-        )
+        candidate = {
+            "operator_id": op_id,
+            "priority": priority,
+            "role": role,
+            "task_type": task_type,
+            "profile": spec.get("profile"),
+            "model": spec.get("model"),
+            "preferred_for": spec.get("preferred_for", []),
+        }
+        if _product_mode_enabled():
+            candidate["host_type"] = spec.get("host_type") or spec.get("backend") or "unknown"
+        candidates.append(candidate)
 
     candidates.sort(key=lambda item: (-int(item["priority"]), str(item["operator_id"])))
     return candidates
@@ -843,7 +889,7 @@ def materialize_execution_plan_artifacts(
     capsule_path = Path(paths["capsule_plan_ir_path"])
     physical_path = Path(paths["physical_plan_ir_path"])
     _write_json(capsule_path, capsule_plan)
-    _write_json(physical_path, physical_plan)
+    _write_json(physical_path, _physical_plan_artifact_payload(physical_plan))
     return paths
 
 
@@ -939,6 +985,8 @@ def compile_execution_plan_for_node(
         "selected_operator_id": physical_plan.get("operator_id") or physical_plan.get("actor_id"),
         "candidates": physical_plan.get("candidates", []),
     }
+    if _product_mode_enabled():
+        physical_plan_artifact = _physical_plan_artifact_payload(physical_plan)
 
     # ── Evidence policy ───────────────────────────────────────────────────────
     evidence_policy: Dict[str, Any] = {
