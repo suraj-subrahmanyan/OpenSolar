@@ -38,9 +38,19 @@ def test_match_generic_prompt_exit_1():
     assert result.returncode == 1, (result.stdout, result.stderr)
 
 
-def test_match_demo_mode_env_gate_exit_0():
+def test_match_demo_mode_env_gate_does_not_route_unrelated_text_exit_1():
+    """F6 (round-2): the demo env gate can no longer route arbitrary text — a
+    marker-free prompt in demo mode is a no-match (exit 1), never a hijack."""
     result = _run("match", "--request", "hello", extra_env={"SOLAR_DEMO_REPORT_MODE": "1"})
-    assert result.returncode == 0
+    assert result.returncode == 1, (result.returncode, result.stdout)
+    assert result.stdout.strip() == ""
+
+
+def test_match_demo_mode_marker_prompt_still_routes_exit_0():
+    """F6 must not break the demo driver: a marker-bearing prompt still routes
+    (with demo mode on)."""
+    result = _run("match", "--request", RSI_PROMPT, extra_env={"SOLAR_DEMO_REPORT_MODE": "1"})
+    assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "research.deepdive.rsi_demo"
 
 

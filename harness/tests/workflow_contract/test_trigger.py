@@ -45,10 +45,43 @@ def test_generic_words_are_insufficient(shipped_contracts, clean_trigger_env):
         ), text
 
 
-def test_env_gate_routes_any_text_in_demo_mode(shipped_contracts):
+# ---------------------------------------------------------------------------
+# F6 (round-2): env_gates may CONSTRAIN a match, never CONSTITUTE one. A trigger
+# fires only on an explicit marker OR the requirement-compiler type; an env gate
+# is never a standalone match path. The reviewer's ▶EXECUTED probe: a pure code
+# request under SOLAR_DEMO_REPORT_MODE=1 routed to the research contract because
+# the env gate matched ANY text. It must not — and the demo driver, whose
+# prompts carry the markers anyway, must keep working.
+# ---------------------------------------------------------------------------
+
+def test_env_gate_alone_does_not_route_unrelated_text_in_demo_mode(shipped_contracts):
+    """The corrected F6 behavior: a marker-free prompt in demo mode does NOT
+    route (was the bug: env gate matched any text)."""
+    env = {"SOLAR_DEMO_REPORT_MODE": "1"}
+    assert wc.match_trigger("hello there", env=env, contracts=_contracts(shipped_contracts)) is None
+
+
+def test_env_gate_does_not_route_pure_code_request_in_demo_mode(shipped_contracts):
+    """Reviewer probe verbatim: a pure code request under demo mode must not be
+    hijacked to the research contract by the env gate."""
+    env = {"SOLAR_DEMO_REPORT_MODE": "1"}
+    for code_request in (
+        "implement a python CLI that adds two numbers and write tests",
+        "fix the failing pytest in workdir/tool.py",
+        "refactor the auth module to remove the global",
+    ):
+        assert (
+            wc.match_trigger(code_request, env=env, contracts=_contracts(shipped_contracts))
+            is None
+        ), code_request
+
+
+def test_demo_driver_marker_prompt_still_routes_in_demo_mode(shipped_contracts):
+    """F6 must NOT break the demo driver: its prompts carry a declared marker,
+    so they route with or without demo mode set."""
     env = {"SOLAR_DEMO_REPORT_MODE": "1"}
     assert (
-        wc.match_trigger("hello there", env=env, contracts=_contracts(shipped_contracts))
+        wc.match_trigger(RSI_PROMPT, env=env, contracts=_contracts(shipped_contracts))
         == "research.deepdive.rsi_demo"
     )
 

@@ -844,11 +844,15 @@ def match_trigger(
 ) -> Optional[str]:
     """Resolve free intake text to a workflow_id or None.
 
-    Match paths (any one suffices, AC-R1.3): an explicit marker appears in the
-    text; every declared env gate is satisfied (the f7febf00 bounded-mode
-    bypass, generalized); or the caller-supplied requirement-compiler type
-    equals the contract's. Generic words are insufficient by construction:
-    only declared markers match, and the longest marker wins across contracts.
+    Match paths (F6, round-2): a trigger fires ONLY on an explicit marker in the
+    text or the caller-supplied requirement-compiler type. `env_gates` may
+    CONSTRAIN a match (an unsatisfied gate, when the contract opts in with
+    `env_gates_required`, suppresses an otherwise-firing contract) but never
+    CONSTITUTE one — an env gate is never a standalone match path, so demo-mode
+    env can no longer route arbitrary text (the f7febf00 bypass fired on ANY
+    text). The demo driver is unaffected: its prompts carry the markers. Generic
+    words are insufficient by construction: only declared markers match, and the
+    longest marker wins across contracts.
 
     Contracts with a trigger.selection key (explicit-only workflows, the
     pm.generic.v1 fallback) never match free text.
@@ -859,32 +863,51 @@ def match_trigger(
     text_lower = str(text or "").lower()
 
     marker_hits: List[tuple] = []
-    gate_hits: List[str] = []
     requirement_hits: List[str] = []
     for contract in contracts:
         trigger = contract.get("trigger") or {}
         if trigger.get("selection"):
             continue
         workflow_id = str(contract.get("workflow_id") or "")
+
+        # env_gates constrain, never constitute (F6): unsatisfied gates can only
+        # SUPPRESS a marker/requirement match, and only when the contract opts in
+        # via env_gates_required. A contract whose markers must fire ungated
+        # (the RSI demo) simply leaves env_gates permissive.
+        env_gates = trigger.get("env_gates", []) or []
+        if env_gates and _env_gates_suppress(env_gates, environment, trigger):
+            continue
+
         if text_lower:
             for marker in trigger.get("explicit_markers", []) or []:
                 marker_lower = str(marker).lower()
                 if marker_lower and marker_lower in text_lower:
                     marker_hits.append((-len(marker_lower), workflow_id))
-        env_gates = trigger.get("env_gates", []) or []
-        if env_gates and all(
-            str(environment.get(str(gate.get("env")), "")) == str(gate.get("equals"))
-            for gate in env_gates
-        ):
-            gate_hits.append(workflow_id)
         declared_type = trigger.get("requirement_compiler_type")
         if requirement_type and declared_type and str(requirement_type) == str(declared_type):
             requirement_hits.append(workflow_id)
 
     if marker_hits:
         return sorted(marker_hits)[0][1]
-    if gate_hits:
-        return sorted(gate_hits)[0]
     if requirement_hits:
         return sorted(requirement_hits)[0]
     return None
+
+
+def _env_gates_suppress(
+    env_gates: List[Dict[str, Any]], environment: Dict[str, str], trigger: Dict[str, Any]
+) -> bool:
+    """True when declared env_gates should SUPPRESS this contract's match.
+
+    Default: an env gate is permissive (the f7febf00 demo bypass was additive),
+    so it suppresses nothing — it just can no longer fire on its own. A contract
+    that genuinely wants its markers gated opts in with
+    `trigger.env_gates_required: true`, and then every gate must hold for its
+    marker/requirement match to survive.
+    """
+    if not trigger.get("env_gates_required"):
+        return False
+    return not all(
+        str(environment.get(str(gate.get("env")), "")) == str(gate.get("equals"))
+        for gate in env_gates
+    )
