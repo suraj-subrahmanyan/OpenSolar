@@ -27,6 +27,14 @@ def _load_status_server(tmp_path: Path):
     return module, harness
 
 
+def _import_status_server(name: str):
+    spec = importlib.util.spec_from_file_location(name, MODULE_PATH)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -95,6 +103,21 @@ def test_contract_route_uses_ledger_projection_and_manifest_links(tmp_path: Path
     assert stages["D2"]["state_source"] == "graph"
     assert stages["D2"]["manifest"]["exists"] is False
     assert stages["D2"]["manifest"]["path"].endswith(f"{sid}.D2-manifest.json")
+
+
+def test_contract_route_honors_harness_sprints_dir_env(tmp_path: Path, monkeypatch):
+    harness = tmp_path / "harness"
+    sprints_dir = tmp_path / "custom-sprints"
+    harness.mkdir(parents=True, exist_ok=True)
+    sprints_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HARNESS_DIR", str(harness))
+    monkeypatch.setenv("SOLAR_HARNESS_DIR", str(tmp_path / "ignored-harness"))
+    monkeypatch.setenv("HARNESS_SPRINTS_DIR", str(sprints_dir))
+
+    module = _import_status_server(f"status_server_contract_route_env_{time.time_ns()}")
+
+    assert module.HARNESS_DIR == harness
+    assert module.SPRINTS_DIR == sprints_dir
 
 
 def test_contract_route_returns_legacy_shape_for_uncontracted_sprint(tmp_path: Path):

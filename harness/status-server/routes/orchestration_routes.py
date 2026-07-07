@@ -58,7 +58,7 @@ HARNESS_DIR = Path(
     or str(Path.home() / ".solar" / "harness")
 ).expanduser()
 SCRIPT_HARNESS_DIR = Path(__file__).resolve().parents[2]
-SPRINTS_DIR = HARNESS_DIR / "sprints"
+SPRINTS_DIR = Path(os.environ.get("HARNESS_SPRINTS_DIR") or (HARNESS_DIR / "sprints"))
 SESSIONS_DIR = HARNESS_DIR / "sessions"
 STATE_DIR = HARNESS_DIR / "state"
 EVENTS_JSONL = HARNESS_DIR / "events.jsonl"

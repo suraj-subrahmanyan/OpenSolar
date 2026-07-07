@@ -62,7 +62,7 @@ HARNESS_DIR = Path(
 SOURCE_HARNESS_DIR = Path(os.environ.get("SOLAR_SOURCE_HARNESS_DIR", str(Path.home() / "Solar" / "harness")))
 if str(HARNESS_DIR / "lib") not in sys.path:
     sys.path.insert(0, str(HARNESS_DIR / "lib"))
-SPRINTS_DIR = HARNESS_DIR / "sprints"
+SPRINTS_DIR = Path(os.environ.get("HARNESS_SPRINTS_DIR") or (HARNESS_DIR / "sprints"))
 REPORTS_DIR = HARNESS_DIR / "reports"
 SESSIONS_DIR = HARNESS_DIR / "sessions"
 EVENTS_DIR = HARNESS_DIR / "events"
