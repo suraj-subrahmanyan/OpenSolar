@@ -94,7 +94,7 @@ These are product-shell failures. They are included because they consumed large 
 - **fixed by:** `a10dfcfe` (sync bundled harness when stale; bump rc.8) · **live revalidated:** artifact-level test still gated at time of the reports · **still open:** artifact install acid tests (macOS/Windows) were still the release gate.
 
 ### F-011 — Tracked persona symlink to a private absolute path broke packaging
-- **source:** `RC8-GAP-REGISTER…` §3: symlink target `/Users/lisihao/.solar/harness/personas` · **class:** installer/packaging
+- **source:** `RC8-GAP-REGISTER…` §3: symlink target was an upstream developer's private absolute home path (`/Users/<upstream-dev>/.solar/harness/personas`) · **class:** installer/packaging
 - **fixed by:** `446a1c5b` · **still open:** no (but raw `../harness` bundling flagged fragile — G9).
 
 ### F-012 — Prepackage check false-failed on frontend `node_modules` symlinks
