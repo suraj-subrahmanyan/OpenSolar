@@ -92,6 +92,32 @@ def test_report_validator_too_few_claims(tmp_path):
     assert "TOO_FEW_CLAIMS" in proc.stderr
 
 
+def test_report_validator_rejects_duplicate_source_ids(tmp_path):
+    r = _write_good_workspace(tmp_path)
+    sources = [{"id": "s_dup", "title": f"Duplicate source {i}"} for i in range(1, 7)]
+    (r / "sources.json").write_text(json.dumps(sources), encoding="utf-8")
+    claims = [
+        {"claim_id": f"c{i}", "source_id": "s_dup", "claim_text": f"claim number {i}"}
+        for i in range(1, 12)
+    ]
+    (r / "claims.json").write_text(json.dumps(claims), encoding="utf-8")
+    proc = _run_report_validator(tmp_path)
+    assert proc.returncode != 0
+    assert "DUPLICATE_SOURCE_ID" in proc.stderr
+
+
+def test_report_validator_rejects_duplicate_claim_ids(tmp_path):
+    r = _write_good_workspace(tmp_path)
+    claims = json.loads((r / "claims.json").read_text(encoding="utf-8"))
+    for idx, claim in enumerate(claims):
+        claim["claim_id"] = "c_dup"
+        claim["claim_text"] = f"conflicting duplicate claim text {idx}"
+    (r / "claims.json").write_text(json.dumps(claims), encoding="utf-8")
+    proc = _run_report_validator(tmp_path)
+    assert proc.returncode != 0
+    assert "DUPLICATE_CLAIM_ID" in proc.stderr
+
+
 def test_report_validator_bad_linkage(tmp_path):
     r = _write_good_workspace(tmp_path)
     claims = json.loads((r / "claims.json").read_text())

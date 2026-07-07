@@ -61,6 +61,29 @@ def _as_list(data, *keys):
     return None
 
 
+def _unique_required_ids(rows, field: str, label: str) -> set[str]:
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    missing: list[int] = []
+    for idx, row in enumerate(rows):
+        if not isinstance(row, dict):
+            missing.append(idx)
+            continue
+        value = str(row.get(field) or "").strip()
+        if not value:
+            missing.append(idx)
+            continue
+        if value in seen:
+            duplicates.append(value)
+            continue
+        seen.add(value)
+    if missing:
+        fail(f"MISSING_{label}_ID: rows with no {field}: {missing[:3]}")
+    if duplicates:
+        fail(f"DUPLICATE_{label}_ID: duplicate {field} values: {duplicates[:3]}")
+    return seen
+
+
 def main() -> None:
     # 1. required files exist
     missing = [p for p in REQUIRED if not (ROOT / p).is_file()]
@@ -93,18 +116,14 @@ def main() -> None:
     if claims is None:
         fail("SCHEMA: claims.json is not a list (nor {claims:[...]})")
 
-    # 5/6. counts
-    if len(sources) < MIN_SOURCES:
-        fail(f"TOO_FEW_SOURCES: {len(sources)} < {MIN_SOURCES}")
-    if len(claims) < MIN_CLAIMS:
-        fail(f"TOO_FEW_CLAIMS: {len(claims)} < {MIN_CLAIMS}")
+    source_ids = _unique_required_ids(sources, "id", "SOURCE")
+    claim_ids = _unique_required_ids(claims, "claim_id", "CLAIM")
 
-    # source ids
-    source_ids = {
-        str(s.get("id")) for s in sources if isinstance(s, dict) and s.get("id") is not None
-    }
-    if not source_ids:
-        fail("SCHEMA: no source objects with an 'id' field")
+    # 5/6. counts are evidence breadth gates; duplicates do not count.
+    if len(source_ids) < MIN_SOURCES:
+        fail(f"TOO_FEW_SOURCES: {len(source_ids)} unique ids < {MIN_SOURCES}")
+    if len(claim_ids) < MIN_CLAIMS:
+        fail(f"TOO_FEW_CLAIMS: {len(claim_ids)} unique ids < {MIN_CLAIMS}")
 
     # 4. every claim links to a valid source_id (+ has non-empty claim text)
     bad_link = []
@@ -131,7 +150,7 @@ def main() -> None:
 
     print(
         "RSI demo report validated: "
-        f"{len(sources)} sources, {len(claims)} claims, all source_id links valid, "
+        f"{len(source_ids)} unique sources, {len(claim_ids)} unique claims, all source_id links valid, "
         "report.html is HTML, no placeholder content"
     )
 
