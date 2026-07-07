@@ -141,6 +141,16 @@ def _workflow_contract_guard(graph: dict[str, Any]) -> dict[str, Any] | None:
                 node_gate = str((node.get("evaluator_gate") or {}).get("kind") or "none")
                 if node_gate != stage_gate:
                     errors.append(f"WORKFLOW_CONTRACT_STRUCTURE_MISMATCH:{node_id}:evaluator_gate.kind")
+                # on_human_review is contract-determined (instantiate copies it
+                # verbatim from the stage's evaluator_gate, never substituted);
+                # a tamper flips readiness/skip semantics for dependents with no
+                # downstream re-check (round-4 G4). Raw compare — instantiate
+                # always copies a shipped policy, so absence on a policy-shipping
+                # contract is itself an edit.
+                stage_review = str((stage.get("evaluator_gate") or {}).get("on_human_review") or "")
+                node_review = str(node.get("on_human_review") or "")
+                if node_review != stage_review:
+                    errors.append(f"WORKFLOW_CONTRACT_STRUCTURE_MISMATCH:{node_id}:on_human_review")
     if not errors:
         return None
     return {

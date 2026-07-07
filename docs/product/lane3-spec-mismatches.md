@@ -61,13 +61,24 @@ Two code facts make a literal runtime hash check impossible:
 
 Resolution: `_workflow_contract_guard` fail-closes on (a) unregistered `workflow_contract_id`,
 (b) version mismatch, (c) structural mismatch of the contract-determined node projection
-(node-id set, `depends_on`, `task_type`, capsule ∈ `allowed_capsules`, `evaluator_gate.kind`)
 against the registered contract's stages. Planner-generated contracts (`stages_mode:
 planner_generated`, e.g. `pm.generic.v1`) are checked for registration+version only — their
 stages are `plan_validator`'s jurisdiction per design §0. Stored-hash integrity at instantiation
-time remains proven by Lane 1's golden tests. Known bound: substituted path fields
-(`write_scope`/`outputs`) are not compared (they embed unrecoverable inputs); a tamper limited
-to output paths passes the guard but is caught downstream by the manifest root checks (R6).
+time remains proven by Lane 1's golden tests.
+
+**Compared fields (exhaustive, round-4 G4 disclosure).** Per stage/node: node-id set equality,
+`depends_on` (ordered), `task_type`, `capability_capsule_id ∈ allowed_capsules` (when both
+sides are non-empty), `evaluator_gate.kind`, `on_human_review` (raw compare vs the stage's
+`evaluator_gate.on_human_review`; added by the round-4 fix — a tamper to `warn_and_continue`
+previously passed the guard and let dependents dispatch on un-human-reviewed work).
+
+**NOT compared (known bounds).** Substituted path fields (`write_scope`/`outputs` — they embed
+unrecoverable instantiation inputs), `proof_obligations`, `acceptance`, `allowed_operators`,
+`timeouts`, `dashboard_label`, `node_kind`/`logical_operator`, and the graph-level substituted
+fields (`artifact_roots`, `validator_command`). A tamper limited to output paths passes the
+guard; the manifest root-violation catch claimed here in earlier revisions is NOT live (see
+D5a/round-4 G5) — until an observed-writes source exists, path tampers on the contracted path
+are bounded only by the declared-output presence rows in the manifest, not by root blocking.
 
 ## D4 — `on_human_review` needed a second half in `ready_nodes`
 
