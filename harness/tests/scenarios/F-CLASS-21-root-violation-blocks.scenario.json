@@ -1,0 +1,34 @@
+{
+  "id": "F-CLASS-21",
+  "class": 21,
+  "title": "An observed write outside the declared artifact roots blocks the proof gate",
+  "retires": "F-CLASS-21 artifact half (installed-fallback / repo-root contamination); R6/AC-R6.3",
+  "release_proof_level": "P1.5",
+  "mode": "gate_replay",
+  "driver": "drivers/f_class_21_root_violation_blocks.py",
+  "daemon_cap_sec": 60,
+  "env": {
+    "SOLAR_GATE_LEDGER": "1"
+  },
+  "expect": [
+    {
+      "fact": "driver_rc",
+      "op": "eq",
+      "value": 0
+    },
+    {
+      "fact": "violation_blocked",
+      "op": "truthy"
+    },
+    {
+      "fact": "gate_ok",
+      "op": "falsy"
+    }
+  ],
+  "fault": {
+    "env": {
+      "SOLAR_GATE_LEDGER": "0"
+    }
+  },
+  "notes": "GREEN: the manifest records ARTIFACT_ROOT_VIOLATION and _evaluate_proof_obligations blocks even though the declared obligation is satisfied. RED: contamination is invisible and the gate passes. (The path-selection half of class 21 is Lane 0.5's preflight, already verified.) gate_replay mode: the driver exercises the REAL scheduler/dispatcher/ledger seams inside the sandbox HARNESS_DIR. GREEN env sets SOLAR_GATE_LEDGER=1 (the Lane 3 fix); RED injects SOLAR_GATE_LEDGER=0 (the pre-contract world) and the same expect must fail — proving the scenario discriminates the class, not the plumbing."
+}

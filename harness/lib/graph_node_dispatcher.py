@@ -8352,12 +8352,22 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
             "status": "passed",
             "verdict_kind": effective_verdict_kind,
         }
+    # A self-graded PASS (executor-authored eval.json, no independent report) must
+    # not leave a gate-consumable verdict record — the guard below blocks it, and
+    # its ledger trace is explicitly non-consumable (R4 provenance, F-CLASS-30).
+    _entry_self_graded = bool(
+        status == "passed"
+        and _existing_node_handoff(sid, node, graph)
+        and _node_eval_self_graded(sid, node_id)
+    )
     _ledger_record(sid, node_id=node_id, kind="eval_verdict",
                    author={"type": "evaluator"},
                    verdict="PASS" if status == "passed" else "FAIL",
                    verdict_kind=effective_verdict_kind,
                    eval_generation=_eval_generation, repair_attempt=_eval_generation,
-                   pm_task_id=_assignment_pm_task_id, note=reason or None)
+                   pm_task_id=_assignment_pm_task_id, note=reason or None,
+                   self_graded=True if _entry_self_graded else None,
+                   gate_consumable=False if _entry_self_graded else None)
 
     proof_gate: dict[str, Any] = {"required": False}
     if status == "passed":

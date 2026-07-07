@@ -59,6 +59,7 @@ FAKE_OPERATOR = TOOLS_DIR / "fake_operator.py"
 OPERATOR_RUNTIME = LIB_DIR / "operator_runtime.py"
 OPERATORD = TOOLS_DIR / "operatord.py"
 REAL_PERSONAS_DIR = REPO_HARNESS / "personas"
+SCENARIOS_DIR = Path(__file__).resolve().parent / "scenarios"
 
 DEFAULT_OPERATOR_ID = "fake-builder"
 
@@ -396,6 +397,57 @@ def run_scenario(scenario: Dict[str, Any], *, red: bool = False, workdir: Option
                     daemon.kill()
             daemon_rc = daemon.returncode
             envelope = dict(envelope, _saw_running=saw_running)
+
+        elif mode == "gate_replay":
+            # Lane 3 gate/ledger-level classes: the scenario names a driver script
+            # that exercises the real scheduler/dispatcher/ledger seams inside the
+            # sandbox HARNESS_DIR and prints one JSON facts line on stdout. The
+            # canonical fault is env SOLAR_GATE_LEDGER=0 — the pre-contract world —
+            # so red proves the scenario discriminates the class, not the plumbing.
+            driver = str(scen.get("driver") or "")
+            driver_path = Path(driver)
+            if not driver_path.is_absolute():
+                driver_path = SCENARIOS_DIR / driver
+            try:
+                proc = subprocess.run(
+                    [sys.executable, str(driver_path)],
+                    env=env, capture_output=True, text=True, timeout=cap_sec,
+                )
+                driver_rc: Optional[int] = proc.returncode
+                driver_stdout = proc.stdout or ""
+                driver_stderr = proc.stderr or ""
+            except subprocess.TimeoutExpired as exc:
+                driver_rc = None
+                driver_stdout = str(exc.stdout or "")
+                driver_stderr = str(exc.stderr or "")
+            driver_facts: Dict[str, Any] = {}
+            for line in reversed(driver_stdout.strip().splitlines()):
+                line = line.strip()
+                if line.startswith("{"):
+                    try:
+                        parsed = json.loads(line)
+                        if isinstance(parsed, dict):
+                            driver_facts = parsed
+                    except Exception:
+                        pass
+                    break
+            facts = {
+                "driver_rc": driver_rc,
+                "driver_stderr_tail": driver_stderr[-800:],
+                **driver_facts,
+            }
+            checks = _evaluate(scen.get("expect") or [], facts)
+            passed = all(c["ok"] for c in checks) and bool(checks)
+            return {
+                "id": scen.get("id"),
+                "class": scen.get("class"),
+                "mode": mode,
+                "red": red,
+                "passed": passed,
+                "facts": facts,
+                "checks": checks,
+                "harness_dir": str(harness_dir),
+            }
 
         else:  # submit_once
             envelope_path = harness_dir / "envelope.json"

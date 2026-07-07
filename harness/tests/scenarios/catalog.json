@@ -1,5 +1,5 @@
 {
-  "_comment": "Lane 2 fault-catalog ledger — every taxonomy class vs its verification status. Refreshed for the INTEGRATED tree (contract/lane0-spine + contract/lane05-supervision + contract/lane1-compiler + contract/lane2-harness) per spec-review round 2 F5. See docs/product/lane2-spec-mismatches.md for why the plan's '30 always-green JSON files' is replaced by 'runnable scenario for classes whose retiring mechanism exists here + honest pending/cross-lane rows for the rest'. status: verified_here (red-green proven by a scenario in THIS branch's engine) | partial (a scenario proves one half; the rest is pending — see pending_remainder) | verified_lane_1 / verified_lane_0_5 (proven by another lane's committed suite — see verified_by for cited test paths; runnable on the integrated tree — cites updated to the integration merge) | pending_lane_N (retiring seam unbuilt on any branch; a scenario would be red-only) | delegated_lane_6. The verified_by citations name real committed tests on the cited lane branch@commit; run them there to reproduce. Integration flip 2026-07-07: cross-lane cites re-pointed at the integration merge where the cited suites were re-executed green (evidence: ~/opensolar-state/run-archive/lane3-integration/).",
+  "_comment": "Lane 2 fault-catalog ledger — every taxonomy class vs its verification status. Refreshed for the INTEGRATED tree (contract/lane0-spine + contract/lane05-supervision + contract/lane1-compiler + contract/lane2-harness) per spec-review round 2 F5. See docs/product/lane2-spec-mismatches.md for why the plan's '30 always-green JSON files' is replaced by 'runnable scenario for classes whose retiring mechanism exists here + honest pending/cross-lane rows for the rest'. status: verified_here (red-green proven by a scenario in THIS branch's engine) | partial (a scenario proves one half; the rest is pending — see pending_remainder) | verified_lane_1 / verified_lane_0_5 (proven by another lane's committed suite — see verified_by for cited test paths; runnable on the integrated tree — cites updated to the integration merge) | pending_lane_N (retiring seam unbuilt on any branch; a scenario would be red-only) | delegated_lane_6. The verified_by citations name real committed tests on the cited lane branch@commit; run them there to reproduce. Integration flip 2026-07-07: cross-lane cites re-pointed at the integration merge where the cited suites were re-executed green (evidence: ~/opensolar-state/run-archive/lane3-integration/). Lane 3 flip 2026-07-07: classes 6/9/10/13/16/18/21/23/29/30 verified_here via the new gate_replay scenario mode (driver scripts under scenarios/drivers/, fault = SOLAR_GATE_LEDGER=0).",
   "generated_for_branch": "contract/integration",
   "integrated_tree": [
     "contract/lane0-spine",
@@ -65,10 +65,10 @@
     {
       "class": 6,
       "name": "Missing/undiscoverable patch proof",
-      "status": "pending_lane_3",
-      "scenario": null,
+      "status": "verified_here",
+      "scenario": "F-CLASS-06-patch-proof-via-manifest.scenario.json",
       "required_seam": "harness/lib/artifact_manifest.py per-node manifest",
-      "note": "R6/AC-R6.2; manifest absent."
+      "note": "R6/AC-R6.2. Retired by Lane 3's artifact manifest (kind-keyed sidecar map replaces filename-shape scans). Red-green proven by the gate_replay engine mode: fault = SOLAR_GATE_LEDGER=0 (the pre-contract world)."
     },
     {
       "class": 7,
@@ -94,18 +94,18 @@
     {
       "class": 9,
       "name": "Sticky auto-resolution clobbered",
-      "status": "pending_lane_3",
-      "scenario": null,
+      "status": "verified_here",
+      "scenario": "F-CLASS-09-auto-resolution-sticky.scenario.json",
       "required_seam": "harness/lib/gate_ledger.py append-only decisions / projection",
-      "note": "R4/AC-R4.1 v5 replay; ledger absent."
+      "note": "R4. Retired by Lane 3's append-only decision records + doctor neutralization on the contracted path. Red-green proven by the gate_replay engine mode: fault = SOLAR_GATE_LEDGER=0 (the pre-contract world)."
     },
     {
       "class": 10,
       "name": "Mechanical vs content eval FAIL",
-      "status": "pending_lane_3",
-      "scenario": null,
+      "status": "verified_here",
+      "scenario": "F-CLASS-10-mechanical-fail-held.scenario.json",
       "required_seam": "gate_ledger verdict_kind set by gate runner",
-      "note": "R4/AC-R4.1."
+      "note": "R4/AC-R4.1 v5 replay. Retired by node_verdict's runner-owned verdict_kind + the mechanical-FAIL hold. Red-green proven by the gate_replay engine mode: fault = SOLAR_GATE_LEDGER=0 (the pre-contract world)."
     },
     {
       "class": 11,
@@ -126,10 +126,10 @@
     {
       "class": 13,
       "name": "Stale eval generation / doctor backfill",
-      "status": "pending_lane_3",
-      "scenario": null,
+      "status": "verified_here",
+      "scenario": "F-CLASS-13-stale-generation-recorded.scenario.json",
       "required_seam": "gate_ledger eval_generation required field + stale-archive",
-      "note": "R4/AC-R4.4."
+      "note": "R4/AC-R4.4. The archive machinery predates Lane 3 (714eb781); Lane 3 adds the durable non-consumable evidence record the class lacked. Red-green proven by the gate_replay engine mode: fault = SOLAR_GATE_LEDGER=0 (the pre-contract world)."
     },
     {
       "class": 14,
@@ -150,10 +150,10 @@
     {
       "class": 16,
       "name": "Artifact-root divergence",
-      "status": "pending_lane_3",
-      "scenario": null,
+      "status": "verified_here",
+      "scenario": "F-CLASS-16-workdir-root-resolution.scenario.json",
       "required_seam": "artifact_manifest root resolution/normalization",
-      "note": "R6/AC-R6.1 v9 replay."
+      "note": "R6/AC-R6.1 v9 shape. Retired by manifest alias-root resolution + presence consult + publish_canonical. Red-green proven by the gate_replay engine mode: fault = SOLAR_GATE_LEDGER=0 (the pre-contract world)."
     },
     {
       "class": 17,
@@ -166,10 +166,10 @@
     {
       "class": 18,
       "name": "Route violations / route-truth lies",
-      "status": "pending_lane_3",
-      "scenario": null,
+      "status": "verified_here",
+      "scenario": "F-CLASS-18-route-record-truth.scenario.json",
       "required_seam": "gate_ledger kind:route_record; Lane 5 host_type relabel",
-      "note": "R5/AC-R5.3. Fail-closed preflight already exists; result.json carries model_route (partial). The append-only route ledger does not exist yet."
+      "note": "R5/AC-R5.1. Retired by route records at the operatord seam (submit + write_result). The Lane 5 host_type relabel remains a Lane 5 item; AC-R5.2 zero-cross-provider is a P2 assertion. Red-green proven by the gate_replay engine mode: fault = SOLAR_GATE_LEDGER=0 (the pre-contract world)."
     },
     {
       "class": 19,
@@ -190,10 +190,10 @@
     {
       "class": 21,
       "name": "Installed-harness contamination",
-      "status": "pending_lane_3",
-      "scenario": null,
+      "status": "verified_here",
+      "scenario": "F-CLASS-21-root-violation-blocks.scenario.json",
       "required_seam": "artifact_manifest root containment (ARTIFACT_ROOT_VIOLATION) + Lane 0.5 preflight path self-consistency",
-      "note": "R6/AC-R6.3."
+      "note": "R6/AC-R6.3 artifact half. Retired by manifest ARTIFACT_ROOT_VIOLATION blocking the proof gate; the path-selection half is Lane 0.5's preflight (verified). Red-green proven by the gate_replay engine mode: fault = SOLAR_GATE_LEDGER=0 (the pre-contract world)."
     },
     {
       "class": 22,
@@ -212,10 +212,10 @@
     {
       "class": 23,
       "name": "Dashboard/projection untruth",
-      "status": "pending_lane_3",
-      "scenario": null,
+      "status": "verified_here",
+      "scenario": "F-CLASS-23-projection-truth.scenario.json",
       "required_seam": "gate_ledger projection + Lane 5 contract endpoint (parent-status truth)",
-      "note": "R- truth half; usage=0 deferred (own track)."
+      "note": "R4 projection truth. Retired for the contracted path's truth source; the dashboard endpoint that consumes it is Lane 5. Red-green proven by the gate_replay engine mode: fault = SOLAR_GATE_LEDGER=0 (the pre-contract world)."
     },
     {
       "class": 24,
@@ -260,28 +260,38 @@
     {
       "class": 29,
       "name": "Gates consume status, not verdict content",
-      "status": "pending_lane_3",
-      "scenario": null,
+      "status": "verified_here",
+      "scenario": "F-CLASS-29-gate-consumes-verdict-content.scenario.json",
       "required_seam": "gate_ledger verdict-content consult, fail-closed on missing verdict",
-      "note": "R4/AC-R4.2 LDES shape."
+      "note": "R4/AC-R4.2 LDES shape. Retired by the ledger verdict-content consult in _gate_verdicts_ok. Red-green proven by the gate_replay engine mode: fault = SOLAR_GATE_LEDGER=0 (the pre-contract world)."
     },
     {
       "class": 30,
       "name": "Verdict provenance (self-graded/backfilled)",
-      "status": "pending_lane_3",
-      "scenario": null,
+      "status": "verified_here",
+      "scenario": "F-CLASS-30-verdict-provenance.scenario.json",
       "required_seam": "gate_ledger author+generation, backfill non-consumable",
-      "note": "R4/AC-R4.3 thin-eval.json."
+      "note": "R4/AC-R4.3 provenance. Retired by author/generation/self-graded provenance records + fail-closed consumability. Red-green proven by the gate_replay engine mode: fault = SOLAR_GATE_LEDGER=0 (the pre-contract world)."
     }
   ],
   "summary": {
     "verified_here": [
+      6,
+      9,
+      10,
       12,
+      13,
+      16,
       17,
+      18,
       19,
       20,
+      21,
+      23,
       27,
-      28
+      28,
+      29,
+      30
     ],
     "partial": [
       8
@@ -304,18 +314,6 @@
       11,
       25,
       26
-    ],
-    "pending_lane_3": [
-      6,
-      9,
-      10,
-      13,
-      16,
-      18,
-      21,
-      23,
-      29,
-      30
     ],
     "pending_lane_5": [
       14,
