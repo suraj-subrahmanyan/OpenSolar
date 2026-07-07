@@ -1,0 +1,288 @@
+{
+  "_comment": "Lane 2 fault-catalog ledger — every taxonomy class vs its verification status. Refreshed for the INTEGRATED tree (contract/lane0-spine + contract/lane05-supervision + contract/lane1-compiler + contract/lane2-harness) per spec-review round 2 F5. See docs/product/lane2-spec-mismatches.md for why the plan's '30 always-green JSON files' is replaced by 'runnable scenario for classes whose retiring mechanism exists here + honest pending/cross-lane rows for the rest'. status: verified_here (red-green proven by a scenario in THIS branch's engine) | partial (a scenario proves one half; the rest is pending — see pending_remainder) | verified_lane_1 / verified_lane_0_5 (proven by another lane's committed suite — see verified_by for cited test paths; NOT runnable from this worktree until integration) | pending_lane_N (retiring seam unbuilt on any branch; a scenario would be red-only) | delegated_lane_6. The verified_by citations name real committed tests on the cited lane branch@commit; run them there to reproduce.",
+  "generated_for_branch": "contract/lane2-harness",
+  "integrated_tree": [
+    "contract/lane0-spine",
+    "contract/lane05-supervision",
+    "contract/lane1-compiler",
+    "contract/lane2-harness"
+  ],
+  "engine": "harness/tests/run_scenario.py",
+  "operator_seam": "operator-pool command backend (operator_runtime.submit -> operatord daemon --once -> result.json)",
+  "classes": [
+    {
+      "class": 1,
+      "name": "Planner DAG nondeterminism",
+      "status": "verified_lane_1",
+      "scenario": null,
+      "required_seam": "harness/lib/workflow_contract.py byte-identical instantiation + golden diff",
+      "verified_by": [
+        "contract/lane1-compiler@0a204749 harness/tests/workflow_contract/test_instantiate.py::test_instantiation_byte_identical_twice",
+        "contract/lane1-compiler@0a204749 harness/tests/workflow_contract/test_instantiate.py::test_instantiation_matches_committed_golden (goldens: harness/tests/workflow_contract/goldens/code.cli_smoke.instantiated.golden.json, harness/tests/workflow_contract/goldens/research.deepdive.rsi_demo.instantiated.golden.json)"
+      ],
+      "note": "R3/AC-R3.1 golden-file determinism. Proven by Lane 1's committed suite (compiler lives on contract/lane1-compiler, not runnable from this worktree); flips from pending_lane_1 on the integrated tree."
+    },
+    {
+      "class": 2,
+      "name": "Generic PM for research",
+      "status": "pending_lane_1",
+      "scenario": null,
+      "required_seam": "harness/lib/workflow_router.py trigger match",
+      "note": "R1/AC-R1.1 routing; router absent."
+    },
+    {
+      "class": 3,
+      "name": "Epic over-decomposition",
+      "status": "pending_lane_1",
+      "scenario": null,
+      "required_seam": "workflow_router epic admission rule",
+      "note": "R1/AC-R1.4."
+    },
+    {
+      "class": 4,
+      "name": "task_type admission (fixed 4x)",
+      "status": "verified_lane_1",
+      "scenario": null,
+      "required_seam": "harness/lib/plan_validator.py task_type_in check",
+      "verified_by": [
+        "contract/lane1-compiler@0a204749 harness/tests/workflow_contract/test_plan_validator.py::test_four_historical_admission_shapes_all_rejected"
+      ],
+      "note": "R2/AC-R2.3; the four historical admission shapes (F-019/F-030/...) all reject. Proven by Lane 1's committed suite (contract/lane1-compiler); flips from pending_lane_1 on the integrated tree."
+    },
+    {
+      "class": 5,
+      "name": "Artifact node x patch-diff proof",
+      "status": "verified_lane_1",
+      "scenario": null,
+      "required_seam": "plan_validator obligation-satisfiability (patch_diff => code only)",
+      "verified_by": [
+        "contract/lane1-compiler@0a204749 harness/tests/workflow_contract/test_plan_validator.py::test_v7_graph_rejected_with_obligation_unsatisfiable",
+        "contract/lane1-compiler@0a204749 harness/tests/workflow_contract/test_plan_validator.py::test_v7_s1_derives_artifact_node_kind",
+        "contract/lane1-compiler@0a204749 harness/tests/workflow_contract/test_plan_validator.py::test_cli_rejects_v7_fixture_exit_3 (fixture: harness/tests/workflow_contract/fixtures/v7-rsi-demo-bf66d46b.task_graph.json)"
+      ],
+      "note": "R2/AC-R2.1 v7 replay rejection (OBLIGATION_UNSATISFIABLE_FOR_NODE_KIND). Proven by Lane 1's committed suite (contract/lane1-compiler); flips from pending_lane_1 on the integrated tree."
+    },
+    {
+      "class": 6,
+      "name": "Missing/undiscoverable patch proof",
+      "status": "pending_lane_3",
+      "scenario": null,
+      "required_seam": "harness/lib/artifact_manifest.py per-node manifest",
+      "note": "R6/AC-R6.2; manifest absent."
+    },
+    {
+      "class": 7,
+      "name": "Obligation mismatch by artifact type",
+      "status": "verified_lane_1",
+      "scenario": null,
+      "required_seam": "plan_validator obligation<->declared-output check",
+      "verified_by": [
+        "contract/lane1-compiler@0a204749 harness/tests/workflow_contract/test_plan_validator.py::test_real_code_node_keeps_patch_obligations",
+        "contract/lane1-compiler@0a204749 harness/tests/workflow_contract/test_plan_validator.py::test_v8_shaped_artifact_plan_compiles"
+      ],
+      "note": "R2 obligation<->declared-output (code node keeps patch obligations; artifact plan compiles with presence obligations). Proven by Lane 1's committed suite (contract/lane1-compiler); flips from pending_lane_1 on the integrated tree."
+    },
+    {
+      "class": 8,
+      "name": "Evaluator capacity / human-review cascade",
+      "status": "partial",
+      "scenario": "F-CLASS-08-busy-singleton-classified-busy-not-absent.scenario.json",
+      "required_seam": "harness/lib/plan_validator.py evaluator_gate.on_capacity_unavailable=wait bounded-wait policy (Lane 1)",
+      "pending_remainder": "The human-review cascade / bounded-wait half is not exercisable here: only the classification half (busy!=absent) is red-green proven by the scenario via lease state. The evaluator_gate.on_capacity_unavailable=wait policy that drives the cascade is pending_lane_1, and bounded-wait timing is separately covered by F-CLASS-28.",
+      "note": "Classification half (busy!=absent) verified_here via lease state; recatalogued partial per spec-review round 2 F5 because the human-review cascade is not exercisable until Lane 1's evaluator_gate lands."
+    },
+    {
+      "class": 9,
+      "name": "Sticky auto-resolution clobbered",
+      "status": "pending_lane_3",
+      "scenario": null,
+      "required_seam": "harness/lib/gate_ledger.py append-only decisions / projection",
+      "note": "R4/AC-R4.1 v5 replay; ledger absent."
+    },
+    {
+      "class": 10,
+      "name": "Mechanical vs content eval FAIL",
+      "status": "pending_lane_3",
+      "scenario": null,
+      "required_seam": "gate_ledger verdict_kind set by gate runner",
+      "note": "R4/AC-R4.1."
+    },
+    {
+      "class": 11,
+      "name": "Closeout builder quality (true-positive FAILs)",
+      "status": "pending_lane_1",
+      "scenario": null,
+      "required_seam": "plan_validator deterministic validator commands per stage",
+      "note": "R2 content gate; PARTIAL-BY-DESIGN (quality track). Scenario 11 would assert the content gate FAILs a parseable-but-stale closeout."
+    },
+    {
+      "class": 12,
+      "name": "Repair lifecycle races",
+      "status": "verified_here",
+      "scenario": "F-CLASS-12-duplicate-lease-single-flight.scenario.json",
+      "required_seam": null,
+      "note": "Single-flight via lease duplicate rejection (operator_runtime.py:215,474). Generation/repair-window property suite is Lane 3."
+    },
+    {
+      "class": 13,
+      "name": "Stale eval generation / doctor backfill",
+      "status": "pending_lane_3",
+      "scenario": null,
+      "required_seam": "gate_ledger eval_generation required field + stale-archive",
+      "note": "R4/AC-R4.4."
+    },
+    {
+      "class": 14,
+      "name": "Wrapper epic observation",
+      "status": "pending_lane_5",
+      "scenario": null,
+      "required_seam": "scripts/live_codex_epic_status.py --contract (reads contract terminal states)",
+      "note": "R- wrapper contract consumption; depends on Lane 1 contract + Lane 5 wrapper."
+    },
+    {
+      "class": 15,
+      "name": "Wrapper timing race",
+      "status": "pending_lane_5",
+      "scenario": null,
+      "required_seam": "wrapper contract terminal-state signal",
+      "note": "producer-completion mechanism at Lane 5; historical 18ms race = preserved v8 replay at P1."
+    },
+    {
+      "class": 16,
+      "name": "Artifact-root divergence",
+      "status": "pending_lane_3",
+      "scenario": null,
+      "required_seam": "artifact_manifest root resolution/normalization",
+      "note": "R6/AC-R6.1 v9 replay."
+    },
+    {
+      "class": 17,
+      "name": "Route proof missing on dead runs",
+      "status": "verified_here",
+      "scenario": "F-CLASS-17-kill-mid-run-truthful-terminal.scenario.json",
+      "required_seam": null,
+      "note": "Terminal-truth + durable stage evidence on a killed run verified. The append-only kind:route_record ledger (AC-R5.1) is pending_lane_3."
+    },
+    {
+      "class": 18,
+      "name": "Route violations / route-truth lies",
+      "status": "pending_lane_3",
+      "scenario": null,
+      "required_seam": "gate_ledger kind:route_record; Lane 5 host_type relabel",
+      "note": "R5/AC-R5.3. Fail-closed preflight already exists; result.json carries model_route (partial). The append-only route ledger does not exist yet."
+    },
+    {
+      "class": 19,
+      "name": "Alias/registry data quality",
+      "status": "verified_here",
+      "scenario": "F-CLASS-19-disabled-operator-unselectable.scenario.json",
+      "required_seam": null,
+      "note": "Hazard half (disabled-op unselectable) verified. The sonnet->GLM allowlist + registry hygiene half is pending_lane_0 (spine allowlist)."
+    },
+    {
+      "class": 20,
+      "name": "Auth preservation/validity",
+      "status": "verified_here",
+      "scenario": "F-CLASS-20-auth-absent-flow-control.scenario.json",
+      "required_seam": null,
+      "note": "auth_expired flow-control verified. Per-provider preflight auth check is Lane 0.5."
+    },
+    {
+      "class": 21,
+      "name": "Installed-harness contamination",
+      "status": "pending_lane_3",
+      "scenario": null,
+      "required_seam": "artifact_manifest root containment (ARTIFACT_ROOT_VIOLATION) + Lane 0.5 preflight path self-consistency",
+      "note": "R6/AC-R6.3."
+    },
+    {
+      "class": 22,
+      "name": "Orphan coordinator/watchdog/process residue",
+      "status": "verified_lane_0_5",
+      "scenario": null,
+      "required_seam": "harness/lib/run_process_registry.py + real-daemon teardown (Lane 0.5)",
+      "tier": "non_hermetic_p1_6",
+      "verified_by": [
+        "contract/lane05-supervision@95aaa0f0 harness/tests/supervision/test_run_teardown_real_processes.py::test_real_teardown_kills_all_and_suppresses_respawn (opt-in: SOLAR_P16_REAL_PROCESS=1)",
+        "contract/lane05-supervision@95aaa0f0 harness/tests/supervision/test_run_teardown_real_processes.py::test_real_teardown_idempotent",
+        "contract/lane05-supervision@95aaa0f0 harness/tests/supervision/test_run_teardown_real_processes.py::test_real_registry_status_reports_live_then_dead"
+      ],
+      "note": "R7/AC-R7.4. Runs at the non-hermetic real-process (P1.6) tier — real sleep/watchdog processes, still no models/network — so it is opt-in (SOLAR_P16_REAL_PROCESS=1), not default-CI. Proven by Lane 0.5's committed suite (contract/lane05-supervision); flips from non_hermetic_p1_6 pending on the integrated tree."
+    },
+    {
+      "class": 23,
+      "name": "Dashboard/projection untruth",
+      "status": "pending_lane_3",
+      "scenario": null,
+      "required_seam": "gate_ledger projection + Lane 5 contract endpoint (parent-status truth)",
+      "note": "R- truth half; usage=0 deferred (own track)."
+    },
+    {
+      "class": 24,
+      "name": "Installer/wizard gaps",
+      "status": "delegated_lane_6",
+      "scenario": null,
+      "required_seam": "per-OS clean-machine artifact acid tests (Lane 6)",
+      "note": "R10; owned by the installability track, not the hermetic harness."
+    },
+    {
+      "class": 25,
+      "name": "Report quality / synthesizer boilerplate",
+      "status": "pending_lane_1",
+      "scenario": null,
+      "required_seam": "plan_validator research quality gates / builder-authored synthesizer path",
+      "note": "R- content; PARTIAL-BY-DESIGN demo blocker."
+    },
+    {
+      "class": 26,
+      "name": "Self-incriminating wording",
+      "status": "pending_lane_1",
+      "scenario": null,
+      "required_seam": "contract validator token list + wording lint",
+      "note": "R- SOLVED-LITE; validator token list is a contract field (Lane 1)."
+    },
+    {
+      "class": 27,
+      "name": "No live workers",
+      "status": "verified_here",
+      "scenario": "F-CLASS-27-no-capacity-quota-cooldown.scenario.json",
+      "required_seam": null,
+      "note": "Quota/rate-limit -> cooldown flow-control verified. Preflight live-capacity per role + auto-start is Lane 0.5."
+    },
+    {
+      "class": 28,
+      "name": "Supervision faults (wedge/timeout)",
+      "status": "verified_here",
+      "scenario": "F-CLASS-28-wedge-timeout-classification.scenario.json",
+      "required_seam": null,
+      "note": "Bounded operator task timeout -> failed_timeout/exit124 verified via SOLAR_OPERATORD_TASK_TIMEOUT_SECONDS. Role-pool inflight-suppression timeout (AC-R7.1 S01 wedge) is a scheduler concern pending_lane_1/3."
+    },
+    {
+      "class": 29,
+      "name": "Gates consume status, not verdict content",
+      "status": "pending_lane_3",
+      "scenario": null,
+      "required_seam": "gate_ledger verdict-content consult, fail-closed on missing verdict",
+      "note": "R4/AC-R4.2 LDES shape."
+    },
+    {
+      "class": 30,
+      "name": "Verdict provenance (self-graded/backfilled)",
+      "status": "pending_lane_3",
+      "scenario": null,
+      "required_seam": "gate_ledger author+generation, backfill non-consumable",
+      "note": "R4/AC-R4.3 thin-eval.json."
+    }
+  ],
+  "summary": {
+    "verified_here": [12, 17, 19, 20, 27, 28],
+    "partial": [8],
+    "verified_lane_1": [1, 4, 5, 7],
+    "verified_lane_0_5": [22],
+    "pending_lane_0": ["19-allowlist-half"],
+    "pending_lane_1": [2, 3, 11, 25, 26],
+    "pending_lane_3": [6, 9, 10, 13, 16, 18, 21, 23, 29, 30],
+    "pending_lane_5": [14, 15],
+    "delegated_lane_6": [24]
+  }
+}
