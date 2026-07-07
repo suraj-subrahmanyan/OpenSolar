@@ -207,6 +207,53 @@ class TestCriticBlockBlocksGate:
         assert gate["status"] == "blocked"
         assert "ledger_verdict_block" in str(gate.get("reason") or "")
 
+    def test_mechanical_fail_record_does_not_block_gate(self, sandbox):
+        """Round-4 G2: gates consume verdict CONTENT (R4). A consumable
+        mechanical FAIL — evidence machinery broke, not a content judgment —
+        must not block the gate."""
+        graph = _contracted_graph([
+            {"id": "C1", "status": "passed", "depends_on": [], "gate": "G1"},
+        ])
+        gl.append_record(sandbox, SID, node_id="C1", kind="eval_verdict",
+                         author={"type": "evaluator", "operator_id": "critic-1"},
+                         verdict="FAIL", verdict_kind="mechanical")
+        ok, _, detail = gs._gate_verdicts_ok(graph, ["C1"])
+        assert ok is True, f"mechanical FAIL blocked the gate: {detail}"
+
+    def test_infrastructure_fail_record_does_not_block_gate(self, sandbox):
+        graph = _contracted_graph([
+            {"id": "C1", "status": "passed", "depends_on": [], "gate": "G1"},
+        ])
+        gl.append_record(sandbox, SID, node_id="C1", kind="eval_verdict",
+                         author={"type": "evaluator", "operator_id": "critic-1"},
+                         verdict="FAIL", verdict_kind="infrastructure")
+        ok, _, _ = gs._gate_verdicts_ok(graph, ["C1"])
+        assert ok is True
+
+    def test_human_verdict_fail_blocks_gate_regardless_of_kind(self, sandbox):
+        # A human FAIL is always an authored content judgment for gate purposes.
+        graph = _contracted_graph([
+            {"id": "C1", "status": "passed", "depends_on": [], "gate": "G1"},
+        ])
+        gl.append_record(sandbox, SID, node_id="C1", kind="human_verdict",
+                         author={"type": "human"},
+                         verdict="FAIL", verdict_kind="mechanical")
+        ok, blocking_node, detail = gs._gate_verdicts_ok(graph, ["C1"])
+        assert ok is False
+        assert blocking_node == "C1"
+
+    def test_kindless_fail_record_blocks_gate_as_content(self, sandbox):
+        # D6's default: anything outside the runner's mechanical vocabulary is
+        # content — a kind-less FAIL keeps the stricter content effect.
+        graph = _contracted_graph([
+            {"id": "C1", "status": "passed", "depends_on": [], "gate": "G1"},
+        ])
+        gl.append_record(sandbox, SID, node_id="C1", kind="eval_verdict",
+                         author={"type": "evaluator", "operator_id": "critic-1"},
+                         verdict="FAIL")
+        ok, _, _ = gs._gate_verdicts_ok(graph, ["C1"])
+        assert ok is False
+
     def test_non_consumable_block_does_not_block(self, sandbox):
         graph = _contracted_graph([
             {"id": "C1", "status": "passed", "depends_on": [], "gate": "G1"},

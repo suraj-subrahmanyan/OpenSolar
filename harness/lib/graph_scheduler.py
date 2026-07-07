@@ -2383,8 +2383,17 @@ def _ledger_gate_verdict_block(graph: dict[str, Any], gate_node_ids: list[str]) 
             if latest is None:
                 continue
             verdict = str(latest.get("verdict") or "").strip().lower()
-            if verdict in {"fail", "failed", "block", "blocked"}:
-                return node_id, f"ledger_verdict_block:{verdict}"
+            if verdict not in {"fail", "failed", "block", "blocked"}:
+                continue
+            # Round-4 G2: gates consume verdict CONTENT (R4/AC-R4.1). A
+            # mechanical/infrastructure FAIL is evidence-machinery failure, not
+            # a content judgment, and never blocks; a human verdict always
+            # does; a kind-less record keeps the stricter content effect (D6).
+            verdict_kind = str(latest.get("verdict_kind") or "").strip().lower()
+            is_human = str(latest.get("kind") or "") == "human_verdict"
+            if not is_human and verdict_kind in {"mechanical", "infrastructure"}:
+                continue
+            return node_id, f"ledger_verdict_block:{verdict}"
     except Exception:
         return None
     return None
