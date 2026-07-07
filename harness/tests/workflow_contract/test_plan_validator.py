@@ -62,9 +62,12 @@ def test_v7_rejection_is_exactly_the_proof_contract_defect(
     capsule_registry, operator_registry, shipped_contracts
 ):
     """v7's S1 passed admission live (implementation IS admitted by the
-    implementation capsule) and wrote workspace-prefixed paths — the ONLY
-    compile defect is the unsatisfiable proof contract."""
-    errors = _validate(_load(V7_FIXTURE), capsule_registry, operator_registry, shipped_contracts)
+    implementation capsule) and wrote workspace-prefixed paths — S1's ONLY
+    compile defect is the unsatisfiable proof contract. Scoped to the S1-isolated
+    graph: the full v7 record's skeletal downstream nodes (S2/S3/S4) carry no
+    capsule binding and now (correctly) also trip CAPSULE_UNBOUND — see
+    test_v7_full_graph_flags_unbound_downstream_nodes (round-3 Finding A)."""
+    errors = _validate(_v7_s1_graph(), capsule_registry, operator_registry, shipped_contracts)
     codes = {e["code"] for e in errors}
     assert codes == {wc.ERROR_OBLIGATION_UNSATISFIABLE}, errors
 
@@ -163,6 +166,121 @@ def test_classify_node_kind_non_code_capsule_caps_at_artifact():
     node = {"write_scope": ["workspace/x/tool.py"], "node_kind": "code"}
     assert wc.classify_node_kind(node, capsule_is_code=True) == "code"
     assert wc.classify_node_kind(node, capsule_is_code=False) == "artifact"
+
+
+# ---------------------------------------------------------------------------
+# Round-3 Finding A: an empty/missing capability_capsule_id skipped capsule
+# admission AND left capsule_is_code=None, so the F2 ceiling never fired — a
+# node with node_kind:"code" + a lone workdir/tool.py write_scope re-legalized
+# the patch_diff obligations and the graph compiled clean (the last hole in the
+# node-kind-authority story above). When a capsule registry is provided, an
+# unbound node is now a compile error (CAPSULE_UNBOUND), emitted BEFORE node-kind
+# classification so it can never reach the capsule_is_code=None ceiling-skip.
+# ---------------------------------------------------------------------------
+
+def _unbound_code_relegalization_node() -> dict:
+    """The reviewer's fourth shape: no capsule binding, declared node_kind:"code",
+    a lone workdir/*.py write target, and patch_diff obligations."""
+    return {
+        "id": "U1",
+        "goal": "Implement the tool with a patch proof but no capsule binding.",
+        "capability_capsule_id": "",
+        "dispatch_task_type": "implementation",
+        "node_kind": "code",
+        "write_scope": ["workdir/tool.py"],
+        "proof_obligations": [
+            {"kind": "postcondition", "requirement": "output_present", "field": "patch_diff"},
+            {"kind": "self_check", "requirement": "check.patch_within_scope"},
+        ],
+        "depends_on": [],
+    }
+
+
+def test_unbound_capsule_id_rejected_with_capsule_unbound(
+    capsule_registry, operator_registry, shipped_contracts
+):
+    """Empty capability_capsule_id => CAPSULE_UNBOUND on the offending node."""
+    graph = _graph_with(_unbound_code_relegalization_node())
+    errors = _validate(graph, capsule_registry, operator_registry, shipped_contracts)
+    unbound = [e for e in errors if e["code"] == wc.ERROR_CAPSULE_UNBOUND]
+    assert unbound and unbound[0]["stage_id"] == "U1", errors
+
+
+def test_missing_capsule_id_key_rejected_with_capsule_unbound(
+    capsule_registry, operator_registry, shipped_contracts
+):
+    """Same shape, but the capability_capsule_id key is absent entirely."""
+    node = _unbound_code_relegalization_node()
+    del node["capability_capsule_id"]
+    errors = _validate(_graph_with(node), capsule_registry, operator_registry, shipped_contracts)
+    assert any(
+        e["code"] == wc.ERROR_CAPSULE_UNBOUND and e["stage_id"] == "U1" for e in errors
+    ), errors
+
+
+def test_unbound_code_node_does_not_relegalize_patch_diff(
+    capsule_registry, operator_registry, shipped_contracts
+):
+    """The security invariant: an unbound node can never compile clean, so
+    node_kind:"code" cannot re-legalize the patch_diff obligations. Before the
+    fix this graph produced [] (clean compile); it must now reject."""
+    graph = _graph_with(_unbound_code_relegalization_node())
+    errors = _validate(graph, capsule_registry, operator_registry, shipped_contracts)
+    assert errors, "an unbound node must never compile clean"
+    assert any(e["code"] == wc.ERROR_CAPSULE_UNBOUND for e in errors), errors
+
+
+def test_capsule_unbound_emitted_before_node_kind_classification(
+    capsule_registry, operator_registry, shipped_contracts
+):
+    """The unbound node short-circuits before node-kind classification: it never
+    reaches R2(b), so no OBLIGATION_UNSATISFIABLE is emitted for it — the single,
+    root-cause error is CAPSULE_UNBOUND, not a downstream symptom."""
+    graph = _graph_with(_unbound_code_relegalization_node())
+    codes = {e["code"] for e in _validate(graph, capsule_registry, operator_registry, shipped_contracts)}
+    assert codes == {wc.ERROR_CAPSULE_UNBOUND}, codes
+
+
+def test_capsule_unbound_not_raised_when_registry_is_none(operator_registry, shipped_contracts):
+    """Finding A is scoped to 'when a capsule registry is provided'. Incremental
+    validation (capsule_registry=None) skips the admission family, so an unbound
+    node must NOT trip CAPSULE_UNBOUND on that path."""
+    graph = _graph_with(_unbound_code_relegalization_node())
+    errors = pv.validate_plan(
+        graph, None, operator_registry, contract=shipped_contracts["pm.generic.v1"]
+    )
+    assert not any(e["code"] == wc.ERROR_CAPSULE_UNBOUND for e in errors), errors
+
+
+def test_bound_capsule_node_does_not_trip_capsule_unbound(
+    capsule_registry, operator_registry, shipped_contracts
+):
+    """True-negative: a node WITH a registered capsule binding never trips
+    CAPSULE_UNBOUND — a valid audit-capsule plan still compiles clean."""
+    graph = _graph_with({
+        "id": "S1",
+        "goal": "Transform the source pack into sources.json.",
+        "capability_capsule_id": "cap.requirement-compiler-audit",
+        "dispatch_task_type": "audit_inventory",
+        "write_scope": ["workspace/rsi-deep-research-report/sources.json"],
+        "proof_obligations": [
+            {"kind": "postcondition", "requirement": "output_present", "field": "sources.json"},
+        ],
+        "depends_on": [],
+    })
+    errors = _validate(graph, capsule_registry, operator_registry, shipped_contracts)
+    assert not any(e["code"] == wc.ERROR_CAPSULE_UNBOUND for e in errors), errors
+
+
+def test_v7_full_graph_flags_unbound_downstream_nodes(
+    capsule_registry, operator_registry, shipped_contracts
+):
+    """On the real v7 corpus record the skeletal downstream nodes S2/S3/S4 carry
+    no capsule binding; they are now (correctly) flagged CAPSULE_UNBOUND while
+    S1's proof-contract defect (OBLIGATION_UNSATISFIABLE) is unchanged."""
+    errors = _validate(_load(V7_FIXTURE), capsule_registry, operator_registry, shipped_contracts)
+    unbound = {e["stage_id"] for e in errors if e["code"] == wc.ERROR_CAPSULE_UNBOUND}
+    assert unbound == {"S2", "S3", "S4"}, errors
 
 
 # ---------------------------------------------------------------------------

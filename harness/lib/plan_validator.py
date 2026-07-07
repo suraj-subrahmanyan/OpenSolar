@@ -94,6 +94,25 @@ def validate_plan(
         # historical shapes (analysis / tests / implementationworker /
         # logical-op-map-vs-audit-capsule) all fail here (AC-R2.3).
         capsule_id = str(node.get("capability_capsule_id") or "").strip()
+
+        # R2(a) precondition (round-3 Finding A): when a capsule registry is
+        # provided, every planner-emitted node MUST bind a capsule. An empty/
+        # missing capability_capsule_id skips admission AND leaves capsule_is_code
+        # =None below, so the F2 node-kind ceiling never fires — a node declaring
+        # node_kind:"code" with a lone workdir/tool.py write_scope would re-legalize
+        # patch_diff obligations and compile clean. Reject the unbound node HERE,
+        # before classify_node_kind, so it can never reach that ceiling-skip.
+        if capsule_registry is not None and not capsule_id:
+            errors.append(wc.compile_error(
+                wc.ERROR_CAPSULE_UNBOUND, node_id,
+                f"node {node_id} has no capability_capsule_id; every planner-emitted "
+                f"node must bind a capsule in the registry (an unbound node has no "
+                f"task_type admission and no node-kind ceiling, so it cannot be "
+                f"compile-checked). Remediation: set capability_capsule_id to a "
+                f"registered capsule.",
+            ))
+            continue
+
         capsule = capsule_registry.get(capsule_id) if (capsule_registry and capsule_id) else None
         # F2: the bound capsule is the node-kind authority. produces_patch tells
         # classify_node_kind whether the node is even allowed to be code; None
