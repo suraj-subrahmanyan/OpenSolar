@@ -71,6 +71,28 @@ def _ledger_record(sid: str, **kwargs: Any) -> None:
         _gate_ledger.append_record(SPRINTS_DIR, sid, **kwargs)
     except Exception:
         pass
+
+
+try:  # Lane 3 artifact manifest (R6); optional like the ledger
+    import artifact_manifest as _artifact_manifest
+except Exception:  # pragma: no cover
+    _artifact_manifest = None
+
+
+def _manifest_presence(sid: str, node_id: str) -> dict[str, Any]:
+    """The node's manifest presence view (design §1.5), or {} off the contracted path.
+
+    Consulted only when SOLAR_GATE_LEDGER=1 AND a manifest exists — a manifest is
+    only ever written on the contracted path, so its existence is the signal."""
+    if _artifact_manifest is None or not _ledger_enabled():
+        return {}
+    try:
+        manifest = _artifact_manifest.read_manifest(SPRINTS_DIR, sid, node_id)
+        if not manifest:
+            return {}
+        return _artifact_manifest.presence_map(manifest)
+    except Exception:
+        return {}
 MULTI_TASK_RUN_DIR = HARNESS_DIR / "run" / "multi-task"
 SESSION = os.environ.get("SOLAR_HARNESS_SESSION", "solar-harness")
 NO_DISPATCH_FLAG = HARNESS_DIR / "run" / "no-dispatch.flag"
@@ -3662,6 +3684,16 @@ def _proof_artifact_presence(sid: str, node: dict[str, Any], eval_json: str | Pa
     presence["guard_decision"] = bool(guard_sidecar) and str(guard_payload.get("decision") or "").lower() == "allow"
     presence["resource_binding"] = _node_sidecar_file(sid, node_id, "resource_binding") is not None
     presence["bridged_artifact"] = _node_sidecar_file(sid, node_id, "bridged_artifact") is not None
+    # Lane 3 (R6/AC-R6.2): on the contracted path the manifest is the discovery
+    # authority — its kind-keyed view overrides the filename-shape scan above.
+    # guard_decision keeps the scan's allow/block semantics (presence alone is
+    # not an "allow"), so the manifest never overrides it.
+    manifest_presence = _manifest_presence(sid, node_id)
+    if manifest_presence:
+        for key, value in manifest_presence.items():
+            if key == "guard_decision":
+                continue
+            presence[key] = bool(value)
     for artifact_key, artifact_value in artifacts.items():
         if artifact_key in presence:
             continue
@@ -3726,6 +3758,17 @@ def _evaluate_proof_obligations(sid: str, node: dict[str, Any], eval_json: str |
     presence = _proof_artifact_presence(sid, node, eval_json=eval_json)
     checked: list[dict[str, Any]] = []
     missing: list[dict[str, Any]] = []
+    if presence.get("artifact_root_violation"):
+        # AC-R6.3: an observed write outside the declared artifact roots blocks the
+        # gate regardless of which obligations the node declares.
+        entry = {
+            "kind": "artifact_root",
+            "requirement": "writes_within_declared_roots",
+            "field": None,
+            "reason": "ARTIFACT_ROOT_VIOLATION",
+        }
+        checked.append({**entry, "satisfied": False})
+        missing.append(entry)
 
     for obligation in obligations:
         kind = str(obligation.get("kind") or "")
@@ -8236,6 +8279,29 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
         # guard/resource/adapter bridge artifacts from real node outputs, so the
         # proof gate checks files rather than narrative claims.
         _emit_node_proof_sidecars(sid, node)
+        # Lane 3 (R6): build-complete manifest write on the contracted path — the
+        # proof gate below then discovers artifacts via the manifest, not filenames.
+        if (
+            _artifact_manifest is not None
+            and _ledger_enabled()
+            and _gate_ledger is not None
+            and _gate_ledger.contracted(graph)
+        ):
+            try:
+                _artifact_manifest.write_manifest(
+                    SPRINTS_DIR, sid, node,
+                    generation=_node_repair_attempts(node),
+                    roots=graph.get("artifact_roots") if isinstance(graph.get("artifact_roots"), dict) else {},
+                    sidecars={
+                        "handoff_md": str(observed_handoff or ""),
+                        "patch_diff": str(_existing_node_patch_diff(sid, node) or ""),
+                        "eval": [str(resolved_eval_json or "")],
+                        "guard_decision": str(_node_sidecar_file(sid, node_id, "guard_decision") or ""),
+                        "resource_binding": str(_node_sidecar_file(sid, node_id, "resource_binding") or ""),
+                    },
+                )
+            except Exception:
+                pass
         proof_gate = _evaluate_proof_obligations(sid, node, eval_json=resolved_eval_json)
         if proof_gate.get("required") and not proof_gate.get("ok"):
             _ledger_record(sid, node_id=node_id, kind="gate_check", author={"type": "policy"},
