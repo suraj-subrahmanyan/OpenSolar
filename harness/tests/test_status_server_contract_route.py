@@ -5,6 +5,7 @@ import json
 import threading
 import time
 import urllib.request
+import urllib.error
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -46,12 +47,21 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
 
 
 def _get_json(module, path: str) -> dict:
+    status, payload = _get_response(module, path)
+    assert status == 200, payload
+    return payload
+
+
+def _get_response(module, path: str) -> tuple[int, dict]:
     server = ThreadingHTTPServer(("127.0.0.1", 0), module.StatusHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}{path}", timeout=5) as response:
-            return json.loads(response.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}{path}", timeout=5) as response:
+                return response.status, json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -142,3 +152,16 @@ def test_contract_route_returns_legacy_shape_for_uncontracted_sprint(tmp_path: P
             "manifest": {"path": "", "exists": False, "url": ""},
         }
     ]
+
+
+def test_contract_route_returns_404_for_nonexistent_sprint(tmp_path: Path):
+    module, _harness = _load_status_server(tmp_path)
+
+    status, payload = _get_response(module, "/api/sprints/sprint-does-not-exist-r5/contract")
+
+    assert status == 404
+    assert payload["ok"] is False
+    assert payload["status"] == "not_found"
+    assert payload["error"] == "sprint_not_found"
+    assert payload["contracted"] is False
+    assert payload["sprint_id"] == "sprint-does-not-exist-r5"
