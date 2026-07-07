@@ -107,6 +107,31 @@ Design §1.5 says the manifest is written "at build-complete and repair-complete
 - Wrapper/dashboard/evaluator-support consumers are Lane 5 per the plan; `publish_canonical`
   ships in the module ready for the publish step.
 
+## D5a — AC-R6.3 root-violation blocking is NOT live: no observed-writes source exists (round-4 G5, honest downgrade)
+
+AC-R6.3 ("a node attempting to write outside declared roots is blocked and reported") requires
+knowing which paths the node ACTUALLY wrote. That signal does not exist anywhere on the live
+path — verified against code, option (a) of the round-4 fix order was not implementable
+without inventing one:
+
+- `operator_runtime.write_result` / operatord's result.json carry status/exit/log fields only —
+  no artifact or file list.
+- `capability_effects.scan_effect` matches capability evidence in narrative text — not file
+  writes.
+- No pre/post-dispatch workspace snapshot or write-scan exists.
+- The handoff body is executor-authored narrative — using it as "observed writes" would be a
+  self-reported (fake) source, exactly what R4/R6 exist to prevent.
+
+Decision (option b): the mechanism stays parameter-driven (`write_manifest(observed=…)` builds
+and `presence_map` surfaces `artifact_root_violation`, and `_evaluate_proof_obligations` blocks
+on it — all proven by tests), but **AC-R6.3 is unmet on the live path**: `node_verdict` passes
+no `observed=`, so production manifests always carry `violations: []`. Catalog class 21 is
+downgraded `verified_here` → `partial` with the missing producer named in `pending_remainder`;
+the F-CLASS-21 scenario is re-framed consult-only. Owning follow-up: whichever lane adds an
+observed-writes producer (operator result artifact lists, or a post-dispatch workspace scan)
+must wire it through `node_verdict` and prove AC-R6.3 end-to-end. D3's earlier claim that path
+tampers are "caught downstream by the manifest root checks" is withdrawn (see the amended D3).
+
 ## D6 — `verdict_kind` default classification vocabulary
 
 AC-R4.1: "`verdict_kind=mechanical` is set by the gate runner, not inferred from strings."
