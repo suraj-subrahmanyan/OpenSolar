@@ -306,6 +306,78 @@ def test_real_code_node_keeps_patch_obligations(capsule_registry, operator_regis
     assert _validate(graph, capsule_registry, operator_registry, shipped_contracts) == []
 
 
+# ---------------------------------------------------------------------------
+# F3 (round-2): the planner path had NO acyclicity or depends_on-existence check
+# (only the schema path for fixed contracts did). A cyclic or dangling-dep graph
+# compiled clean and would hang the scheduler. validate_plan now rejects both.
+# ---------------------------------------------------------------------------
+
+def _valid_audit_node(node_id: str, depends_on: list) -> dict:
+    return {
+        "id": node_id,
+        "goal": f"Audit step {node_id}.",
+        "capability_capsule_id": "cap.requirement-compiler-audit",
+        "dispatch_task_type": "audit_inventory",
+        "write_scope": [f"workspace/x/{node_id}.json"],
+        "proof_obligations": [
+            {"kind": "postcondition", "requirement": "output_present", "field": f"{node_id}.json"},
+        ],
+        "depends_on": list(depends_on),
+    }
+
+
+def test_cyclic_graph_rejected(capsule_registry, operator_registry, shipped_contracts):
+    """Reviewer probe: a two-node cycle A->B->A compiled clean; it must reject."""
+    graph = {
+        "sprint_id": "sprint-cyclic",
+        "nodes": [_valid_audit_node("A", ["B"]), _valid_audit_node("B", ["A"])],
+        "node_results": {}, "gate_results": {},
+    }
+    errors = _validate(graph, capsule_registry, operator_registry, shipped_contracts)
+    cyclic = [e for e in errors if e["code"] == wc.ERROR_GRAPH_CYCLIC]
+    assert cyclic, f"expected GRAPH_CYCLIC, got {errors}"
+
+
+def test_self_loop_graph_rejected(capsule_registry, operator_registry, shipped_contracts):
+    graph = {
+        "sprint_id": "sprint-selfloop",
+        "nodes": [_valid_audit_node("A", ["A"])],
+        "node_results": {}, "gate_results": {},
+    }
+    errors = _validate(graph, capsule_registry, operator_registry, shipped_contracts)
+    assert any(e["code"] == wc.ERROR_GRAPH_CYCLIC for e in errors), errors
+
+
+def test_dangling_depends_on_rejected(capsule_registry, operator_registry, shipped_contracts):
+    """Reviewer probe: a node depending on a non-existent stage compiled clean."""
+    graph = {
+        "sprint_id": "sprint-dangling",
+        "nodes": [_valid_audit_node("A", ["does-not-exist"])],
+        "node_results": {}, "gate_results": {},
+    }
+    errors = _validate(graph, capsule_registry, operator_registry, shipped_contracts)
+    dangling = [e for e in errors if e["code"] == wc.ERROR_DEP_NOT_FOUND]
+    assert dangling and dangling[0]["stage_id"] == "A", errors
+    assert dangling[0]["declared"] == "does-not-exist"
+
+
+def test_valid_dag_has_no_graph_structure_errors(
+    capsule_registry, operator_registry, shipped_contracts
+):
+    """A well-formed multi-node DAG must NOT trip the new checks (no over-rejection)."""
+    graph = {
+        "sprint_id": "sprint-valid",
+        "nodes": [
+            _valid_audit_node("A", []),
+            _valid_audit_node("B", ["A"]),
+            _valid_audit_node("C", ["A", "B"]),
+        ],
+        "node_results": {}, "gate_results": {},
+    }
+    errors = _validate(graph, capsule_registry, operator_registry, shipped_contracts)
+    assert not [e for e in errors if e["code"] in (wc.ERROR_GRAPH_CYCLIC, wc.ERROR_DEP_NOT_FOUND)], errors
+
+
 def test_route_unresolvable_for_plan_node(capsule_registry, shipped_contracts):
     graph = _graph_with({
         "id": "N1",

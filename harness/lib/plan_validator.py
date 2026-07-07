@@ -164,6 +164,39 @@ def validate_plan(
                     resolved=[], declared=role,
                 ))
 
+    # F3: graph structure — depends_on existence + acyclicity on the planner
+    # path (the schema path already had these for fixed contracts). A cyclic or
+    # dangling-dep graph must reject at compile, never hang the scheduler.
+    errors.extend(_validate_graph_structure(task_graph))
+
+    return errors
+
+
+def _validate_graph_structure(task_graph: Dict[str, Any]) -> List[Dict[str, Any]]:
+    nodes = [n for n in task_graph.get("nodes", []) or [] if isinstance(n, dict)]
+    node_ids = {str(n.get("id")) for n in nodes if n.get("id") is not None}
+    errors: List[Dict[str, Any]] = []
+    deps_map: Dict[str, List[str]] = {}
+    for node in nodes:
+        if node.get("id") is None:
+            continue
+        node_id = str(node.get("id"))
+        deps = [str(d) for d in (node.get("depends_on") or [])]
+        deps_map[node_id] = deps
+        for dep in deps:
+            if dep not in node_ids:
+                errors.append(wc.compile_error(
+                    wc.ERROR_DEP_NOT_FOUND, node_id,
+                    f"node {node_id} depends_on {dep!r} which is not a node in this graph",
+                    declared=dep,
+                ))
+    cyclic = wc.first_cycle_node(deps_map)
+    if cyclic is not None:
+        errors.append(wc.compile_error(
+            wc.ERROR_GRAPH_CYCLIC, cyclic,
+            f"node {cyclic!r} is part of a depends_on cycle; the graph is not a DAG",
+            declared=cyclic,
+        ))
     return errors
 
 

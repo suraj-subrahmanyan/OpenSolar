@@ -116,6 +116,8 @@ ERROR_CAPSULE_NOT_REGISTERED = "CAPSULE_NOT_REGISTERED"
 ERROR_FORBIDDEN_CAPSULE = "FORBIDDEN_CAPSULE_IN_STAGE"
 ERROR_FORBIDDEN_OBLIGATION = "FORBIDDEN_OBLIGATION_IN_STAGE"
 ERROR_OBLIGATION_TARGET_UNDECLARED = "OBLIGATION_TARGET_UNDECLARED"
+ERROR_GRAPH_CYCLIC = "GRAPH_CYCLIC"
+ERROR_DEP_NOT_FOUND = "DEP_NOT_FOUND"
 
 _HEALTHY_STATUSES = {"ok"}
 
@@ -304,8 +306,10 @@ def _validate_stages(stages: List[Any]) -> List[str]:
     return errors
 
 
-def _check_acyclic(stages: List[Dict[str, Any]]) -> List[str]:
-    deps = {s["id"]: [d for d in (s.get("depends_on") or [])] for s in stages}
+def first_cycle_node(deps: Dict[str, List[str]]) -> Optional[str]:
+    """DFS cycle detection over a {node_id: [dep_ids]} map. Returns the id of a
+    node involved in a dependency cycle, or None if the graph is acyclic. Shared
+    by the schema path (_check_acyclic) and the plan validator (F3)."""
     state: Dict[str, int] = {}
 
     def visit(node: str) -> bool:
@@ -320,9 +324,17 @@ def _check_acyclic(stages: List[Dict[str, Any]]) -> List[str]:
         state[node] = 2
         return True
 
-    for stage_id in deps:
-        if not visit(stage_id):
-            return [f"stage dependency cycle involving {stage_id!r}"]
+    for node_id in deps:
+        if not visit(node_id):
+            return node_id
+    return None
+
+
+def _check_acyclic(stages: List[Dict[str, Any]]) -> List[str]:
+    deps = {s["id"]: [d for d in (s.get("depends_on") or [])] for s in stages}
+    cyclic = first_cycle_node(deps)
+    if cyclic is not None:
+        return [f"stage dependency cycle involving {cyclic!r}"]
     return []
 
 
