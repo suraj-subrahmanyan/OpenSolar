@@ -143,6 +143,34 @@ red-green pytest gate picks them up unchanged (36 scenario-gate tests, was 16).
 `eval_generation` without defining its source; this is the code's only existing generation
 authority.
 
+## D10 — writer-surface audit widened repo-wide; epic-graph writers exempted with reasons (round-4 G3)
+
+AC-R4.3's audit was scoped to `graph_scheduler.py`/`graph_node_dispatcher.py`; the round-4
+review found two unaudited direct writers on shipped paths. The audit now scans every module
+under `harness/lib` for node-status writes AND `node_results` mutations (they change effective
+status via `node_status()`'s fold), with an explicit per-file/per-function allowlist.
+
+Newly recorded writers: `multi_task_runner.recover_quota_failed_nodes` (quota-fallback
+terminal→pending reopen, product pool path), `research/cli._enqueue_source_audit_followup`
+(terminal followup-node reopen, contracted research path), and — surfaced by the widened scan —
+`evolution_engine.repair_deepresearch_gates` / `restore_nonrequired_deepresearch_repairs`
+(quality-gate debt sweeps over research sprint graphs). All record through the flag-gated
+best-effort seam (no-op when `SOLAR_GATE_LEDGER` is off).
+
+Exempted with reasons (see `AUDITED_WRITERS` in `test_status_writer_surface.py`):
+`task_graph_io.compile_mirror` (writes a compat mirror copy), `task_graph_io`/
+`task_graph_state_io.backfill_state_from_legacy` (loaders extracting already-recorded status),
+`compat/legacy_adapter.dispatch` (writes status.json, not the graph), and the epic-level
+writers `epic_projection_closeout._sync_graph_from_children`,
+`epic_decomposer.sync_graph_from_children`/`activate_ready` — epic graphs carry no
+`workflow_contract_id` and are outside Lane 3's sprint-graph ledger scope; recording epic-node
+transitions is the epic/dashboard lane's follow-up.
+
+Known audit bounds: the scan is receiver-shaped (`node`/`nodes[...]`/`live`/`ids[...]`/
+`merged`); a writer that aliases a node dict to an unrelated name evades the regex, and
+mutations through a variable bound from `node_results` under a different name are likewise
+invisible. The explicit allowlist review is the human backstop.
+
 ## Pre-existing reds (proven unchanged)
 
 - `harness/tests/graph/test_multi_task_runner_status_surface.py` — collection ERROR, identical

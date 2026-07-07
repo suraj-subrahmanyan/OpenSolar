@@ -177,6 +177,13 @@ from graph_scheduler import (  # noqa: E402
     write_scope_conflict,
 )
 
+try:  # Lane 3 gate ledger seam (round-4 G3): pool-side node-status writes must
+    # record like every other C4 writer; guarded so a partial install never
+    # breaks the pool. No-op unless SOLAR_GATE_LEDGER=1.
+    from graph_scheduler import _ledger_transition as _gs_ledger_transition
+except Exception:  # pragma: no cover
+    _gs_ledger_transition = None
+
 ACTIVE_TASK_STATUSES = {"queued", "dispatched", "running"}
 TERMINAL_TASK_STATUSES = {"completed", "failed", "failed_missing_handoff", "failed_stale_handoff", "cancelled"}
 EFFECTIVE_TERMINAL_TASK_STATUSES = TERMINAL_TASK_STATUSES | {"completed_aligned", "failed_aligned"}
@@ -2768,6 +2775,17 @@ def recover_quota_failed_nodes(graph_path: Path, graph: dict[str, Any]) -> int:
             if isinstance(graph.get("node_results"), dict):
                 graph["node_results"].pop(node_id, None)
             node["status"] = "pending"
+            # Round-4 G3: this terminal->pending reopen (plus the node_results
+            # pop above) changes effective status and must leave a ledger record.
+            if _gs_ledger_transition is not None:
+                try:
+                    _gs_ledger_transition(
+                        graph, node_id, str(current_status or ""), "pending",
+                        "recover_quota_failed_nodes",
+                        note=f"quota_fallback:{profile_name or 'unknown'}->{fallback}",
+                    )
+                except Exception:
+                    pass
             node["updated_at"] = now_iso()
             node.pop("assigned_to", None)
             node.pop("dispatch_id", None)
