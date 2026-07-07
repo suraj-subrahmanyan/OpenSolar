@@ -1,0 +1,924 @@
+{
+  "schema_version": "solar.workflow_contract.v1",
+  "description": "Example workflow contracts for the unification plan. Design artifacts only; no runtime is wired to these yet. Field semantics: workflow-contract-unification-plan.md section 2.",
+  "compile_time_checks": [
+    "every stage.task_type is admitted by every capsule in stage.allowed_capsules (task_type_in)",
+    "every proof_obligation references an artifact in stage.outputs or a declared gate input",
+    "obligation kinds legal for stage.node_kind only (patch_diff => node_kind=code)",
+    "every output path resolves inside artifact_roots.canonical or a declared alias root",
+    "every stage role resolves to >=1 healthy, non-deprecated operator under provider_policy",
+    "graph instantiation is byte-identical for identical inputs (golden-file test)"
+  ],
+  "workflows": [
+    {
+      "workflow_id": "research.deepdive.rsi_demo",
+      "version": "1.0",
+      "title": "RSI DeepDive Report",
+      "trigger": {
+        "explicit_markers": [
+          "deepdive",
+          "deep dive",
+          "deepresearch",
+          "deep research",
+          "深度研究",
+          "深研",
+          "深度调研报告"
+        ],
+        "env_gates": [
+          {
+            "env": "SOLAR_DEMO_REPORT_MODE",
+            "equals": "1"
+          }
+        ],
+        "requirement_compiler_type": "RESEARCH",
+        "generic_words_insufficient": ["research", "研究", "调研"],
+        "on_match": "bypass should_epic_decompose_request and PM epic decomposition; instantiate this contract as the task graph with dag_variant=research.deepdive.rsi_demo"
+      },
+      "provider_policy": {
+        "runtime": "codex",
+        "allowed_providers": ["openai"],
+        "route_proof_required": true,
+        "route_records": "per_stage_execution_append_only"
+      },
+      "source_mode": {
+        "network": false,
+        "seed_pack": "demo-rsi/source-pack/"
+      },
+      "artifact_roots": {
+        "canonical": "workspace/rsi-deep-research-report/",
+        "aliases": ["sprints/<sid>/workdir/rsi-deep-research-report/"],
+        "publish_rule": "export stage copies canonical set to evidence/report/rsi-deep-research-report/"
+      },
+      "validator_command": "python3 scripts/validate_rsi_demo_report.py --workspace <resolved_root>",
+      "release_proof_level": "P3",
+      "dashboard": {
+        "pipeline_strip": true
+      },
+      "forbidden": {
+        "capsules": ["cap.requirement-compiler-implementation"],
+        "proof_obligations": [
+          "patch_diff",
+          "patch_within_scope",
+          "resource_binding.workspace_root"
+        ]
+      },
+      "stages": [
+        {
+          "id": "D1",
+          "gate_family": "DD_SCOPE",
+          "node_kind": "analysis",
+          "logical_operator": "DeepDiveBriefCapture",
+          "depends_on": [],
+          "task_type": "audit_inventory",
+          "allowed_capsules": [
+            "cap.requirement-research-scout",
+            "cap.requirement-compiler-audit"
+          ],
+          "allowed_operators": {
+            "role": "builder",
+            "providers": ["openai"]
+          },
+          "outputs": [
+            {
+              "path": "scope-contract.json",
+              "type": "json"
+            }
+          ],
+          "proof_obligations": [
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "scope-contract.json"
+            }
+          ],
+          "evaluator_gate": {
+            "kind": "none"
+          },
+          "dashboard_label": "D1 · Scope",
+          "timeouts": {
+            "result_timeout_sec": 900,
+            "on_timeout_classification": "ORCHESTRATION_WEDGE_NOT_PRODUCT_PROOF"
+          }
+        },
+        {
+          "id": "D2",
+          "gate_family": "DD_SOURCE",
+          "node_kind": "artifact",
+          "logical_operator": "DeepDiveSourceCollector",
+          "depends_on": ["D1"],
+          "task_type": "audit_inventory",
+          "allowed_capsules": ["cap.requirement-research-scout"],
+          "allowed_operators": {
+            "role": "builder",
+            "providers": ["openai"]
+          },
+          "outputs": [
+            {
+              "path": "sources.json",
+              "type": "json",
+              "demo_artifact": true
+            }
+          ],
+          "proof_obligations": [
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "sources.json"
+            },
+            {
+              "kind": "acceptance",
+              "requirement": "min_sources",
+              "value": 5
+            },
+            {
+              "kind": "acceptance",
+              "requirement": "all_pack_sources_represented"
+            }
+          ],
+          "evaluator_gate": {
+            "kind": "deterministic_command",
+            "command": "research eval-artifacts --sources",
+            "on_fail": "repair_once_then_fail"
+          },
+          "dashboard_label": "D2 · Sources",
+          "timeouts": {
+            "result_timeout_sec": 900
+          }
+        },
+        {
+          "id": "D3",
+          "gate_family": "DD_EVIDENCE",
+          "node_kind": "artifact",
+          "logical_operator": "DeepDiveClaimCompiler",
+          "depends_on": ["D2"],
+          "task_type": "evidence",
+          "allowed_capsules": [
+            "cap.requirement-research-synthesizer",
+            "cap.requirement-compiler-audit"
+          ],
+          "allowed_operators": {
+            "role": "builder",
+            "providers": ["openai"]
+          },
+          "outputs": [
+            {
+              "path": "claims.json",
+              "type": "json",
+              "demo_artifact": true
+            }
+          ],
+          "proof_obligations": [
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "claims.json"
+            },
+            {
+              "kind": "acceptance",
+              "requirement": "min_claims",
+              "value": 10
+            },
+            {
+              "kind": "acceptance",
+              "requirement": "all_claim_source_ids_in_sources"
+            }
+          ],
+          "evaluator_gate": {
+            "kind": "deterministic_command",
+            "command": "research eval-artifacts",
+            "inputs_produced_by_this_gate": ["research_eval.json"],
+            "on_fail": "repair_once_then_fail",
+            "on_capacity_unavailable": "wait",
+            "on_human_review": "warn_and_continue",
+            "verdict_kinds": ["content", "mechanical", "infrastructure"]
+          },
+          "dashboard_label": "D3 · Claims",
+          "timeouts": {
+            "result_timeout_sec": 1200
+          }
+        },
+        {
+          "id": "D4",
+          "gate_family": "DD_EVIDENCE",
+          "node_kind": "analysis",
+          "logical_operator": "DeepDiveContradictionScanner",
+          "depends_on": ["D3"],
+          "task_type": "evidence",
+          "allowed_capsules": ["cap.requirement-research-synthesizer"],
+          "allowed_operators": {
+            "role": "builder",
+            "providers": ["openai"]
+          },
+          "outputs": [
+            {
+              "path": "contradiction-matrix.json",
+              "type": "json"
+            }
+          ],
+          "proof_obligations": [
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "contradiction-matrix.json"
+            }
+          ],
+          "evaluator_gate": {
+            "kind": "none"
+          },
+          "dashboard_label": "D4 · Contradictions",
+          "timeouts": {
+            "result_timeout_sec": 900
+          }
+        },
+        {
+          "id": "D5",
+          "gate_family": "DD_SYNTHESIS",
+          "node_kind": "artifact",
+          "logical_operator": "DeepDiveChiefEditor",
+          "depends_on": ["D3", "D4"],
+          "task_type": "reporting",
+          "allowed_capsules": [
+            "cap.requirement-research-synthesizer",
+            "cap.requirement-compiler-audit"
+          ],
+          "allowed_operators": {
+            "role": "builder",
+            "providers": ["openai"]
+          },
+          "outputs": [
+            {
+              "path": "report.md",
+              "type": "markdown",
+              "demo_artifact": true
+            },
+            {
+              "path": "report.html",
+              "type": "html",
+              "demo_artifact": true
+            }
+          ],
+          "proof_obligations": [
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "report.md"
+            },
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "report.html"
+            },
+            {
+              "kind": "acceptance",
+              "requirement": "html_present",
+              "value": "<html"
+            },
+            {
+              "kind": "acceptance",
+              "requirement": "no_stub_tokens",
+              "token_list": "validate_rsi_demo_report.py PLACEHOLDER_TOKENS"
+            }
+          ],
+          "evaluator_gate": {
+            "kind": "llm_eval",
+            "role": "evaluator",
+            "on_capacity_unavailable": "wait",
+            "on_human_review": "warn_and_continue",
+            "verdict_kinds": ["content", "mechanical", "infrastructure"]
+          },
+          "dashboard_label": "D5 · Report",
+          "timeouts": {
+            "result_timeout_sec": 1800
+          }
+        },
+        {
+          "id": "D6",
+          "gate_family": "DD_PUBLISH",
+          "node_kind": "publish",
+          "logical_operator": "DeepDiveArtifactPublisher",
+          "depends_on": ["D5"],
+          "task_type": "documentation",
+          "allowed_capsules": ["cap.requirement-compiler-audit"],
+          "allowed_operators": {
+            "role": "builder",
+            "providers": ["openai"]
+          },
+          "outputs": [
+            {
+              "path": "evaluation-checklist.md",
+              "type": "markdown",
+              "demo_artifact": true
+            }
+          ],
+          "proof_obligations": [
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "evaluation-checklist.md"
+            },
+            {
+              "kind": "gate",
+              "requirement": "all_required_artifacts_present"
+            },
+            {
+              "kind": "gate",
+              "requirement": "route_proof_ok"
+            },
+            {
+              "kind": "gate",
+              "requirement": "validator_command_exit_0"
+            }
+          ],
+          "evaluator_gate": {
+            "kind": "deterministic_command",
+            "command": "python3 scripts/validate_rsi_demo_report.py",
+            "on_fail": "fail"
+          },
+          "dashboard_label": "D6 · Publish",
+          "timeouts": {
+            "result_timeout_sec": 600
+          }
+        }
+      ],
+      "required_artifacts": [
+        "report.html",
+        "report.md",
+        "sources.json",
+        "claims.json",
+        "evaluation-checklist.md"
+      ],
+      "note": "Compressed D1-D6 form of the original D1-D9 (see rsi-deepdive-workflow-lock.md for both and the mapping). | on_human_review=warn_and_continue is DEMO-ONLY (unattended run); general research contracts use block_dependents with bounded human-wait per review disposition 8.1."
+    },
+    {
+      "workflow_id": "research.resource_radar",
+      "version": "1.0",
+      "title": "Loop/Harness Resource Radar",
+      "trigger": {
+        "explicit_markers": ["resource radar", "landscape scan", "资源雷达"],
+        "env_gates": [],
+        "requirement_compiler_type": "RESEARCH",
+        "on_match": "instantiate this contract; never PM epic decomposition"
+      },
+      "provider_policy": {
+        "runtime": "codex",
+        "allowed_providers": ["openai"],
+        "route_proof_required": true,
+        "route_records": "per_stage_execution_append_only"
+      },
+      "source_mode": {
+        "network": "gated",
+        "network_gate": {
+          "env": "SOLAR_ALLOW_LIVE_WEB",
+          "equals": "1",
+          "fallback": "seed pack + explicit blocker report listing exactly which web step was unavailable"
+        }
+      },
+      "artifact_roots": {
+        "canonical": "workspace/resource-radar/",
+        "aliases": ["sprints/<sid>/workdir/resource-radar/"],
+        "publish_rule": "export stage copies canonical set to evidence/report/resource-radar/"
+      },
+      "validator_command": "python3 scripts/validate_resource_radar.py --workspace <resolved_root>",
+      "release_proof_level": "P6",
+      "stages": [
+        {
+          "id": "R1",
+          "gate_family": "RR_SCOPE",
+          "node_kind": "analysis",
+          "logical_operator": "RadarScopeCapture",
+          "depends_on": [],
+          "task_type": "audit_inventory",
+          "allowed_capsules": ["cap.requirement-research-scout"],
+          "allowed_operators": {
+            "role": "builder",
+            "providers": ["openai"]
+          },
+          "outputs": [
+            {
+              "path": "radar-scope.json",
+              "type": "json"
+            }
+          ],
+          "proof_obligations": [
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "radar-scope.json"
+            }
+          ],
+          "evaluator_gate": {
+            "kind": "none"
+          },
+          "dashboard_label": "R1 · Scope",
+          "timeouts": {
+            "result_timeout_sec": 900
+          }
+        },
+        {
+          "id": "R2",
+          "gate_family": "RR_SCOPE",
+          "node_kind": "analysis",
+          "logical_operator": "RadarCategoryPlanner",
+          "depends_on": ["R1"],
+          "task_type": "documentation",
+          "allowed_capsules": ["cap.requirement-research-scout"],
+          "allowed_operators": {
+            "role": "builder",
+            "providers": ["openai"]
+          },
+          "outputs": [
+            {
+              "path": "category-plan.json",
+              "type": "json"
+            }
+          ],
+          "proof_obligations": [
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "category-plan.json"
+            },
+            {
+              "kind": "acceptance",
+              "requirement": "categories_cover",
+              "value": ["papers", "media", "companies", "opinions"]
+            }
+          ],
+          "evaluator_gate": {
+            "kind": "deterministic_command",
+            "command": "validate category-plan schema"
+          },
+          "dashboard_label": "R2 · Categories",
+          "timeouts": {
+            "result_timeout_sec": 900
+          }
+        },
+        {
+          "id": "R3",
+          "gate_family": "RR_COLLECT",
+          "node_kind": "artifact",
+          "logical_operator": "RadarPaperScout",
+          "depends_on": ["R2"],
+          "task_type": "evidence",
+          "allowed_capsules": ["cap.requirement-research-scout"],
+          "allowed_operators": {
+            "role": "builder",
+            "providers": ["openai"]
+          },
+          "outputs": [
+            {
+              "path": "papers.json",
+              "type": "json"
+            }
+          ],
+          "proof_obligations": [
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "papers.json"
+            },
+            {
+              "kind": "acceptance",
+              "requirement": "min_entries",
+              "value": 8
+            },
+            {
+              "kind": "acceptance",
+              "requirement": "each_entry_has_url_and_accessed_at"
+            }
+          ],
+          "evaluator_gate": {
+            "kind": "deterministic_command",
+            "command": "validate entries: url reachable OR marked seed-pack; no fabricated sources"
+          },
+          "dashboard_label": "R3 · Papers",
+          "timeouts": {
+            "result_timeout_sec": 1800
+          }
+        },
+        {
+          "id": "R4",
+          "gate_family": "RR_COLLECT",
+          "node_kind": "artifact",
+          "logical_operator": "RadarMediaScout",
+          "depends_on": ["R2"],
+          "task_type": "evidence",
+          "allowed_capsules": ["cap.requirement-research-scout"],
+          "allowed_operators": {
+            "role": "builder",
+            "providers": ["openai"]
+          },
+          "outputs": [
+            {
+              "path": "media.json",
+              "type": "json"
+            }
+          ],
+          "proof_obligations": [
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "media.json"
+            },
+            {
+              "kind": "acceptance",
+              "requirement": "each_entry_has_url_and_accessed_at"
+            }
+          ],
+          "evaluator_gate": {
+            "kind": "deterministic_command",
+            "command": "same entry validator"
+          },
+          "dashboard_label": "R4 · Media",
+          "timeouts": {
+            "result_timeout_sec": 1800
+          }
+        },
+        {
+          "id": "R5",
+          "gate_family": "RR_COLLECT",
+          "node_kind": "artifact",
+          "logical_operator": "RadarCompanyScout",
+          "depends_on": ["R2"],
+          "task_type": "evidence",
+          "allowed_capsules": ["cap.requirement-research-scout"],
+          "allowed_operators": {
+            "role": "builder",
+            "providers": ["openai"]
+          },
+          "outputs": [
+            {
+              "path": "companies.json",
+              "type": "json"
+            }
+          ],
+          "proof_obligations": [
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "companies.json"
+            },
+            {
+              "kind": "acceptance",
+              "requirement": "each_entry_has_url_and_accessed_at"
+            }
+          ],
+          "evaluator_gate": {
+            "kind": "deterministic_command",
+            "command": "same entry validator"
+          },
+          "dashboard_label": "R5 · Companies",
+          "timeouts": {
+            "result_timeout_sec": 1800
+          }
+        },
+        {
+          "id": "R6",
+          "gate_family": "RR_COLLECT",
+          "node_kind": "artifact",
+          "logical_operator": "RadarOpinionScout",
+          "depends_on": ["R2"],
+          "task_type": "evidence",
+          "allowed_capsules": ["cap.requirement-research-scout"],
+          "allowed_operators": {
+            "role": "builder",
+            "providers": ["openai"]
+          },
+          "outputs": [
+            {
+              "path": "opinions.json",
+              "type": "json"
+            }
+          ],
+          "proof_obligations": [
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "opinions.json"
+            },
+            {
+              "kind": "acceptance",
+              "requirement": "official_vs_thirdparty_separated"
+            }
+          ],
+          "evaluator_gate": {
+            "kind": "deterministic_command",
+            "command": "same entry validator"
+          },
+          "dashboard_label": "R6 · Opinions",
+          "timeouts": {
+            "result_timeout_sec": 1800
+          }
+        },
+        {
+          "id": "R7",
+          "gate_family": "RR_SYNTH",
+          "node_kind": "artifact",
+          "logical_operator": "RadarRankingSynthesizer",
+          "depends_on": ["R3", "R4", "R5", "R6"],
+          "task_type": "reporting",
+          "allowed_capsules": ["cap.requirement-research-synthesizer"],
+          "allowed_operators": {
+            "role": "builder",
+            "providers": ["openai"]
+          },
+          "outputs": [
+            {
+              "path": "radar-report.md",
+              "type": "markdown"
+            },
+            {
+              "path": "ranking.json",
+              "type": "json"
+            }
+          ],
+          "proof_obligations": [
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "radar-report.md"
+            },
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "ranking.json"
+            },
+            {
+              "kind": "acceptance",
+              "requirement": "every_ranked_item_cites_collected_entry"
+            }
+          ],
+          "evaluator_gate": {
+            "kind": "llm_eval",
+            "role": "evaluator",
+            "on_capacity_unavailable": "wait",
+            "on_human_review": "block_dependents",
+            "verdict_kinds": ["content", "mechanical", "infrastructure"],
+            "human_review_wait": {
+              "bounded_by": "result_timeout_sec",
+              "on_expiry": "classified_escalation_never_silent_wedge"
+            }
+          },
+          "dashboard_label": "R7 · Ranking",
+          "timeouts": {
+            "result_timeout_sec": 1800
+          }
+        },
+        {
+          "id": "R8",
+          "gate_family": "RR_PUBLISH",
+          "node_kind": "publish",
+          "logical_operator": "RadarPublisher",
+          "depends_on": ["R7"],
+          "task_type": "documentation",
+          "allowed_capsules": ["cap.requirement-compiler-audit"],
+          "allowed_operators": {
+            "role": "builder",
+            "providers": ["openai"]
+          },
+          "outputs": [
+            {
+              "path": "radar-report.html",
+              "type": "html"
+            }
+          ],
+          "proof_obligations": [
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "radar-report.html"
+            },
+            {
+              "kind": "gate",
+              "requirement": "all_required_artifacts_present"
+            },
+            {
+              "kind": "gate",
+              "requirement": "route_proof_ok"
+            },
+            {
+              "kind": "gate",
+              "requirement": "validator_command_exit_0"
+            }
+          ],
+          "evaluator_gate": {
+            "kind": "deterministic_command",
+            "command": "python3 scripts/validate_resource_radar.py"
+          },
+          "dashboard_label": "R8 · Export",
+          "timeouts": {
+            "result_timeout_sec": 600
+          }
+        }
+      ],
+      "required_artifacts": [
+        "radar-scope.json",
+        "category-plan.json",
+        "papers.json",
+        "media.json",
+        "companies.json",
+        "opinions.json",
+        "radar-report.md",
+        "ranking.json",
+        "radar-report.html"
+      ],
+      "note": "R3-R6 are parallel (all depend only on R2). Live web is env-gated; the offline rung of the ladder runs against a seed pack. Fabricated-source prohibition is a validator rule, not a prompt hope."
+    },
+    {
+      "workflow_id": "code.cli_smoke",
+      "version": "1.0",
+      "title": "Code smoke / CLI artifact",
+      "trigger": {
+        "explicit_markers": [],
+        "selection": "explicit workflow_id only (used by isolated live E2E harness and prompt-matrix validation, not by free intake)",
+        "on_match": "instantiate this contract"
+      },
+      "provider_policy": {
+        "runtime": "codex",
+        "allowed_providers": ["openai"],
+        "route_proof_required": true,
+        "route_records": "per_stage_execution_append_only"
+      },
+      "artifact_roots": {
+        "canonical": "sprints/<sid>/workdir/",
+        "aliases": [],
+        "publish_rule": "none (workdir is canonical for code tasks)"
+      },
+      "validator_command": "python3 -m pytest <sid-workdir>/tests -q",
+      "release_proof_level": "P2",
+      "stages": [
+        {
+          "id": "S1",
+          "gate_family": "G_BUILD",
+          "node_kind": "code",
+          "logical_operator": "ImplementationWorker",
+          "depends_on": [],
+          "task_type": "implementation",
+          "allowed_capsules": ["cap.requirement-compiler-implementation"],
+          "allowed_operators": {
+            "role": "builder",
+            "providers": ["openai"]
+          },
+          "outputs": [
+            {
+              "path": "<tool>.py",
+              "type": "python"
+            },
+            {
+              "path": "README.md",
+              "type": "markdown"
+            }
+          ],
+          "proof_obligations": [
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "<tool>.py"
+            },
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "patch_diff"
+            },
+            {
+              "kind": "self_check",
+              "requirement": "check.patch_within_scope"
+            },
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "handoff_md"
+            }
+          ],
+          "evaluator_gate": {
+            "kind": "llm_eval",
+            "role": "evaluator",
+            "on_capacity_unavailable": "wait",
+            "on_human_review": "block_dependents",
+            "verdict_kinds": ["content", "mechanical", "infrastructure"],
+            "repair": {
+              "max_attempts": 1,
+              "generation_fenced": true,
+              "single_flight": true
+            }
+          },
+          "dashboard_label": "S1 · Implement",
+          "timeouts": {
+            "result_timeout_sec": 1200
+          }
+        },
+        {
+          "id": "S2",
+          "gate_family": "G_SMOKE",
+          "node_kind": "code",
+          "logical_operator": "TestRunner",
+          "depends_on": ["S1"],
+          "task_type": "implementation",
+          "task_type_note": "test-authoring canonicalizes to implementation per 713201b0; the contract writes the canonical type directly",
+          "allowed_capsules": ["cap.requirement-compiler-implementation"],
+          "allowed_operators": {
+            "role": "builder",
+            "providers": ["openai"]
+          },
+          "outputs": [
+            {
+              "path": "tests/test_<tool>.py",
+              "type": "python"
+            },
+            {
+              "path": "test-report.md",
+              "type": "markdown"
+            }
+          ],
+          "proof_obligations": [
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "tests/test_<tool>.py"
+            },
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "patch_diff"
+            },
+            {
+              "kind": "acceptance",
+              "requirement": "tests_executed_exit_0"
+            }
+          ],
+          "evaluator_gate": {
+            "kind": "llm_eval",
+            "role": "evaluator",
+            "on_capacity_unavailable": "wait",
+            "on_human_review": "block_dependents",
+            "verdict_kinds": ["content", "mechanical", "infrastructure"],
+            "repair": {
+              "max_attempts": 1,
+              "generation_fenced": true,
+              "single_flight": true
+            }
+          },
+          "dashboard_label": "S2 · Smoke",
+          "timeouts": {
+            "result_timeout_sec": 1200
+          }
+        },
+        {
+          "id": "S3",
+          "gate_family": "G_REVIEW",
+          "node_kind": "verify",
+          "logical_operator": "Verifier",
+          "depends_on": ["S2"],
+          "task_type": "evidence",
+          "allowed_capsules": ["cap.requirement-compiler-audit"],
+          "allowed_operators": {
+            "role": "builder",
+            "providers": ["openai"]
+          },
+          "outputs": [
+            {
+              "path": "<sid>.review_decision.yaml",
+              "type": "yaml"
+            }
+          ],
+          "proof_obligations": [
+            {
+              "kind": "postcondition",
+              "requirement": "output_present",
+              "field": "<sid>.review_decision.yaml"
+            },
+            {
+              "kind": "acceptance",
+              "requirement": "structured_output_parses",
+              "parser": "yaml.safe_load",
+              "note": "the Run-G/Run-H class: closeout YAML must parse (9f2d7f35)"
+            }
+          ],
+          "evaluator_gate": {
+            "kind": "llm_eval",
+            "role": "evaluator",
+            "on_capacity_unavailable": "wait",
+            "on_human_review": "block_dependents",
+            "verdict_kinds": ["content", "mechanical", "infrastructure"]
+          },
+          "dashboard_label": "S3 · Review",
+          "timeouts": {
+            "result_timeout_sec": 1200
+          }
+        }
+      ],
+      "required_artifacts": [
+        "<tool>.py",
+        "tests/test_<tool>.py",
+        "<sid>.review_decision.yaml"
+      ],
+      "note": "This contract encodes the shape that actually went green (a8203924 run ab795810, cd528d0a smoke c42d1e2f): S1 implement -> S2 smoke -> S3 review. Note the verify stage is node_kind=verify with an audit capsule and NO patch_diff obligation - unlike S1/S2 - which is exactly the distinction the runtime kept getting wrong."
+    }
+  ],
+  "schema_v1_1_deltas_per_review": {
+    "workflow_contract_id": "contract identity key stamped on the task graph; dag_variant is NOT overloaded (stays in its closed enum short|standard|parallel_spec|parallel_delivery|research for gate backfill); contracts also emit a legal dag_variant enum value",
+    "proof_kind": "obligations gain explicit proof_kind: artifact_presence|patch_proof|gate so node-kind legality checks never string-match field=='patch_diff'",
+    "terminal_states": "optional per-stage terminal_states list for wrapper/dashboard consumption (default derived from gate kind)",
+    "route_record": "route evidence stored as gate-ledger kind=route_record {provider, model, operator_id, backend, exit_code, started_at, finished_at}, appended per stage execution"
+  }
+}

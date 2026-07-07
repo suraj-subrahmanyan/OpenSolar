@@ -1,0 +1,613 @@
+{
+  "schema_version": "opensolar.failure_taxonomy.v1",
+  "compiled": "2026-07-06",
+  "note": "Commit hashes given as original-lineage / integrated-lineage where both exist (rc8-runtime-mode-contract vs integration/rc8-runtime-mode-contract; feat/runtime-fixes vs upstream/openJiuwen-Solar). Corpus cross-references are F-xxx ids in opensolar-failure-corpus.md.",
+  "failure_classes": [
+    {
+      "id": "F-CLASS-01",
+      "name": "Planner DAG nondeterminism",
+      "category": "planner",
+      "description": "The LLM planner invents a fresh graph shape, node ids, capsule bindings, and write_scope path conventions on every run for the same prompt. Each reshuffle exposes a different downstream contract bug.",
+      "symptoms": [
+        "R1-R5 vs S1-S4 vs S1-S5 for the same prompt",
+        "capsule binding flips (implementation vs audit) between runs",
+        "write_scope emitted with/without workspace/ prefix",
+        "a fix verified on run N is bypassed by run N+1's shape"
+      ],
+      "representative_runs": [
+        "rsi-demo v3 7b880653",
+        "rsi-demo v7 bf66d46b",
+        "rsi-demo v9 fbce668c",
+        "rsi-demo v10"
+      ],
+      "fixed_by_commits": [],
+      "still_open": true,
+      "recommended_contract_fix": "Workflow contract compiler: known workflow triggers instantiate a fixed, byte-identical stage DAG (deepdive_research variant); the LLM planner is reserved for genuinely novel tasks. See workflow-contract-unification-plan.md."
+    },
+    {
+      "id": "F-CLASS-02",
+      "name": "Generic PM decomposition used for deep research",
+      "category": "planner",
+      "description": "Research/report prompts route through should_epic_decompose_request -> PM epic -> software-lifecycle decomposition (requirements/architecture/core-runtime/orchestration-ui/verification-release), which is semantically wrong for research deliverables.",
+      "symptoms": [
+        "deep-research prompt produces S01_requirements..S05_verification_release children",
+        "PRD/architecture gates block a report task",
+        "zero research artifacts despite long runtimes"
+      ],
+      "representative_runs": [
+        "epic-20260630-create-a-deep-research-report-for-an-early-stage-startup-cto (RC8-CODEX-LIVE-WEB-RESEARCH-DEMO-20260630.md)",
+        "validation/rc8-local-research-report S01 wedge",
+        "validation/rc8-paperfilter"
+      ],
+      "fixed_by_commits": [
+        "f7febf00 (bounded single-sprint bypass, demo-mode only)",
+        "568fbb81+328f0c0b (DeepDive lock design, docs only)"
+      ],
+      "still_open": true,
+      "recommended_contract_fix": "Restore the dropped DeepDive front door (deepdive_requirement_compiler: is_explicit_deepdive_request + build_deepdive_evidence_dag) as the first instance of the workflow-contract router; research triggers never enter PM epic decomposition."
+    },
+    {
+      "id": "F-CLASS-03",
+      "name": "Epic over-decomposition for small artifact tasks",
+      "category": "planner",
+      "description": "Bounded single-artifact tasks are decomposed into 5-child engineering epics, multiplying every orchestration risk by 5 and adding PRD/architecture gates the task does not need.",
+      "symptoms": [
+        "single report request becomes 5 sprints",
+        "30-min timeouts with the epic still on child 1",
+        "oversize epic noted in paperfilter validation"
+      ],
+      "representative_runs": [
+        "paperfilter validation",
+        "local-research-report validation",
+        "live web research demo 2026-06-30"
+      ],
+      "fixed_by_commits": [
+        "f7febf00 (SOLAR_DEMO_REPORT_MODE / SOLAR_FORCE_SINGLE_SPRINT honored in should_epic_decompose_request)"
+      ],
+      "still_open": true,
+      "recommended_contract_fix": "Workflow contract declares its own stage list; epic decomposition becomes an explicit workflow kind with an admission rule (size/scope threshold), not the default for everything."
+    },
+    {
+      "id": "F-CLASS-04",
+      "name": "Operator/capsule/task_type admission mismatch",
+      "category": "capsule",
+      "description": "The task_type submitted to capsule admission is derived from the wrong authority (logical-operator name, freeform label, alias) instead of the resolved capsule's admitted set. Four distinct instances: analysis->audit_inventory, tests->implementation, implementationworker (logical-op name), logical-op-map vs resolved-audit-capsule.",
+      "symptoms": [
+        "admission_failed: task_type not allowed: <x>",
+        "operator_pool_submit_failed followed by silent pane fallback pane_not_idle",
+        "node stuck assigned with no escalation"
+      ],
+      "representative_runs": [
+        "rc8 codex E2E 2026-06-29 (analysis)",
+        "rc8 live run (tests) before 713201b0",
+        "rsi-demo v1 81b566e9",
+        "rsi-demo v3 7b880653"
+      ],
+      "fixed_by_commits": [
+        "5f994ae7/fbb5ab6e",
+        "713201b0/d9dc0ab4",
+        "a3d39ca2",
+        "34d5c921"
+      ],
+      "still_open": false,
+      "recommended_contract_fix": "Single source of truth: dispatch task_type comes from the workflow contract stage entry, validated at compile time against the capsule's task_type_in set. A non-admitted type is a compile error, never a runtime pane fallback."
+    },
+    {
+      "id": "F-CLASS-05",
+      "name": "Artifact/report node bound to implementation patch-diff proof",
+      "category": "proof",
+      "description": "Nodes whose write_scope is data/report artifacts only (json/md/html) get bound to cap.requirement-compiler-implementation whose proof contract requires patch_diff + patch_within_scope, which a no-code node can never satisfy.",
+      "symptoms": [
+        "S1-patch_diff_not_emitted.json reason=patch_diff_not_emitted_no_write_scope_targets",
+        "proof gate FAIL on proof.patch_diff_exists for a report node",
+        "repair budget exhausted, node terminal failed, downstream skipped"
+      ],
+      "representative_runs": [
+        "rsi-demo v7 bf66d46b",
+        "ba1dd657-era research-node misbind (rc5)",
+        "s2a-capability-misbinding (benchmark research -> perf-debug capsule)"
+      ],
+      "fixed_by_commits": [
+        "fe2a7d69 (bounded-mode only)",
+        "ba1dd657 (earlier, different layer)"
+      ],
+      "still_open": true,
+      "recommended_contract_fix": "Proof obligations keyed by artifact type in the workflow contract: report/artifact stages carry output_present obligations on their declared artifacts; patch_diff obligations exist only on stages whose contract declares code outputs. Outside bounded mode this is still unfixed."
+    },
+    {
+      "id": "F-CLASS-06",
+      "name": "Missing/undiscoverable patch proof for code tasks",
+      "category": "proof",
+      "description": "Code nodes legitimately require patch proof but the runtime failed three ways: workers did not emit the sidecar, the dispatcher could not discover node-scoped patch filenames, and sidecar-shaped obligations were not honored by the emitter.",
+      "symptoms": [
+        "live smoke fails on missing S1-patch.diff",
+        "repair writes a real patch but evaluator still reports it missing",
+        "false-positive fallback marked patch present from handoff+write_scope"
+      ],
+      "representative_runs": [
+        "integration smoke at 154a1d48",
+        "clean countchars E2E 2026-06-30",
+        "clean E2E 75c79ef1"
+      ],
+      "fixed_by_commits": [
+        "ff35c302/c7783029",
+        "a8203924/d2339f21",
+        "92c5615d"
+      ],
+      "still_open": false,
+      "recommended_contract_fix": "Per-node artifact manifest written by the dispatcher after build/repair; proof evaluation reads the manifest, not filename guesses. Manifest becomes part of the workflow contract's proof section."
+    },
+    {
+      "id": "F-CLASS-07",
+      "name": "Proof obligation mismatch by artifact type",
+      "category": "proof",
+      "description": "The proof-obligation set is derived from the capsule static default rather than from what the stage actually produces; includes research_quality_gate demanding research_eval_json that the flow never produced.",
+      "symptoms": [
+        "research_quality_gate ok=false errors=[research_eval_json_missing:...]",
+        "proof gate demands artifacts the node type cannot produce"
+      ],
+      "representative_runs": [
+        "rsi-demo v5 4c468ea2 (R2)",
+        "rsi-demo v7 bf66d46b"
+      ],
+      "fixed_by_commits": [
+        "8f05dfb7 (marker nodes exempted, bounded mode)",
+        "fe2a7d69"
+      ],
+      "still_open": true,
+      "recommended_contract_fix": "Obligations declared per stage in the contract; the compiler rejects a stage whose obligations reference artifacts not in the stage's declared outputs or gate inputs."
+    },
+    {
+      "id": "F-CLASS-08",
+      "name": "Evaluator capacity / singleton contention / human-review gate",
+      "category": "evaluator",
+      "description": "Eval dispatch has no capacity model: zero evaluators caused infinite silent retries; a busy singleton evaluator was classified as absent and consumed the escalation budget; escalation lands on needs_human_review which dependency-blocks the whole DAG.",
+      "symptoms": [
+        "246x graph_eval_dispatch_failed reason=no_available_evaluator",
+        "eval_dispatch_failures 8/8 last_eval_reason=evaluator_temporarily_busy",
+        "needs_human_review terminalizes all downstream nodes"
+      ],
+      "representative_runs": [
+        "Run D 083ff55f",
+        "codex E2E ce61db90",
+        "rsi-demo v2 247c1aea",
+        "rsi-demo v10"
+      ],
+      "fixed_by_commits": [
+        "62e0c9ac/0344d159",
+        "703e6c27/ec8caff1",
+        "5ba3bdee",
+        "1f99dd25 (bounded-mode auto-resolution)"
+      ],
+      "still_open": true,
+      "recommended_contract_fix": "Contract declares evaluator gates per stage including gate kind (llm-eval vs deterministic), capacity requirement, wait-vs-escalate policy, and whether human-review blocks dependents. Deterministic gates (research eval-artifacts) replace LLM evaluators where the contract allows."
+    },
+    {
+      "id": "F-CLASS-09",
+      "name": "Sticky auto-resolution failure",
+      "category": "evaluator",
+      "description": "A policy decision (auto-resolved warning-pass) was stored as a status value that other subsystems (quality gate, repair path, reconcile) could clobber via direct status writes, so the decision did not survive closeout.",
+      "symptoms": [
+        "passed_with_review_warning flips to failed_review with no new content verdict",
+        "_start_node_repair_from_eval_fail direct-writes status bypassing rank guard",
+        "auto-resolution event fires repeatedly"
+      ],
+      "representative_runs": [
+        "rsi-demo v5 4c468ea2",
+        "rsi-demo v6 489d9efa (owner-paused)"
+      ],
+      "fixed_by_commits": [
+        "9dd2d5ff (insufficient)",
+        "8f05dfb7 (marker-is-authority)"
+      ],
+      "still_open": true,
+      "recommended_contract_fix": "Never live-verified end-to-end. Structural fix: gate decisions are append-only ledger records owned by the contract runner; node status is a projection of the ledger, and no subsystem writes status directly."
+    },
+    {
+      "id": "F-CLASS-10",
+      "name": "Mechanical evaluator FAIL (missing gate input) mistaken for content FAIL",
+      "category": "evaluator",
+      "description": "An evaluator verdict of FAIL whose only cause is a missing mechanical input (research_eval_json) is indistinguishable, in the stored verdict, from a genuine content/evidence failure.",
+      "symptoms": [
+        "verdict=FAIL with failed_conditions=[research_quality_gate] only and acceptance D1/D2/D3 all PASS",
+        "repair triggered against valid content"
+      ],
+      "representative_runs": [
+        "rsi-demo v5 archived sidecar R2-eval.repair1.20260703T072800Z.json"
+      ],
+      "fixed_by_commits": [
+        "8f05dfb7 (_is_genuine_content_eval_fail predicate, bounded mode)"
+      ],
+      "still_open": true,
+      "recommended_contract_fix": "Eval verdict schema must separate verdict_kind: content|mechanical|infrastructure, set by the gate runner, not inferred afterwards by string inspection."
+    },
+    {
+      "id": "F-CLASS-11",
+      "name": "Content evaluator FAIL on closeout/evidence nodes (true positives)",
+      "category": "quality",
+      "description": "Builders underperform on review/evidence/closeout nodes (stale handoff, malformed YAML); the evaluator correctly fails them. Repeated across Run F N3, Run G S3, gap register G14.",
+      "symptoms": [
+        "closeout node fails all acceptance criteria while upstream products are sound",
+        "malformed review_decision.yaml"
+      ],
+      "representative_runs": ["Run F 214d41bf N3", "Run G 0f845c74 S3"],
+      "fixed_by_commits": [
+        "56079fd6/9f2d7f35 (structured-output validation, verified Run H)"
+      ],
+      "still_open": true,
+      "recommended_contract_fix": "Closeout stages get deterministic validator commands in the contract (parse YAML/JSON, freshness checks) so builders self-check before eval; the class narrows but builder prompt quality remains a quality track."
+    },
+    {
+      "id": "F-CLASS-12",
+      "name": "Repair lifecycle race",
+      "category": "proof",
+      "description": "Repair, eval, and parent-closure run concurrently without a shared generation: parent graphs terminalize during active repair; duplicate repair builders dispatch for one node; direct status writes bypass the state machine.",
+      "symptoms": [
+        "parent terminalized while repair/re-eval active",
+        "multiple builder results for the same repair window",
+        "failed_review written directly"
+      ],
+      "representative_runs": [
+        "integration smoke after 92c5615d",
+        "clean E2E 75c79ef1",
+        "rsi-demo v5"
+      ],
+      "fixed_by_commits": [
+        "cd528d0a",
+        "714eb781/d00903ab (single-flight guard)",
+        "8f05dfb7 (choke-point guard)"
+      ],
+      "still_open": true,
+      "recommended_contract_fix": "Live repair has never been exercised end-to-end in a green run. Contract runner owns a per-node generation counter; every eval/repair/closure actor must present the current generation to write."
+    },
+    {
+      "id": "F-CLASS-13",
+      "name": "Stale eval generation / stale sidecar race",
+      "category": "evaluator",
+      "description": "Canonical <node>-eval.json/md files are keyed only by node, so late pre-repair evaluator output or scheduler doctor backfill repopulates them after repair and reconcile treats stale evidence as current.",
+      "symptoms": [
+        "eval JSON generated_by=graph_scheduler.doctor generation_mode=repair_backfill postdating repair",
+        "STALE_ARCHIVED eval_generation_mismatch 0!=1",
+        "repaired node failed by pre-repair evidence"
+      ],
+      "representative_runs": [
+        "codex E2E ce61db90",
+        "clean E2E 75c79ef1",
+        "rsi-demo v7 (mismatch archive firing correctly)"
+      ],
+      "fixed_by_commits": ["70a7b914/d09e1ed0", "714eb781/d00903ab"],
+      "still_open": false,
+      "recommended_contract_fix": "Generation-stamped eval artifacts are now enforced; the contract schema should make eval_generation a required field of every gate record so new gates cannot regress."
+    },
+    {
+      "id": "F-CLASS-14",
+      "name": "Wrapper epic observation bug",
+      "category": "wrapper",
+      "description": "The live E2E wrapper watched only the parent epic status and could not see child-sprint node states, so epic runs looked like opaque hangs.",
+      "symptoms": [
+        "30-minute polls showing only parent active",
+        "no per-child node/operator visibility"
+      ],
+      "representative_runs": ["paperfilter validation"],
+      "fixed_by_commits": [
+        "c8bda26e (scripts/live_codex_epic_status.py + 231 tests)"
+      ],
+      "still_open": false,
+      "recommended_contract_fix": "Wrapper reads the same contract the runtime executes: expected stages, artifacts, and terminal states come from the workflow contract file, not wrapper-side heuristics."
+    },
+    {
+      "id": "F-CLASS-15",
+      "name": "Wrapper validation timing race",
+      "category": "wrapper",
+      "description": "Artifact validation fired on file presence while the producing node was still reviewing, validating mid-draft content (transient TODO) 18ms before the final write.",
+      "symptoms": [
+        "PLACEHOLDER_CONTENT: found 'TODO' while final file is clean",
+        "VALIDATOR_FAILED with producers still active"
+      ],
+      "representative_runs": ["rsi-demo v8 c2ec65ca"],
+      "fixed_by_commits": [
+        "fd83ee51 (producer-completion gate + file stability + INCOMPLETE state)"
+      ],
+      "still_open": false,
+      "recommended_contract_fix": "Contract declares per-stage terminal states; validators run only when the producing stage is terminal. Verified live in v9 (47 polls pending, no premature fire)."
+    },
+    {
+      "id": "F-CLASS-16",
+      "name": "Workspace/workdir artifact-root mismatch",
+      "category": "wrapper",
+      "description": "Artifact root is a convention, not a contract: planner emits write_scope with or without workspace/ prefix, builder cwd is the sprint workdir, wrapper expects the shared workspace; valid artifacts get reported missing.",
+      "symptoms": [
+        "expected_artifacts_missing while validator passes on sprints/<sid>/workdir/...",
+        "deliverables landing in harness root (earlier form)"
+      ],
+      "representative_runs": [
+        "rsi-demo v9 fbce668c",
+        "pre-fix multi-task runs (a846252b era)"
+      ],
+      "fixed_by_commits": [
+        "a846252b/c62ad1da (per-sprint workdir default)",
+        "1240285a (wrapper multi-root resolution; runtime writer intentionally unchanged)"
+      ],
+      "still_open": true,
+      "recommended_contract_fix": "artifact_roots is a first-class contract field (canonical root + allowed aliases + publish/export step); the runtime writer, not just the wrapper, must honor it. Runtime-side normalization is still owner-gated."
+    },
+    {
+      "id": "F-CLASS-17",
+      "name": "Route-proof missing for executed child",
+      "category": "wrapper",
+      "description": "Runs that die before the route-proof capture stage produce no provider evidence at all, so failed runs cannot even prove what ran.",
+      "symptoms": [
+        "route-proof ABSENT because S3/S4 validate node never ran",
+        "providers_observed=[] on aborted runs"
+      ],
+      "representative_runs": ["rsi-demo v1/v3/v7/v8", "S01 wedge runs"],
+      "fixed_by_commits": [
+        "2db50662 (route_proof module)",
+        "86643597 (artifact-mode gate)"
+      ],
+      "still_open": true,
+      "recommended_contract_fix": "Route records must be emitted per stage-execution (append-only), not assembled by a terminal node; a run killed at any point still has complete route evidence for every stage that ran."
+    },
+    {
+      "id": "F-CLASS-18",
+      "name": "Route-proof provider violation / route-truth artifacts lie",
+      "category": "wrapper",
+      "description": "Selected provider was not a hard contract (Run A: labeled Claude, ran OpenAI). Later, execution was correct but artifacts lied: physical-plan selected_operator_id names a Claude operator, host_type=claude_code_session on codex operators.",
+      "symptoms": [
+        "run labeled one provider executes another",
+        "physical-plan operator differs from runstate provider",
+        "misleading host_type labels"
+      ],
+      "representative_runs": [
+        "Run A (TLS explainer)",
+        "clean E2E 75c79ef1 finding 3",
+        "a8203924 green-run gap list"
+      ],
+      "fixed_by_commits": [
+        "cb18f8b0/2155c1be",
+        "27fdcfc4/94922d9a+b787e9be",
+        "8ad8cfb2/562b652d (fail closed)",
+        "30169c80 (partial attribution sync)"
+      ],
+      "still_open": true,
+      "recommended_contract_fix": "Route-proof expectations declared in the contract (allowed_providers per stage); plan artifacts must label planner suggestions as suggestions; preflight blocks the run if any stage cannot resolve inside the allowed set."
+    },
+    {
+      "id": "F-CLASS-19",
+      "name": "Model alias / operator registry mismatch",
+      "category": "installer",
+      "description": "Codex physical operators existed but model-registry aliases were missing; registry entries are mislabeled (codex operator tagged provider=anthropic), enabled-but-deprecated, or enabled-with-missing-CLI.",
+      "symptoms": [
+        "validate-main gpt-5.5 fails pre-fix",
+        "planner-role operator with wrong provider label selected for builds",
+        "gemini operators exit 1 but stay selectable"
+      ],
+      "representative_runs": ["integration smoke pre-154a1d48", "Run G caveat"],
+      "fixed_by_commits": [
+        "154a1d48/2523d7b6",
+        "23b9039f/09d47d0e (health)",
+        "7f33eb67/f550b7d4 (retire deprecated opus evaluators)"
+      ],
+      "still_open": true,
+      "recommended_contract_fix": "Registry hygiene (G7/G8): health is the source of truth; deprecated is enforced; dead config (operator-model-selections.json) removed. Contract compiler validates every stage's logical operator against a healthy physical operator at preflight."
+    },
+    {
+      "id": "F-CLASS-20",
+      "name": "Auth preservation issue",
+      "category": "installer",
+      "description": "Isolated sandbox E2E lost Codex auth state; fixed by preserving auth files into the sandbox. Auth file contents were not inspected for this corpus; only existence is relevant.",
+      "symptoms": ["codex CLI unauthenticated inside isolated harness"],
+      "representative_runs": ["isolated live E2E bring-up (f01e81e2 era)"],
+      "fixed_by_commits": ["f26ce84b/8310a149"],
+      "still_open": false,
+      "recommended_contract_fix": "Preflight check per provider: auth present and valid before run start (fail-closed with actionable reason)."
+    },
+    {
+      "id": "F-CLASS-21",
+      "name": "Installed harness contamination",
+      "category": "cleanup",
+      "description": "Clean-proof runs silently used the installed ~/.solar harness: operator shells fell back to ~/.solar/bin/solar-harness; pytest imported installed lib producing false failures; sync scripts clobber local config; builder artifacts appear in the repo root.",
+      "symptoms": [
+        "command-not-found then global fallback in operator shell",
+        "pytest failures whose tracebacks import ~/.solar/harness/lib",
+        "untracked deliverables (countletters.py, utils.py) in the repo working tree"
+      ],
+      "representative_runs": [
+        "clean E2E from a85adc43",
+        "2a8ab9db verification note",
+        "repo root state observed 2026-07-06"
+      ],
+      "fixed_by_commits": ["cb2cc504/63769097", "b20e44d3"],
+      "still_open": true,
+      "recommended_contract_fix": "Contract runner refuses to start unless HARNESS_DIR/SPRINTS_DIR/PYTHONPATH resolve inside the declared harness; artifact roots must be inside the workflow's declared roots (never the repo checkout)."
+    },
+    {
+      "id": "F-CLASS-22",
+      "name": "Process cleanup / orphan coordinator / watchdog / tmux residue",
+      "category": "cleanup",
+      "description": "Wrapper cleanup kills its tmux sessions but not coordinator/watchdog daemons; the watchdog respawns the coordinator; orphan codex_operator processes and stale schedulers burn quota after runs end.",
+      "symptoms": [
+        "coordinator survives first kill (respawned)",
+        "codex_operator.py residue in cleanup listings",
+        "3 leftover multi-task schedulers found days later"
+      ],
+      "representative_runs": [
+        "48d4a770 cleanup listing",
+        "rsi-demo v7/v8/v9 manual PID kills",
+        "pools-stopped correction 2026-06-28"
+      ],
+      "fixed_by_commits": [],
+      "still_open": true,
+      "recommended_contract_fix": "Run-scoped process registry: every daemon started for a run registers (pid, role, run_id); teardown kills by registry, watchdog respects a run-terminal marker. This has never had a dedicated fix."
+    },
+    {
+      "id": "F-CLASS-23",
+      "name": "Dashboard readiness gap / status projection untruth",
+      "category": "dashboard",
+      "description": "Dashboard/product projections disagree with graph truth: parent status active after all nodes passed; usage shows 0 during real model calls; operator state split-brain between status-server and operator_runtime; demo Track A blocked on runtime.",
+      "symptoms": [
+        "status.json active while task_graph terminal passed",
+        "Usage 0 with real Codex calls",
+        "UI shows leased operator the selector already recovered"
+      ],
+      "representative_runs": [
+        "a8203924 green run gap list",
+        "gap register G6/P0-4",
+        "demo readiness Track A (evidence lost)"
+      ],
+      "fixed_by_commits": [
+        "d2edac3d (intake timeout)",
+        "dashboard overhaul chain (legibility)"
+      ],
+      "still_open": true,
+      "recommended_contract_fix": "Dashboard renders the contract: stage list with dashboard_labels, gate states from the ledger, route proof, and artifact manifest. No independent recomputation of operator/run state."
+    },
+    {
+      "id": "F-CLASS-24",
+      "name": "Setup wizard / installer integration gap",
+      "category": "installer",
+      "description": "feature/setup-wizard is behind upstream with 0 commits ahead and not integrated; stale-harness sync, persona symlink, node_modules preflight, PEP-668, macOS bootstrap, WSL2 first-run each broke artifact installs; browser dashboard can bypass the Electron preload gate until a server-side setup gate exists.",
+      "symptoms": [
+        "new artifact serves old runtime",
+        "macOS/Windows build failures on private symlink",
+        "fresh WSL distro missing, port null"
+      ],
+      "representative_runs": [
+        "Desktop Build #20",
+        "friend's macOS rc.8 report",
+        "cross-OS CI cycle"
+      ],
+      "fixed_by_commits": [
+        "a10dfcfe",
+        "446a1c5b",
+        "c48507fb",
+        "1d9fddf0",
+        "e2749449"
+      ],
+      "still_open": true,
+      "recommended_contract_fix": "Keep as a separate packaging track (no-touch for the workflow-contract work); artifact acid tests per OS remain the release gate."
+    },
+    {
+      "id": "F-CLASS-25",
+      "name": "Report quality / boilerplate / shallow synthesis",
+      "category": "quality",
+      "description": "The deep-research synthesizer emits hardcoded boilerplate as the report body regardless of topic; PM scaffold PRDs lack most schema sections; evaluator acceptance criteria drift stricter than the user prompt.",
+      "symptoms": [
+        "report body identical across topics",
+        "prd.md missing 7 of 11 sections",
+        "eval fails on requirements the prompt never made"
+      ],
+      "representative_runs": [
+        "deepresearch-synth finding (lib/research/cli.py)",
+        "S01 PRD true-negative",
+        "countchars A4 UTF-8-path overreach"
+      ],
+      "fixed_by_commits": [],
+      "still_open": true,
+      "recommended_contract_fix": "Content quality is gated per stage by deterministic checks the contract names (citation accuracy, unsupported-claim rate via research eval-artifacts); the synthesizer boilerplate must be fixed before the DeepDive engine fronts the demo."
+    },
+    {
+      "id": "F-CLASS-26",
+      "name": "Self-incriminating report/demo wording",
+      "category": "quality",
+      "description": "Generated deliverables contain wording that fails validators or undermines the demo: a report sentence containing the word placeholder tripped the placeholder regex; transient TODO drafts; deliverables admitting 'No web access granted'.",
+      "symptoms": [
+        "validator false-positive on self-referential cleanliness claims",
+        "TODO visible in mid-draft",
+        "deliverable text admits missing capability"
+      ],
+      "representative_runs": [
+        "rsi-demo v4 012e6eb0",
+        "rsi-demo v8 c2ec65ca",
+        "Run D briefing"
+      ],
+      "fixed_by_commits": [
+        "9510c88e (validator side)",
+        "fd83ee51 (timing side)"
+      ],
+      "still_open": true,
+      "recommended_contract_fix": "Contract's export stage includes a wording lint (no capability disclaimers in customer-facing artifacts unless the run is a declared blocker report); builders receive the validator's exact token list in their stage brief."
+    },
+    {
+      "id": "F-CLASS-27",
+      "name": "No live workers / operational capacity invisible",
+      "category": "cleanup",
+      "description": "Configured operators are not running workers; selecting a runtime does not guarantee live capacity; runs queue forever on worker_capacity_exhausted.",
+      "symptoms": [
+        "worker_capacity_exhausted with ~30 idle configured operators",
+        "multi_task_session missing, 0 live workers",
+        "builder pane needs_respawn loop"
+      ],
+      "representative_runs": ["50-sprint survey 2026-06-27"],
+      "fixed_by_commits": [
+        "0e0429ef/2729e974",
+        "a1105f82/c710b732 (coordinator self-complete)"
+      ],
+      "still_open": true,
+      "recommended_contract_fix": "Preflight includes live-capacity check per stage role; the contract runner may auto-start the pool for the declared roles or fail-closed with remediation."
+    },
+    {
+      "id": "F-CLASS-28",
+      "name": "Coordinator/runtime supervision faults",
+      "category": "cleanup",
+      "description": "Self-complete tick segfaulted (rc=139, Python 3.13 readline/locale) with unusable failure evidence; stale operator leases with dead PIDs; fresh eval assignments closed by stale results; S01 role-pool inflight suppression had no timeout.",
+      "symptoms": [
+        "rc=139 with empty output",
+        "runtime_state=running with dead PIDs",
+        "planner_role_pool_inflight forever"
+      ],
+      "representative_runs": ["204f7cfd", "S01 wedge", "clean E2E chain"],
+      "fixed_by_commits": [
+        "83575bab/8ad0da81",
+        "792f6a2b/fcee2d97",
+        "73387de9/0b715b52",
+        "2a8ab9db/0c66ae6a",
+        "8341fc5a (det-only)"
+      ],
+      "still_open": true,
+      "recommended_contract_fix": "Every in-flight suppression/lease/assignment carries a heartbeat + bounded timeout; supervision failures write structured snapshots. 8341fc5a is deterministic-verified only, never live-revalidated."
+    },
+    {
+      "id": "F-CLASS-29",
+      "name": "Gate consumes node status, not verdict content",
+      "category": "proof",
+      "description": "Review/parent gates certified when member nodes reached 'passed' status, never reading the verdict artifacts those nodes produced - so a critic verdict=block or verifier decision=FAIL was ignored and a sprint could auto-close and export against its own reviewers' objections.",
+      "symptoms": [
+        "critic node passed while contradictions.jsonl gate_verdict=block",
+        "verifier node passed while verifier_decision.json decision=FAIL",
+        "transient pass auto-closed and exported with coverage=0 before revert"
+      ],
+      "representative_runs": ["LDES de49b5a4 (2026-06-23)"],
+      "fixed_by_commits": [
+        "5fcff602",
+        "983ce35a (independent, codex branch)",
+        "949d3e3c (backbone re-land)"
+      ],
+      "still_open": false,
+      "recommended_contract_fix": "Gates read ledger verdict records (author+content), fail-closed when an expected verdict artifact is missing; schema-locked so new gates cannot regress (R4)."
+    },
+    {
+      "id": "F-CLASS-30",
+      "name": "Verdict provenance not structural (self-graded / doctor-backfilled evals)",
+      "category": "evaluator",
+      "description": "The structured eval.json that gates consume could be written by the scheduler doctor (repair_backfill) or reflect a self-graded builder verdict with no independent eval report - a latent hollow-pass vector, safe only under manual .md review.",
+      "symptoms": [
+        "eval.json generation_mode=repair_backfill",
+        "thin eval.json (reasons null, has_evidence false) while eval.md holds the real reasoning",
+        "executor node with verdict but no independent eval report"
+      ],
+      "representative_runs": [
+        "Layer-0 S3",
+        "expense-report S1",
+        "research3 S1 (mode=None slipped the narrow fix)",
+        "claude sonnet run 9dfb3dae (thin JSONs)"
+      ],
+      "fixed_by_commits": [
+        "d61d92a2 (narrow)",
+        "4df6477d (broad, two entry points)"
+      ],
+      "still_open": false,
+      "recommended_contract_fix": "Ledger records carry author, generation, and evidence snapshot; the evaluator writes its own verdict record at eval time; any backfill is flagged and never gate-consumable (R4)."
+    }
+  ]
+}
