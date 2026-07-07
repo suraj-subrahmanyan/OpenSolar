@@ -25,14 +25,20 @@ HOME = Path.home()
 
 
 def _harness_dir() -> Path:
-    raw = os.environ.get("HARNESS_DIR")
+    # HARNESS_DIR > SOLAR_HARNESS_DIR > source tree (round-4 G7: align with the
+    # graph_scheduler rule so a SOLAR_HARNESS_DIR-only run reads/writes the same
+    # sprints dir the gates and route writers use). The nothing-set fallback
+    # stays the SOURCE TREE, never ~/.solar — a dev checkout must not touch the
+    # live runtime (lane3-spec-mismatches.md D11).
+    raw = os.environ.get("HARNESS_DIR") or os.environ.get("SOLAR_HARNESS_DIR")
     return Path(raw) if raw else Path(__file__).resolve().parents[1]
 
 
 HARNESS_DIR = _harness_dir()
 if str(HARNESS_DIR / "lib") not in sys.path:
     sys.path.insert(0, str(HARNESS_DIR / "lib"))
-SPRINTS_DIR = HARNESS_DIR / "sprints"
+# HARNESS_SPRINTS_DIR override matches graph_scheduler:49 (round-4 G7).
+SPRINTS_DIR = Path(os.environ.get("HARNESS_SPRINTS_DIR") or (HARNESS_DIR / "sprints"))
 
 try:  # Lane 3 gate ledger (R4/R5); optional so a partial install never breaks dispatch
     import gate_ledger as _gate_ledger

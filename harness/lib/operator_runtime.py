@@ -25,6 +25,20 @@ except Exception:  # pragma: no cover
     _gate_ledger = None
 
 
+def _route_sprints_dir() -> Path:
+    """Single shared sprints-dir resolution for route records (round-4 G7).
+
+    The ledger the route writer appends to must be the ledger the gates read —
+    gate_ledger.default_sprints_dir() (HARNESS_SPRINTS_DIR > HARNESS_DIR >
+    SOLAR_HARNESS_DIR > install default) is that shared rule."""
+    if _gate_ledger is not None:
+        try:
+            return Path(_gate_ledger.default_sprints_dir())
+        except Exception:
+            pass
+    return HARNESS_DIR / "sprints"
+
+
 def _ledger_route(sprint_id: str, node_id: str, task_id: str, phase: str,
                   route: Dict[str, Any]) -> None:
     """Append a route record to the sprint's gate ledger.
@@ -37,14 +51,21 @@ def _ledger_route(sprint_id: str, node_id: str, task_id: str, phase: str,
         if not _gate_ledger.enabled():
             return
         _gate_ledger.append_route_record(
-            HARNESS_DIR / "sprints", sprint_id,
+            _route_sprints_dir(), sprint_id,
             node_id=node_id, task_id=task_id, phase=phase, route=route,
         )
     except Exception:
         pass
 
 HOME = Path.home()
-HARNESS_DIR = Path(os.environ.get("HARNESS_DIR", HOME / ".solar" / "harness"))
+# HARNESS_DIR > SOLAR_HARNESS_DIR > install default — the graph_scheduler rule
+# (round-4 G7: operator_runtime ignored SOLAR_HARNESS_DIR and could land run
+# state in the live ~/.solar/harness during sandboxed runs).
+HARNESS_DIR = Path(
+    os.environ.get("HARNESS_DIR")
+    or os.environ.get("SOLAR_HARNESS_DIR")
+    or HOME / ".solar" / "harness"
+)
 OPERATOR_LEASE_DIR = HARNESS_DIR / "run" / "operator-leases"
 OPERATOR_STATUS_DIR = HARNESS_DIR / "run" / "operator-status"
 OPERATOR_INBOX_DIR = HARNESS_DIR / "run" / "operator-inbox"

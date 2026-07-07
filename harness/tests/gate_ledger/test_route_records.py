@@ -29,6 +29,10 @@ OP = "mini-codex-gpt55-medium-builder-1"
 @pytest.fixture()
 def sandbox(tmp_path, monkeypatch):
     monkeypatch.setenv("SOLAR_GATE_LEDGER", "1")
+    # Route records resolve via gate_ledger.default_sprints_dir() (round-4 G7)
+    # — env-driven, so the sandbox must be pinned in the environment too.
+    monkeypatch.setenv("HARNESS_DIR", str(tmp_path))
+    monkeypatch.delenv("HARNESS_SPRINTS_DIR", raising=False)
     monkeypatch.setattr(opr, "HARNESS_DIR", tmp_path)
     monkeypatch.setattr(opr, "OPERATOR_RESULTS_DIR", tmp_path / "run" / "operator-results")
     return tmp_path
@@ -68,6 +72,7 @@ def test_write_result_emits_completed_route_record(sandbox):
 
 def test_write_result_flag_off_writes_no_route_record(tmp_path, monkeypatch):
     monkeypatch.setenv("SOLAR_GATE_LEDGER", "0")
+    monkeypatch.setenv("HARNESS_DIR", str(tmp_path))
     monkeypatch.setattr(opr, "HARNESS_DIR", tmp_path)
     monkeypatch.setattr(opr, "OPERATOR_RESULTS_DIR", tmp_path / "run" / "operator-results")
     opr.write_result(

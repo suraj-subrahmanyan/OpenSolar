@@ -171,6 +171,27 @@ Known audit bounds: the scan is receiver-shaped (`node`/`nodes[...]`/`live`/`ids
 mutations through a variable bound from `node_results` under a different name are likewise
 invisible. The explicit allowlist review is the human backstop.
 
+## D11 — one sprints-dir resolution for Lane-3 evidence; dispatcher keeps its source-tree fallback (round-4 G7)
+
+Three resolvers disagreed when `HARNESS_DIR` was unset (route records could land in the live
+`~/.solar/harness/sprints` while gates read elsewhere). Now all Lane-3 evidence paths resolve by
+the graph_scheduler rule: `HARNESS_SPRINTS_DIR > HARNESS_DIR > SOLAR_HARNESS_DIR > install
+default`. `operator_runtime._ledger_route` goes through `gate_ledger.default_sprints_dir()`;
+the dispatcher's `_harness_dir()`/`SPRINTS_DIR` honor `SOLAR_HARNESS_DIR` and
+`HARNESS_SPRINTS_DIR`; `operator_runtime.HARNESS_DIR` honors `SOLAR_HARNESS_DIR`.
+
+Two honest bounds:
+
+- **Flag-off visibility.** This is a flag-off-visible path change in the env combos that were
+  previously split-brained (`SOLAR_HARNESS_DIR`-only, `HARNESS_SPRINTS_DIR` for the dispatcher):
+  the modules now agree with graph_scheduler's long-shipped resolution instead of diverging
+  from it. The flag-off parity driver pins `HARNESS_DIR`, where behavior is bit-identical.
+- **Nothing-set combo.** With NO env set, the dispatcher still falls back to the SOURCE TREE
+  (`Path(__file__).parents[1]`), not `~/.solar/harness` — a dev checkout must never write into
+  the live runtime. In the installed tree the two fallbacks coincide (`~/.solar/harness` IS the
+  source tree), so the residual divergence exists only in dev checkouts with no env, which the
+  resolution test documents and does not exercise.
+
 ## Pre-existing reds (proven unchanged)
 
 - `harness/tests/graph/test_multi_task_runner_status_surface.py` — collection ERROR, identical
