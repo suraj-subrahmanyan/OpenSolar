@@ -1,8 +1,8 @@
 {
   "id": "F-CLASS-21",
   "class": 21,
-  "title": "An observed write outside the declared artifact roots blocks the proof gate",
-  "retires": "F-CLASS-21 artifact half (installed-fallback / repo-root contamination); R6/AC-R6.3",
+  "title": "A manifest carrying an ARTIFACT_ROOT_VIOLATION blocks the proof gate (CONSULT half only)",
+  "retires": "F-CLASS-21 artifact half, CONSULT ONLY (round-4 G5: no live observed-writes producer exists; AC-R6.3 is NOT enforced end-to-end in production); R6/AC-R6.3 partial",
   "release_proof_level": "P1.5",
   "mode": "gate_replay",
   "driver": "drivers/f_class_21_root_violation_blocks.py",
@@ -30,5 +30,5 @@
       "SOLAR_GATE_LEDGER": "0"
     }
   },
-  "notes": "GREEN: the manifest records ARTIFACT_ROOT_VIOLATION and _evaluate_proof_obligations blocks even though the declared obligation is satisfied. RED: contamination is invisible and the gate passes. (The path-selection half of class 21 is Lane 0.5's preflight, already verified.) gate_replay mode: the driver exercises the REAL scheduler/dispatcher/ledger seams inside the sandbox HARNESS_DIR. GREEN env sets SOLAR_GATE_LEDGER=1 (the Lane 3 fix); RED injects SOLAR_GATE_LEDGER=0 (the pre-contract world) and the same expect must fail — proving the scenario discriminates the class, not the plumbing."
+  "notes": "CONSULT HALF ONLY (round-4 G5). The driver hand-builds the manifest with observed=[stray] because NO live producer of observed writes exists: node_verdict's write_manifest call passes no observed=, operator result.json carries no artifact list, and there is no workspace write-scan — so in production violations is always [] and AC-R6.3 does not fire. What this scenario DOES prove, red-green: a manifest carrying ARTIFACT_ROOT_VIOLATION blocks _evaluate_proof_obligations even though the declared obligation is satisfied (GREEN), and with SOLAR_GATE_LEDGER=0 the contamination is invisible and the gate passes (RED). The catalog row is 'partial' with the missing producer named in pending_remainder; the path-selection half of class 21 is Lane 0.5's preflight (verified)."
 }

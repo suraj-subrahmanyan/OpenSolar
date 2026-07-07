@@ -190,10 +190,11 @@
     {
       "class": 21,
       "name": "Installed-harness contamination",
-      "status": "verified_here",
+      "status": "partial",
       "scenario": "F-CLASS-21-root-violation-blocks.scenario.json",
       "required_seam": "artifact_manifest root containment (ARTIFACT_ROOT_VIOLATION) + Lane 0.5 preflight path self-consistency",
-      "note": "R6/AC-R6.3 artifact half. Retired by manifest ARTIFACT_ROOT_VIOLATION blocking the proof gate; the path-selection half is Lane 0.5's preflight (verified). Red-green proven by the gate_replay engine mode: fault = SOLAR_GATE_LEDGER=0 (the pre-contract world)."
+      "note": "R6/AC-R6.3 artifact half — CONSULT ONLY (round-4 G5 downgrade from verified_here; the round-3 verified_here claim was a tautology: the driver hand-built the violation the dispatcher can never produce). Verified: manifest ARTIFACT_ROOT_VIOLATION entries block the proof gate (gate_replay red-green, fault = SOLAR_GATE_LEDGER=0). NOT verified: any live producer of observed writes. The path-selection half is Lane 0.5's preflight (verified).",
+      "pending_remainder": "AC-R6.3 live-path enforcement: the dispatcher's write_manifest call passes no observed= (node_verdict has no source of the paths the node actually wrote — operator result.json carries no artifact list, and no workspace write-scan exists), so violations is always [] in production. The scenario proves the CONSULT half only: a manifest carrying an ARTIFACT_ROOT_VIOLATION blocks the proof gate. Remainder owner: the lane that adds an observed-writes producer (operator result artifact lists or a post-dispatch workspace scan) must wire observed= through node_verdict and prove AC-R6.3 end-to-end."
     },
     {
       "class": 22,
@@ -286,7 +287,6 @@
       18,
       19,
       20,
-      21,
       23,
       27,
       28,
@@ -294,7 +294,8 @@
       30
     ],
     "partial": [
-      8
+      8,
+      21
     ],
     "verified_lane_1": [
       1,

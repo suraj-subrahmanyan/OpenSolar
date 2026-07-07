@@ -79,6 +79,37 @@ class TestWorkflowContractGuard:
         assert result is not None
         assert any("WORKFLOW_CONTRACT_STRUCTURE_MISMATCH" in e for e in result["errors"])
 
+    def test_tampered_on_human_review_trips(self):
+        """Round-4 G4 (reviewer tamper probe): flipping block_dependents ->
+        warn_and_continue lets dependents dispatch on un-human-reviewed work.
+        The field is contract-determined (instantiate copies it verbatim from
+        the stage's evaluator_gate) — the guard must compare it."""
+        graph = _contracted_graph()
+        tampered = 0
+        for node in graph["nodes"]:
+            if node.get("on_human_review") == "block_dependents":
+                node["on_human_review"] = "warn_and_continue"
+                tampered += 1
+        assert tampered, "code.cli_smoke must ship block_dependents stages for this probe"
+        result = gnd._workflow_contract_guard(graph)
+        assert result is not None
+        assert any("on_human_review" in e for e in result["errors"])
+
+    def test_removed_on_human_review_trips(self):
+        # instantiate() always copies a shipped policy onto the node, so a
+        # missing field on a policy-shipping contract means the graph was
+        # edited — the raw compare fails closed on the delete too.
+        graph = _contracted_graph()
+        tampered = 0
+        for node in graph["nodes"]:
+            if node.get("on_human_review") == "block_dependents":
+                del node["on_human_review"]
+                tampered += 1
+        assert tampered
+        result = gnd._workflow_contract_guard(graph)
+        assert result is not None
+        assert any("on_human_review" in e for e in result["errors"])
+
     def test_extra_node_trips(self):
         graph = _contracted_graph()
         graph["nodes"].append({"id": "SNEAKY", "depends_on": [], "task_type": "code"})

@@ -3849,7 +3849,20 @@ def _enqueue_source_audit_followup(args: argparse.Namespace, payload: dict) -> d
         else:
             previous_status = nodes[existing].get("status", "pending")
             nodes[existing].update(node)
-            nodes[existing]["status"] = previous_status if str(previous_status).lower() not in {"passed", "failed"} else "pending"
+            reopened_status = previous_status if str(previous_status).lower() not in {"passed", "failed"} else "pending"
+            nodes[existing]["status"] = reopened_status
+            if str(reopened_status).lower() != str(previous_status).lower():
+                # Round-4 G3: reopening a TERMINAL followup node is a node-status
+                # write — record it through the scheduler's audited seam
+                # (flag-gated, best-effort, no-op when SOLAR_GATE_LEDGER is off).
+                try:
+                    graph_scheduler._ledger_transition(
+                        graph, str(node["id"]), str(previous_status), str(reopened_status),
+                        "_enqueue_source_audit_followup",
+                        note="source_audit_followup_reopen",
+                    )
+                except Exception:
+                    pass
             action = "updated"
         graph.setdefault("metadata", {})["deepresearch_source_audit_followup"] = {
             "node_id": node["id"],

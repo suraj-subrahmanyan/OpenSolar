@@ -36,6 +36,30 @@ RUNTIME_BONUS = {
 EVENTS_FILE = HARNESS_DIR / "events" / "all.jsonl"
 SPRINTS_DIR = HARNESS_DIR / "sprints"
 
+try:  # Lane 3 gate ledger (round-4 G3): the quality-gate sweeps write node status
+    import gate_ledger as _gate_ledger
+except Exception:  # pragma: no cover
+    _gate_ledger = None
+
+
+def _ledger_transition(sid: str, node_id: str, from_status: str, to_status: str,
+                       writer: str, note: str | None = None) -> None:
+    """Report an evolution-engine node-status write to the gate ledger.
+
+    No-op unless SOLAR_GATE_LEDGER=1; never raises into the sweep."""
+    if _gate_ledger is None:
+        return
+    try:
+        if not _gate_ledger.enabled():
+            return
+        _gate_ledger.record_status_transition(
+            SPRINTS_DIR, sid, node_id,
+            from_status=from_status or "", to_status=to_status,
+            author_type="policy", writer=writer, note=note,
+        )
+    except Exception:
+        pass
+
 
 def _now() -> str:
     import datetime
@@ -382,6 +406,9 @@ def repair_deepresearch_gates(apply: bool = False, limit: int = 0) -> dict[str, 
                 continue
 
             node["status"] = "reviewing"
+            _ledger_transition(sid, node_id, status, "reviewing",
+                               "repair_deepresearch_gates",
+                               note=f"deepresearch_quality_gate_{gate_status}")
             node["updated_at"] = _now()
             node["quality_gate_repair_requested_at"] = _now()
             node["quality_gate_repair_reason"] = gate_status
@@ -486,6 +513,9 @@ def restore_nonrequired_deepresearch_repairs(apply: bool = False, limit: int = 0
                 continue
 
             node["status"] = original_status
+            _ledger_transition(sid, node_id, current, original_status,
+                               "restore_nonrequired_deepresearch_repairs",
+                               note="quality_gate_not_required_after_classifier_tightening")
             node["updated_at"] = _now()
             node["quality_gate_repair_restored_at"] = _now()
             node["quality_gate_repair_restored_reason"] = "quality_gate_not_required_after_classifier_tightening"

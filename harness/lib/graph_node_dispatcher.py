@@ -25,14 +25,20 @@ HOME = Path.home()
 
 
 def _harness_dir() -> Path:
-    raw = os.environ.get("HARNESS_DIR")
+    # HARNESS_DIR > SOLAR_HARNESS_DIR > source tree (round-4 G7: align with the
+    # graph_scheduler rule so a SOLAR_HARNESS_DIR-only run reads/writes the same
+    # sprints dir the gates and route writers use). The nothing-set fallback
+    # stays the SOURCE TREE, never ~/.solar — a dev checkout must not touch the
+    # live runtime (lane3-spec-mismatches.md D11).
+    raw = os.environ.get("HARNESS_DIR") or os.environ.get("SOLAR_HARNESS_DIR")
     return Path(raw) if raw else Path(__file__).resolve().parents[1]
 
 
 HARNESS_DIR = _harness_dir()
 if str(HARNESS_DIR / "lib") not in sys.path:
     sys.path.insert(0, str(HARNESS_DIR / "lib"))
-SPRINTS_DIR = HARNESS_DIR / "sprints"
+# HARNESS_SPRINTS_DIR override matches graph_scheduler:49 (round-4 G7).
+SPRINTS_DIR = Path(os.environ.get("HARNESS_SPRINTS_DIR") or (HARNESS_DIR / "sprints"))
 
 try:  # Lane 3 gate ledger (R4/R5); optional so a partial install never breaks dispatch
     import gate_ledger as _gate_ledger
@@ -141,6 +147,16 @@ def _workflow_contract_guard(graph: dict[str, Any]) -> dict[str, Any] | None:
                 node_gate = str((node.get("evaluator_gate") or {}).get("kind") or "none")
                 if node_gate != stage_gate:
                     errors.append(f"WORKFLOW_CONTRACT_STRUCTURE_MISMATCH:{node_id}:evaluator_gate.kind")
+                # on_human_review is contract-determined (instantiate copies it
+                # verbatim from the stage's evaluator_gate, never substituted);
+                # a tamper flips readiness/skip semantics for dependents with no
+                # downstream re-check (round-4 G4). Raw compare — instantiate
+                # always copies a shipped policy, so absence on a policy-shipping
+                # contract is itself an edit.
+                stage_review = str((stage.get("evaluator_gate") or {}).get("on_human_review") or "")
+                node_review = str(node.get("on_human_review") or "")
+                if node_review != stage_review:
+                    errors.append(f"WORKFLOW_CONTRACT_STRUCTURE_MISMATCH:{node_id}:on_human_review")
     if not errors:
         return None
     return {
@@ -420,6 +436,7 @@ from graph_scheduler import (  # noqa: E402
     enqueue_ready,
     set_node_status,
     node_status,
+    node_recorded_status,
     mark_node_result,
     parent_ready_check,
     sync_status_cache_from_graph,
@@ -8295,6 +8312,31 @@ def dispatch_ready(graph_path: str, dry_run: bool = False, ttl: int = 900,
     }
 
 
+def _node_policy_passed(graph: dict[str, Any], sid: str, node_id: str) -> bool:
+    """AC-R4.1 hold discriminator (round-4 G1): was the node RECORDED passed?
+
+    node_status() fail-closed-downgrades a passed-without-required-eval node to
+    "reviewing" — and the real v5 shape (handoff present, eval.json missing) is
+    exactly the state that produces the mechanical FAIL the hold exists for, so
+    gating the hold on the effective status bypassed it. Consult the recorded
+    fold first, then the ledger projection (an applied audited pass survives
+    even a graph-side clobber)."""
+    try:
+        if node_recorded_status(graph, node_id) == "passed":
+            return True
+    except Exception:
+        pass
+    try:
+        if (
+            _gate_ledger is not None
+            and _gate_ledger.project_node_status(SPRINTS_DIR, sid, node_id) == "passed"
+        ):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
                  eval_json: str = "", dry_run: bool = False, ttl: int = 900,
                  dispatch_downstream: bool = True, verdict_kind: str = "") -> dict[str, Any]:
@@ -8332,10 +8374,12 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
         and effective_verdict_kind in {"mechanical", "infrastructure"}
         and _ledger_enabled()
         and _gate_ledger.contracted(graph)
-        and node_status(graph, node_id) == "passed"
+        and _node_policy_passed(graph, sid, node_id)
     ):
         # v5 replay (AC-R4.1): a mechanical/infrastructure FAIL must not flip a
-        # policy-passed node — archive the verdict, never apply it.
+        # policy-passed node — archive the verdict, never apply it. Gated on the
+        # RECORDED pass, not node_status(): the fail-closed passed-without-eval
+        # downgrade projects the real v5 shape as "reviewing" (round-4 G1).
         _ledger_record(sid, node_id=node_id, kind="eval_verdict",
                        author={"type": "evaluator"}, verdict="FAIL",
                        verdict_kind=effective_verdict_kind,

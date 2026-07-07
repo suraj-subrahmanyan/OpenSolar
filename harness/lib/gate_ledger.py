@@ -208,11 +208,15 @@ def read_records(
 def project_node_status(sprints_dir: Any, sid: str, node_id: str) -> str:
     """Fold status_transition records into the node's projected status.
 
-    Rules (rank semantics ported from graph_scheduler._status_rank's terminal
-    tier): records with ``applied`` False are ignored (neutralized doctor
-    would-be writes); once a terminal status is reached it absorbs everything
-    except a human-authored record or an explicitly ``reopen``-flagged
-    transition (the scheduler's legacy ``reopening_from_pass`` allowance).
+    Terminal statuses are absorbing against UNRECORDED writes (which, by
+    definition, leave no record here) and against neutralized would-be writes
+    (``applied`` False — the doctor-on-contract shape). Any APPLIED record
+    projects, including terminal→terminal and terminal→non-terminal: applied
+    records exist only via audited writers, so refusing to fold one would make
+    the projection contradict a real recorded write (the round-4 G6
+    passed→failed laundering). Absorbing = "no exit from terminal without an
+    applied audited record", per AC-R4.3's disposition in
+    docs/product/lane3-spec-mismatches.md.
     """
     status = ""
     for row in read_records(sprints_dir, sid, node_id=node_id, kind="status_transition"):
@@ -221,11 +225,6 @@ def project_node_status(sprints_dir: Any, sid: str, node_id: str) -> str:
         to_status = str(row.get("to_status") or "").strip().lower()
         if not to_status:
             continue
-        if status in TERMINAL_STATUSES:
-            author_type = str((row.get("author") or {}).get("type") or "")
-            reopen = bool(row.get("reopen")) and status in PASS_STATUSES
-            if author_type != "human" and not reopen:
-                continue
         status = to_status
     return status
 
@@ -301,7 +300,9 @@ def is_gate_consumable(record: Dict[str, Any], *, current_generation: Optional[i
             return False
         if current_generation is not None:
             generation = record.get("eval_generation")
-            if generation is not None and int(generation) != int(current_generation):
+            # Fail-closed (round-4 G9): a record that cannot prove which
+            # generation it evaluated is not consumable at any specific one.
+            if generation is None or int(generation) != int(current_generation):
                 return False
         return True
     except Exception:
