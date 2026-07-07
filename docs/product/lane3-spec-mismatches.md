@@ -1,0 +1,131 @@
+# Lane 3 spec-vs-code dispositions — gate ledger + artifact manifest
+
+**Date:** 2026-07-07 · Branch `contract/lane3-ledger` (off `contract/integration` @ c6bc47ba,
+the merge of lanes 0/0.5/1/2). Companion to `opensolar-target-design.md` §1.4/§1.5 and the
+round-1/round-2 review dispositions. Per the independence guards: every place the implementation
+deviates from the spec's wording is recorded here with the code-verified reason — nothing was
+silently adapted.
+
+## D1 — "single status writer" implemented as audited-surface recording, not literal routing
+
+Design §1.4 (round-1 3.1): *"set_node_status becomes the single status writer … the other
+writers are routed **or audited** into it."* The literal-routing arm is not implementable
+bit-identically:
+
+- `set_node_status` has a monotonic rank guard (`_status_rank`); the real writers perform
+  deliberate downgrades it refuses — `_account_eval_dispatch_failures` → `needs_human_review`
+  (the in-code comment at the site already documents this), `_start_node_repair_from_eval_fail`
+  → `failed_review`, reconcile's `pending` resets (which also *pop* node_results, a side effect
+  `set_node_status` does not have).
+- `mark_node_result` force-writes and has different `node_results`/gate side effects.
+
+Resolution (the disposition's own "or audited" arm): every writer on the C4 surface calls the
+single recording seam `gate_ledger.record_status_transition` at its write site (no-op flag-off).
+AC-R4.3's audit test (`test_status_writer_surface.py`) enumerates the full surface via AST scan
+— any NEW direct write outside it fails the suite — and the runtime property tests prove
+no-transition-without-record, rank-guard suppression records nothing, and terminal absorbing.
+Flag-off byte-parity is proven (`~/opensolar-state/run-archive/lane3-ledger/flag-off-bit-parity.diff`
+— the only diff line is the sandbox tmp path embedded in a sidecar path).
+
+## D2 — author enum extended with `operator`
+
+Design §1.4's `author.type` enum (`evaluator|doctor|policy|human|scheduler`) predates the F7
+amendment that moved route records to the operatord seam. Route records are authored by the
+executing operator; the enum gains `operator` for exactly that kind.
+
+## D3 — the dispatcher guard is a structural projection compare, not a hash recompute
+
+Design §1.2 says the guard "verif[ies] the graph matches instantiate() output … (hash check)".
+Two code facts make a literal runtime hash check impossible:
+
+- `workflow_contract._hashable_view` excludes only `status` per node; the runtime adds
+  `updated_at`/`assigned_to`/`dispatch_id`/eval fields on dispatch, so any live graph re-hashes
+  differently from its instantiation (false tamper alarm on every running sprint).
+- `instantiate(contract, inputs)` takes arbitrary substitutions; the graph does not durably
+  record `inputs`, so the reference instantiation is not reconstructible at dispatch time.
+
+Resolution: `_workflow_contract_guard` fail-closes on (a) unregistered `workflow_contract_id`,
+(b) version mismatch, (c) structural mismatch of the contract-determined node projection
+(node-id set, `depends_on`, `task_type`, capsule ∈ `allowed_capsules`, `evaluator_gate.kind`)
+against the registered contract's stages. Planner-generated contracts (`stages_mode:
+planner_generated`, e.g. `pm.generic.v1`) are checked for registration+version only — their
+stages are `plan_validator`'s jurisdiction per design §0. Stored-hash integrity at instantiation
+time remains proven by Lane 1's golden tests. Known bound: substituted path fields
+(`write_scope`/`outputs`) are not compared (they embed unrecoverable inputs); a tamper limited
+to output paths passes the guard but is caught downstream by the manifest root checks (R6).
+
+## D4 — `on_human_review` needed a second half in `ready_nodes`
+
+Plan §2 Lane 0 (review 7.2) scopes the fix to "a per-node `on_human_review` policy consult in
+the skip-propagation loop". Code fact: `ready_nodes` requires every dep `_is_passed`, so a
+skip-loop-only change would leave `warn_and_continue` dependents un-skipped but never ready —
+trading the skip cascade for a silent `pending` wedge, which violates R7's no-silent-wait rule.
+Implemented in both places (`terminalize_dependency_blocked_nodes` + `ready_nodes`), both gated
+on flag+contracted, `block_dependents`/absent = legacy, `DEPENDENCY_BLOCK_STATUSES` untouched.
+Flag-off proven bit-identical even when a graph carries the field.
+
+## D5 — manifest write/consult seams
+
+Design §1.5 says the manifest is written "at build-complete and repair-complete" and consumed by
+`_proof_artifact_presence`, evaluator support, wrapper, publish, dashboard.
+
+- Write site implemented at the verdict seam (`node_verdict` PASS path, before the proof gate)
+  — the dispatcher-observable "build complete"; a repair's next verdict cycle re-writes it with
+  the new generation. There is no single earlier dispatcher point that sees final artifacts.
+- Consult implemented in `_proof_artifact_presence` (manifest presence view overrides the
+  filename scan; `guard_decision` keeps the scan's allow/block semantics since presence alone
+  is not an "allow") and `_evaluate_proof_obligations` (root violations block regardless of
+  declared obligations). The consult keys on flag + manifest-existence because the function has
+  no graph access — a manifest only ever exists on the contracted path, so its existence is the
+  contracted signal.
+- Wrapper/dashboard/evaluator-support consumers are Lane 5 per the plan; `publish_canonical`
+  ships in the module ready for the publish step.
+
+## D6 — `verdict_kind` default classification vocabulary
+
+AC-R4.1: "`verdict_kind=mechanical` is set by the gate runner, not inferred from strings."
+`node_verdict` gains an explicit `verdict_kind` parameter (callers state it); when absent, the
+runner classifies from its OWN closed constant set `MECHANICAL_EVAL_REASONS`
+(`research_eval_json_missing`, `eval_json_missing`, `eval_json_unreadable`,
+`evaluator_temporarily_busy`, `eval_dispatch_unavailable`, `eval_closeout_invalid`) — a
+runner-owned vocabulary, not free-text matching. Anything outside the set defaults to `content`
+(fail-open toward the stricter content semantics: a content FAIL keeps its legacy effect).
+
+## D7 — F-CLASS-13 red-mode semantics
+
+The stale-eval **archive** behavior predates Lane 3 (714eb781): with the ledger off the node
+still does not flip. The class's Lane 3 retirement — and what its `gate_replay` scenario
+discriminates on — is the durable, non-consumable evidence record (`archived: true`,
+`stale_reason`, fail-closed `is_gate_consumable`). Same shape for F-CLASS-30: the self-graded
+*rejection* is the pre-existing 4df6477d guard; Lane 3 adds the provable provenance trail
+(and closes a hole found while driving the scenario: `node_verdict`'s entry record now marks a
+self-graded PASS `gate_consumable: false`).
+
+## D8 — Lane 3 edited two Lane 2 files (additively)
+
+The serialized-files rule assigns `run_scenario.py`/`catalog.json` to Lane 2, but Lane 2 is
+complete and merged; the parallel-lanes collision concern no longer applies. Lane 3 added the
+`gate_replay` mode (a new `elif` branch + `SCENARIOS_DIR` constant; existing modes untouched)
+and flipped the 10 `pending_lane_3` catalog rows to `verified_here` with scenario files. The
+red-green pytest gate picks them up unchanged (36 scenario-gate tests, was 16).
+
+## D9 — ledger gate consult uses `repair_attempts` as the current generation
+
+`_ledger_gate_verdict_block` and the AC tests take the node's `repair_attempts` as
+`current_generation` when filtering consumable verdicts (matching
+`_eval_payload_stale_for_current_repair`'s definition of "current"). Design §1.4 names
+`eval_generation` without defining its source; this is the code's only existing generation
+authority.
+
+## Pre-existing reds (proven unchanged)
+
+- `harness/tests/graph/test_multi_task_runner_status_surface.py` — collection ERROR, identical
+  on the integration base (the long-known B1 red).
+- `harness/tests/test_agent_actor_schema.py` — 7 fixture failures, identical set on base.
+- `harness/tests/test_operatord_daemon.py` — 6–7 env-sensitive failures (singleton/lease
+  contention against machine state; varies run-to-run, base showed one MORE failure than HEAD).
+  Identical on the untouched `contract/lane2-harness` worktree; the scenario engine's sandboxed
+  coverage of the same seams is green.
+
+Evidence: `~/opensolar-state/run-archive/lane3-ledger/pre-existing-reds-head-vs-base.log`,
+`pre-existing-red-operatord-daemon.md`.
