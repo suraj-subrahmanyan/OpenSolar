@@ -544,6 +544,154 @@ def _orchestration_projection_payload(sprint_id: str = "", mode: str = "full") -
     }
 
 
+def _load_harness_lib_module(module_name: str):
+    module_path = Path(__file__).resolve().parents[1] / f"{module_name}.py"
+    spec = importlib.util.spec_from_file_location(f"solar_status_{module_name}", str(module_path))
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"unable to load {module_name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _sprint_contract_graph(sid: str) -> tuple[dict, Path | None]:
+    for path in (
+        SPRINTS_DIR / f"{sid}.task_graph.json",
+        SPRINTS_DIR / f"{sid}.task_dag.state.json",
+    ):
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            return data, path
+    return {}, None
+
+
+def _graph_node_status(graph: dict, node_id: str) -> str:
+    results = graph.get("node_results") if isinstance(graph.get("node_results"), dict) else {}
+    result = results.get(node_id) if isinstance(results, dict) else None
+    if isinstance(result, dict) and result.get("status"):
+        return str(result.get("status") or "")
+    for node in graph.get("nodes") or []:
+        if isinstance(node, dict) and str(node.get("id") or node.get("node_id") or "") == node_id:
+            return str(node.get("status") or "")
+    return ""
+
+
+def _graph_stage_rows(graph: dict) -> list[dict]:
+    rows: list[dict] = []
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        node_id = str(node.get("id") or node.get("node_id") or "").strip()
+        if not node_id:
+            continue
+        rows.append({
+            "id": node_id,
+            "dashboard_label": str(node.get("dashboard_label") or node.get("label") or node_id),
+        })
+    return rows
+
+
+def _manifest_link(artifact_manifest, sid: str, node_id: str) -> dict:
+    path = artifact_manifest.manifest_path(SPRINTS_DIR, sid, node_id)
+    exists = path.exists()
+    return {
+        "path": str(path),
+        "exists": exists,
+        "url": ("/file/view?path=" + urllib.parse.quote(str(path))) if exists else "",
+    }
+
+
+def _sprint_contract_payload(sid: str) -> dict:
+    sid = str(sid or "").strip()
+    if not _valid_sprint_id(sid):
+        return {"ok": False, "status": "error", "error": "invalid sprint id", "sprint_id": sid}
+
+    graph, graph_path = _sprint_contract_graph(sid)
+    workflow_id = str(graph.get("workflow_contract_id") or graph.get("contract_id") or "").strip()
+    workflow_version = str(graph.get("workflow_contract_version") or graph.get("contract_version") or "").strip()
+    gate_ledger = _load_harness_lib_module("gate_ledger")
+    artifact_manifest = _load_harness_lib_module("artifact_manifest")
+
+    if not workflow_id:
+        stages = []
+        for row in _graph_stage_rows(graph):
+            node_id = row["id"]
+            stages.append({
+                "id": node_id,
+                "label": row["dashboard_label"],
+                "state": _graph_node_status(graph, node_id),
+                "state_source": "graph",
+                "manifest": {"path": "", "exists": False, "url": ""},
+            })
+        return {
+            "ok": True,
+            "status": "legacy_uncontracted",
+            "contracted": False,
+            "sprint_id": sid,
+            "graph_path": str(graph_path) if graph_path else "",
+            "contract": {},
+            "stages": stages,
+        }
+
+    workflow_contract = _load_harness_lib_module("workflow_contract")
+    workflows_dir = Path(__file__).resolve().parents[2] / "config" / "workflows"
+    contract = workflow_contract.find_contract(workflow_id, workflows_dir=workflows_dir)
+    if not contract:
+        return {
+            "ok": False,
+            "status": "error",
+            "error": "workflow contract not found",
+            "contracted": True,
+            "sprint_id": sid,
+            "graph_path": str(graph_path) if graph_path else "",
+            "contract": {"workflow_id": workflow_id, "version": workflow_version},
+            "stages": [],
+        }
+
+    contract_version = workflow_version or str(contract.get("version") or "")
+    contract_stages = list(contract.get("stages") or []) or _graph_stage_rows(graph)
+    stages = []
+    for stage in contract_stages:
+        if not isinstance(stage, dict):
+            continue
+        node_id = str(stage.get("id") or stage.get("node_id") or "").strip()
+        if not node_id:
+            continue
+        projected = gate_ledger.project_node_status(SPRINTS_DIR, sid, node_id)
+        ledger_records = gate_ledger.read_records(SPRINTS_DIR, sid, node_id=node_id, kind="status_transition")
+        graph_status = _graph_node_status(graph, node_id)
+        state = projected or graph_status
+        stages.append({
+            "id": node_id,
+            "label": str(stage.get("dashboard_label") or stage.get("label") or node_id),
+            "state": state,
+            "state_source": "gate_ledger" if projected or ledger_records else "graph",
+            "graph_state": graph_status,
+            "ledger_record_count": len(ledger_records),
+            "manifest": _manifest_link(artifact_manifest, sid, node_id),
+        })
+
+    return {
+        "ok": True,
+        "status": "ok",
+        "contracted": True,
+        "sprint_id": sid,
+        "graph_path": str(graph_path) if graph_path else "",
+        "contract": {
+            "workflow_id": workflow_id,
+            "version": contract_version,
+            "identity": f"{workflow_id}@{contract_version}" if contract_version else workflow_id,
+            "source_path": str(contract.get("_source_path") or ""),
+        },
+        "stages": stages,
+    }
+
+
 def _projection_signature(data: dict) -> dict:
     """Compact, comparable signature of the projection bits that drive live UI — phase, per-node
     status, gate/verdict state, active node, stall. The projection stream emits an SSE update only
@@ -13905,6 +14053,13 @@ class StatusHandler(BaseHTTPRequestHandler):
                         self._send_file(target, content_type)
             else:
                 self._send_json(_sprint_deliverables_payload(sid))
+
+        elif re.match(r"^/api/sprints/[^/]+/contract$", path):
+            sid = urllib.parse.unquote(path.split("/api/sprints/", 1)[1].split("/contract", 1)[0])
+            try:
+                self._send_json(_sprint_contract_payload(sid))
+            except Exception as exc:
+                self._send_json({"ok": False, "status": "error", "error": f"{type(exc).__name__}: {exc}"}, status=500)
 
         elif re.match(r"^/api/sprints/[^/]+/projection$", path):
             sid = urllib.parse.unquote(path.split("/api/sprints/", 1)[1].split("/projection", 1)[0])
