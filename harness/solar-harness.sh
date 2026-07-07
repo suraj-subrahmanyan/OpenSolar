@@ -1208,6 +1208,13 @@ if data.get("status") in ("active", "reviewing"):
     )
 PY
     done
+    # Lane 0 PR-3 (F4 / AC-R7.4): registry teardown BEFORE killing sessions —
+    # marks the harness run terminal (suppressing watchdog respawn, d5858918)
+    # then reaps registered daemons watchdog-first. Module-guarded, inert
+    # until Lane 0.5 merges.
+    if [[ -f "$HARNESS_DIR/lib/run_process_registry.py" ]]; then
+      python3 "$HARNESS_DIR/lib/run_process_registry.py" teardown --run-id harness --grace 5 >/dev/null 2>&1 || true
+    fi
     tmux kill-session -t "$SESSION_NAME"
     killed=1
   fi
@@ -1562,6 +1569,16 @@ EOF
 }
 
 intake_request() {
+  # Lane 0 PR-3 (F4): fail-closed preflight in product mode (R5/R7/R8 — routes,
+  # auth presence, capacity, path self-consistency). Module-guarded, inert until
+  # Lane 0.5 merges; flag-off behavior unchanged.
+  if [[ "${SOLAR_PRODUCT_MODE:-0}" == "1" && -f "$HARNESS_DIR/lib/run_preflight.py" ]]; then
+    local _pf_sid="preflight-$(date +%Y%m%d-%H%M%S)"
+    if ! python3 "$HARNESS_DIR/lib/run_preflight.py" --sid "$_pf_sid"; then
+      err "preflight failed — run blocked (report: sprints/${_pf_sid}.preflight.json)"
+      return 1
+    fi
+  fi
   local req="" file="" use_stdin=0 dispatch=1 json=0 arg
   local -a parts=()
   while (($#)); do
