@@ -77,6 +77,24 @@ def test_compile_deepdive_insight_contract_extends_runtime_gates():
     assert any("generic survey taxonomy" in item for item in contract["scope_boundaries"]["must_not_do"])
 
 
+def test_compile_deepdive_insight_contract_locks_mirror_runtime_fields():
+    contract = compiler.compile_deepdive_brief(
+        "DeepDive: 通过洞察 CAIS 2026 学术会议，分析 Agent 技术挑战和 Solar 吸收路线"
+    )
+    nodes = {node["id"]: node for node in contract["deepdive_dag"]["nodes"]}
+
+    for node_id in ("D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18"):
+        node = nodes[node_id]
+        meta = compiler.INSIGHT_RUNTIME_NODE_METADATA[node_id]
+
+        assert node["artifact_paths"] == meta["artifact_paths"]
+        assert node["gates"] == list(meta["gates"])
+        assert node["verification_gates"] == node["gates"]
+        assert node["evaluator_sidecar"] == meta["evaluator_sidecar"]
+        assert node["closeout_acceptance"] == meta["closeout_acceptance"]
+        assert node["status_metadata"] == meta["status_metadata"]
+
+
 def test_compile_generic_insight_contract_has_no_cais_or_solar_defaults():
     contract = compiler.compile_deepdive_brief(
         "DeepDive: insight 分析 AI coding agent 产品机会、技术路线和开源项目策略"
