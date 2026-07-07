@@ -8506,6 +8506,7 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
                 _artifact_manifest.write_manifest(
                     SPRINTS_DIR, sid, node,
                     generation=_node_repair_attempts(node),
+                    base_dir=HARNESS_DIR,
                     roots=graph.get("artifact_roots") if isinstance(graph.get("artifact_roots"), dict) else {},
                     sidecars={
                         "handoff_md": str(observed_handoff or ""),

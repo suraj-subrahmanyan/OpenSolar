@@ -69,26 +69,44 @@ def _file_row(declared: str, path: Path, resolved_root: str) -> Dict[str, Any]:
     return row
 
 
-def _ordered_roots(roots: Dict[str, str]) -> List[tuple[str, Path]]:
-    """Canonical first, then aliases in name order — deterministic resolution."""
+def _default_base_dir() -> Path:
+    """Anchor for RELATIVE roots/paths. P2 smoke 20260707T190540Z: resolving
+    relative contract roots against the process CWD lost artifacts that
+    existed on disk and failed a healthy stage."""
+    harness_dir = os.environ.get("HARNESS_DIR") or os.environ.get("SOLAR_HARNESS_DIR")
+    if harness_dir:
+        return Path(harness_dir).expanduser()
+    return Path.cwd()
+
+
+def _anchor(path_text: str, base: Path) -> Path:
+    path = Path(str(path_text)).expanduser()
+    return path if path.is_absolute() else base / path
+
+
+def _ordered_roots(roots: Dict[str, str], base: Path) -> List[tuple[str, Path]]:
+    """Canonical first, then aliases in name order — deterministic resolution.
+    Relative roots anchor at base (HARNESS_DIR), never the CWD."""
     items: List[tuple[str, Path]] = []
     if roots.get("canonical"):
-        items.append(("canonical", Path(str(roots["canonical"])).expanduser()))
+        items.append(("canonical", _anchor(roots["canonical"], base)))
     for name in sorted(roots):
         if name == "canonical" or not roots.get(name):
             continue
-        items.append((name, Path(str(roots[name])).expanduser()))
+        items.append((name, _anchor(roots[name], base)))
     return items
 
 
-def _resolve_declared(declared: str, roots: Dict[str, str]) -> tuple[Path, str]:
+def _resolve_declared(declared: str, roots: Dict[str, str], base: Path) -> tuple[Path, str]:
     """Resolve a declared output path to (absolute path, owning root name).
 
-    A declared absolute path resolves to the root that prefixes it; a relative
-    path is probed under each root (canonical first — the v9 rule). Returns
-    (Path(declared), "") when nothing exists anywhere.
+    Resolution order: (1) absolute declared → owning root by prefix;
+    (2) base-anchored declared that exists inside a root (contracts whose
+    write_scope already carries the relative root prefix — the code.cli_smoke
+    shape); (3) alias probing — declared joined under each root, canonical
+    first (the v9 rule). Returns (anchored path, "") when nothing matches.
     """
-    ordered = _ordered_roots(roots)
+    ordered = _ordered_roots(roots, base)
     raw = Path(str(declared)).expanduser()
     if raw.is_absolute():
         for name, root in ordered:
@@ -98,11 +116,19 @@ def _resolve_declared(declared: str, roots: Dict[str, str]) -> tuple[Path, str]:
                 continue
             return raw, name
         return raw, ""
+    anchored = base / raw
+    if anchored.exists():
+        for name, root in ordered:
+            try:
+                anchored.relative_to(root)
+            except ValueError:
+                continue
+            return anchored, name
     for name, root in ordered:
         candidate = root / raw
         if candidate.exists():
             return candidate, name
-    return raw, ""
+    return anchored, ""
 
 
 def write_manifest(
@@ -116,19 +142,23 @@ def write_manifest(
     sidecars: Optional[Dict[str, Any]] = None,
     observed: Optional[List[str]] = None,
     operator_result_ids: Optional[List[str]] = None,
+    base_dir: Optional[os.PathLike] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build + atomically persist the per-node manifest; returns it or None.
 
     ``write_scope`` defaults to the node's declared write_scope. ``observed``
     is the set of paths the node actually wrote (when the caller knows them);
     any observed path outside every declared root becomes an
-    ARTIFACT_ROOT_VIOLATION entry.
+    ARTIFACT_ROOT_VIOLATION entry. ``base_dir`` anchors RELATIVE roots and
+    paths (defaults to HARNESS_DIR from env; never the raw CWD when a harness
+    is resolvable).
     """
     try:
         sid = str(sid or "").strip()
         node_id = str((node or {}).get("id") or "").strip()
         if not sid or not node_id:
             return None
+        base = Path(base_dir).expanduser() if base_dir else _default_base_dir()
         roots = {str(k): str(v) for k, v in (roots or {}).items() if str(v or "").strip()}
         declared_paths = list(write_scope if write_scope is not None else (node.get("write_scope") or []))
 
@@ -137,13 +167,13 @@ def write_manifest(
             declared = str(declared or "").strip()
             if not declared:
                 continue
-            resolved, root_name = _resolve_declared(declared, roots)
+            resolved, root_name = _resolve_declared(declared, roots, base)
             rows.append(_file_row(declared, resolved, root_name))
 
         violations: List[Dict[str, Any]] = []
-        ordered = _ordered_roots(roots)
+        ordered = _ordered_roots(roots, base)
         for raw in observed or []:
-            observed_path = Path(str(raw)).expanduser()
+            observed_path = _anchor(str(raw), base)
             inside = False
             for _name, root in ordered:
                 try:
@@ -172,7 +202,9 @@ def write_manifest(
             "node_id": node_id,
             "generation": int(generation),
             "written_at": _utc_now(),
-            "roots": roots,
+            # Store ANCHORED roots so consumers (publish, wrapper, dashboard)
+            # never re-resolve relative paths against their own CWD.
+            "roots": {name: str(path) for name, path in ordered},
             "rows": rows,
             "all_outputs_present": bool(rows) and all(row["exists"] for row in rows) if rows else True,
             "sidecars": sidecar_map,

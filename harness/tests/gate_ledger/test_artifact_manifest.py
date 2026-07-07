@@ -173,6 +173,83 @@ def test_observed_writes_inside_roots_are_clean(tmp_path):
     assert am.presence_map(manifest)["artifact_root_violation"] is False
 
 
+def test_relative_roots_anchor_at_base_dir_not_cwd(tmp_path):
+    """P2 smoke 20260707T190540Z (S1 failed_review): code.cli_smoke declares
+    RELATIVE roots (sprints/<sid>/workdir/). The builder wrote the file — it
+    existed at <HARNESS_DIR>/sprints/<sid>/workdir/uniqwords.py — but the
+    manifest resolved the relative path against the process CWD, looked in the
+    wrong place, and reported every output missing. Relative roots and declared
+    paths must anchor at base_dir (HARNESS_DIR), never the CWD."""
+    sid = "sprint-x-wf-code-cli-smoke"
+    harness = tmp_path / "harness"
+    real = harness / "sprints" / sid / "workdir" / "uniqwords.py"
+    real.parent.mkdir(parents=True)
+    real.write_text("print('hi')\n", encoding="utf-8")
+
+    manifest = am.write_manifest(
+        harness / "sprints", sid,
+        {"id": "S1", "write_scope": [f"sprints/{sid}/workdir/uniqwords.py"]},
+        generation=0,
+        roots={"canonical": f"sprints/{sid}/workdir/"},
+        base_dir=harness,
+    )
+    row = manifest["rows"][0]
+    assert row["exists"] is True, row
+    assert row["resolved_root"] == "canonical"
+    assert Path(row["path"]) == real
+    assert manifest["all_outputs_present"] is True
+
+
+def test_relative_declared_with_root_prefix_not_double_joined(tmp_path):
+    """A declared path that already includes the relative root prefix must not
+    be joined onto the root a second time (…/workdir/sprints/…)."""
+    sid = "sprint-y-wf-code-cli-smoke"
+    harness = tmp_path / "harness"
+    real = harness / "sprints" / sid / "workdir" / "README.md"
+    real.parent.mkdir(parents=True)
+    real.write_text("# r\n", encoding="utf-8")
+    manifest = am.write_manifest(
+        harness / "sprints", sid,
+        {"id": "S1", "write_scope": [f"sprints/{sid}/workdir/README.md"]},
+        generation=0,
+        roots={"canonical": f"sprints/{sid}/workdir/"},
+        base_dir=harness,
+    )
+    assert manifest["rows"][0]["exists"] is True
+    assert "workdir/sprints" not in manifest["rows"][0]["path"]
+
+
+def test_observed_writes_anchor_at_base_dir_for_violations(tmp_path):
+    """Observed relative paths get the same anchoring before the root check."""
+    sid = "sprint-z"
+    harness = tmp_path / "harness"
+    inside = harness / "sprints" / sid / "workdir" / "ok.md"
+    inside.parent.mkdir(parents=True)
+    inside.write_text("ok", encoding="utf-8")
+    manifest = am.write_manifest(
+        harness / "sprints", sid, {"id": "S1", "write_scope": []},
+        generation=0,
+        roots={"canonical": f"sprints/{sid}/workdir/"},
+        observed=[f"sprints/{sid}/workdir/ok.md", "stray-at-base.md"],
+        base_dir=harness,
+    )
+    codes = [v["code"] for v in manifest["violations"]]
+    assert codes == [am.ARTIFACT_ROOT_VIOLATION], manifest["violations"]
+    assert "stray-at-base.md" in manifest["violations"][0]["path"]
+
+
+def test_absolute_roots_unaffected_by_base_dir(tmp_path):
+    roots = _roots(tmp_path)
+    target = Path(roots["canonical"]) / "r.md"
+    target.write_text("x", encoding="utf-8")
+    manifest = am.write_manifest(
+        tmp_path, SID, _node(["r.md"]), generation=1, roots=roots,
+        base_dir=tmp_path / "elsewhere",
+    )
+    assert manifest["rows"][0]["exists"] is True
+    assert manifest["rows"][0]["resolved_root"] == "canonical"
+
+
 def test_manifest_write_is_atomic_and_best_effort(tmp_path):
     # Unwritable sprints dir: returns None, never raises.
     import os
