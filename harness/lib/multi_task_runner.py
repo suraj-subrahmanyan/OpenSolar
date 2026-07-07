@@ -3096,6 +3096,30 @@ EOF
 """
 
 
+# Product-env allowlist embedded into generated worker runners (P2 smoke
+# 20260707T180639Z): pool workers execute in tmux windows whose environment
+# comes from the tmux SERVER, so flag-gated product behavior (gate-ledger route
+# records, product mode, provider pinning) silently degrades unless the runner
+# script carries a generation-time snapshot of these values itself.
+_PRODUCT_ENV_ALLOWLIST = (
+    "SOLAR_GATE_LEDGER",
+    "SOLAR_PRODUCT_MODE",
+    "SOLAR_WORKFLOW_ROUTER",
+    "SOLAR_MULTI_TASK_DEFAULT_PROVIDERS",
+    "SOLAR_PM_DEFAULT_PROVIDERS",
+    "HARNESS_SPRINTS_DIR",
+)
+
+
+def _product_env_exports() -> str:
+    lines: list[str] = []
+    for var in _PRODUCT_ENV_ALLOWLIST:
+        value = os.environ.get(var)
+        if value is not None and str(value).strip() != "":
+            lines.append(f"export {var}={shlex.quote(str(value))}")
+    return "\n".join(lines)
+
+
 def runner_script(task_dir: Path, payload: dict[str, Any]) -> Path:
     runner = task_dir / "runner.sh"
     dispatch_file = task_dir / "dispatch.md"
@@ -3123,6 +3147,7 @@ def runner_script(task_dir: Path, payload: dict[str, Any]) -> Path:
         agent_line = f"SOLAR_MULTI_TASK_DISPATCH_FILE=\"$DISPATCH_FILE\" bash -lc {shlex.quote(agent_cmd)}"
     else:
         agent_line = claude_agent_line(model)
+    product_env_exports = _product_env_exports()
     script = f"""#!/usr/bin/env bash
 set -u
 TASK_DIR={shlex.quote(str(task_dir))}
@@ -3148,6 +3173,7 @@ WORK_DIR={shlex.quote(work_dir)}
 export TASK_DIR STATUS_FILE DISPATCH_FILE OUTPUT_LOG RUN_STARTED_MARKER HARNESS_DIR HARNESS_BIN SPRINTS_DIR GRAPH NODE_ID SID ROLE PROFILE BACKEND MODEL PROVIDER CAPABILITY_STATUS HANDOFF HARNESS WORK_DIR
 export PATH="$HARNESS_BIN:$PATH"
 export SOLAR_SAFE_FIND_ROOT="$WORK_DIR"
+{product_env_exports}
 
 pane_title() {{
   local title="$1"

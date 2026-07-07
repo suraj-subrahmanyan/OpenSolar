@@ -322,6 +322,14 @@ export PYTHONPATH=$(printf '%q' "$iso_harness/lib")
 export SOLAR_PANE_RUNTIME=codex
 export SOLAR_PM_DEFAULT_PROVIDERS=openai
 export SOLAR_MULTI_TASK_DEFAULT_PROVIDERS=openai
+# P2 product flags (smoke 20260707T180639Z: zero route records because this
+# generated env is authoritative for every sandbox process and the flags were
+# left to shell inheritance — the operatord lineage never saw them). Explicit,
+# never inherited.
+export SOLAR_GATE_LEDGER=1
+export SOLAR_PRODUCT_MODE=1
+export SOLAR_WORKFLOW_ROUTER=1
+export SOLAR_INTAKE_WORKSPACE_ROOT=$(printf '%q' "$workspace")
 export SOLAR_CODEX_ALLOW_PM_OPERATOR_DISPATCH=1
 export SOLAR_GRAPH_BUILDER_OPERATOR_POOL=1
 export SOLAR_GRAPH_EVAL_OPERATOR_POOL=1
@@ -577,6 +585,11 @@ export PYTHONPATH="$iso_harness/lib"
 export SOLAR_PANE_RUNTIME=codex
 export SOLAR_PM_DEFAULT_PROVIDERS=openai
 export SOLAR_MULTI_TASK_DEFAULT_PROVIDERS=openai
+# P2 product flags — keep in lockstep with the generated e2e.env block above.
+export SOLAR_GATE_LEDGER=1
+export SOLAR_PRODUCT_MODE=1
+export SOLAR_WORKFLOW_ROUTER=1
+export SOLAR_INTAKE_WORKSPACE_ROOT="$workspace"
 export SOLAR_CODEX_ALLOW_PM_OPERATOR_DISPATCH=1
 export SOLAR_GRAPH_BUILDER_OPERATOR_POOL=1
 export SOLAR_GRAPH_EVAL_OPERATOR_POOL=1
