@@ -33,6 +33,13 @@ copied-workspace report validator, not the source-pack validator (`validate_rsi_
 output, and are out of Lane 4's deterministic scope. The ported test drops the two source-pack cases
 and keeps every report-validator case (22 tests).
 
+**Round 5 hardening delta:** the original byte-identical validator counted raw rows for the minimum
+source/claim gates. The reviewer duplicate-id probe showed one repeated source id and one repeated
+claim id could satisfy those gates. Lane 4 now intentionally deviates from the historical validator:
+`sources.json` and `claims.json` must contain non-empty unique ids, duplicate ids are validation
+errors, and the minimum gates count unique ids. This is a safety improvement over the faithful port,
+not evidence that the original port was inaccurate.
+
 ## L4 — the adapter builds the report body from `sections.jsonl`, not `final.md`
 
 Design §1.8 says the adapter "maps native jsonl exports → the five demo artifacts." The report body
