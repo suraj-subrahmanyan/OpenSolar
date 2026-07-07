@@ -86,6 +86,66 @@ class TestMechanicalFailCannotFlipPassed:
         holds = gl.read_records(sandbox, SID, node_id="S1", kind="gate_check")
         assert holds and holds[-1]["note"] == "mechanical_fail_cannot_flip_passed_node"
 
+    def test_v5_shape_handoff_no_eval_is_held(self, sandbox, tmp_path):
+        """Round-4 G1 (reviewer probe case B): the REAL v5 shape — recorded
+        passed, handoff PRESENT, eval.json missing — is downgraded to effective
+        'reviewing' by the fail-closed passed-without-eval rule, which bypassed
+        the hold. The hold must gate on the RECORDED pass, not the effective
+        status."""
+        graph = _contracted_graph([
+            {"id": "S1", "status": "passed", "depends_on": []},
+        ])
+        graph["node_results"]["S1"] = {"status": "passed", "updated_at": "2026-07-07T00:00:00Z"}
+        graph_path = _write_graph(tmp_path, graph)
+        (tmp_path / f"{SID}.S1-handoff.md").write_text("# handoff\n", encoding="utf-8")
+
+        loaded = gs.load_graph(graph_path)
+        assert gs.node_status(loaded, "S1") == "reviewing"  # the bypass precondition
+        assert gs.node_recorded_status(loaded, "S1") == "passed"
+
+        result = gnd.node_verdict(graph_path, "S1", "fail",
+                                  reason="research_eval_json_missing", dry_run=True)
+        assert result["ok"] is False
+        assert result["reason"] == "mechanical_fail_cannot_flip_passed_node"
+
+        reloaded = json.loads(Path(graph_path).read_text(encoding="utf-8"))
+        assert reloaded["nodes"][0]["status"] == "passed"
+        verdicts = gl.read_records(sandbox, SID, node_id="S1", kind="eval_verdict")
+        assert verdicts and verdicts[-1]["archived"] is True
+        assert gl.is_gate_consumable(verdicts[-1]) is False
+
+    def test_v5_shape_with_exhausted_repair_budget_never_terminal_fails(self, sandbox, tmp_path):
+        """Round-4 G1 (probe case B'): with the repair budget exhausted
+        (repair_attempts=1, default max 1) the bypassed FAIL fell through to
+        mark_node_result(..., 'failed') — a TERMINAL failure for an
+        infrastructure reason. The hold must fire first."""
+        graph = _contracted_graph([
+            {"id": "S1", "status": "passed", "depends_on": [], "repair_attempts": 1},
+        ])
+        graph["node_results"]["S1"] = {"status": "passed", "updated_at": "2026-07-07T00:00:00Z"}
+        graph_path = _write_graph(tmp_path, graph)
+        (tmp_path / f"{SID}.S1-handoff.md").write_text("# handoff\n", encoding="utf-8")
+
+        result = gnd.node_verdict(graph_path, "S1", "fail",
+                                  reason="research_eval_json_missing", dry_run=True)
+        assert result["reason"] == "mechanical_fail_cannot_flip_passed_node"
+        reloaded = json.loads(Path(graph_path).read_text(encoding="utf-8"))
+        assert reloaded["nodes"][0]["status"] == "passed"
+
+    def test_content_fail_on_v5_shape_keeps_legacy_effect(self, sandbox, tmp_path):
+        """The hold is for mechanical/infrastructure kinds only — a CONTENT
+        FAIL on the same recorded-passed shape must keep flipping."""
+        graph = _contracted_graph([
+            {"id": "S1", "status": "passed", "depends_on": []},
+        ])
+        graph["node_results"]["S1"] = {"status": "passed", "updated_at": "2026-07-07T00:00:00Z"}
+        graph_path = _write_graph(tmp_path, graph)
+        (tmp_path / f"{SID}.S1-handoff.md").write_text("# handoff\n", encoding="utf-8")
+        result = gnd.node_verdict(graph_path, "S1", "fail",
+                                  reason="report contradicts sources", dry_run=True)
+        assert result.get("reason") != "mechanical_fail_cannot_flip_passed_node"
+        assert result.get("status") in {"failed", "failed_review"}
+
     def test_explicit_infrastructure_kind_also_held(self, sandbox, tmp_path):
         graph = _contracted_graph([{"id": "S1", "status": "passed", "depends_on": []}])
         graph["node_results"]["S1"] = {"status": "passed", "updated_at": "2026-07-07T00:00:00Z"}

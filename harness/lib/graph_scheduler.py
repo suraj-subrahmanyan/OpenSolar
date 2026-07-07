@@ -1256,7 +1256,16 @@ def _ensure_required_gate_node_mapping(graph: dict[str, Any]) -> int:
     return assigned
 
 
-def node_status(graph: dict[str, Any], node_id: str) -> str:
+def node_recorded_status(graph: dict[str, Any], node_id: str) -> str:
+    """The node's RECORDED status — the inline/node_results/gate_results fold
+    WITHOUT node_status()'s fail-closed passed-without-required-eval downgrade.
+
+    This is the AC-R4.1 hold discriminator (round-4 G1): the real v5 shape
+    (handoff present, eval.json missing) is exactly the state that produces a
+    mechanical ``research_eval_json_missing`` FAIL, and the downgrade projects
+    it as effective "reviewing" while the writers recorded "passed". Policy
+    rules about "a passed node" must consult what was recorded, not the
+    downgraded view, or they self-bypass on the very shape they exist for."""
     _ensure_required_gate_node_mapping(graph)
     results = _node_results(graph)
     node = _node_map(graph)[node_id]
@@ -1290,7 +1299,11 @@ def node_status(graph: dict[str, Any], node_id: str) -> str:
         status = "passed"
     else:
         status = str(node.get("status", "pending") or "pending").lower()
+    return status
 
+
+def node_status(graph: dict[str, Any], node_id: str) -> str:
+    status = node_recorded_status(graph, node_id)
     if status == "passed" and _passed_without_required_eval(graph, node_id):
         return "reviewing"
     return status

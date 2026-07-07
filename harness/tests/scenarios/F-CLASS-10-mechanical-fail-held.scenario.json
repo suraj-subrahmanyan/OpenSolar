@@ -25,6 +25,16 @@
       "fact": "held_reason",
       "op": "eq",
       "value": "mechanical_fail_cannot_flip_passed_node"
+    },
+    {
+      "fact": "v5_final_status",
+      "op": "eq",
+      "value": "passed"
+    },
+    {
+      "fact": "v5_held_reason",
+      "op": "eq",
+      "value": "mechanical_fail_cannot_flip_passed_node"
     }
   ],
   "fault": {
@@ -32,5 +42,5 @@
       "SOLAR_GATE_LEDGER": "0"
     }
   },
-  "notes": "GREEN: node_verdict holds the mechanical FAIL (runner-owned vocabulary), archives it non-consumable. RED: legacy flips the passed node to failed. gate_replay mode: the driver exercises the REAL scheduler/dispatcher/ledger seams inside the sandbox HARNESS_DIR. GREEN env sets SOLAR_GATE_LEDGER=1 (the Lane 3 fix); RED injects SOLAR_GATE_LEDGER=0 (the pre-contract world) and the same expect must fail — proving the scenario discriminates the class, not the plumbing."
+  "notes": "GREEN: node_verdict holds the mechanical FAIL (runner-owned vocabulary), archives it non-consumable — for BOTH the no-handoff driver shape and the real v5 shape (handoff present, eval.json missing, repair budget exhausted; round-4 G1: the hold gates on the RECORDED pass, not the downgraded effective status). RED: legacy flips the passed node to failed (v5 shape terminally). gate_replay mode: the driver exercises the REAL scheduler/dispatcher/ledger seams inside the sandbox HARNESS_DIR. GREEN env sets SOLAR_GATE_LEDGER=1 (the Lane 3 fix); RED injects SOLAR_GATE_LEDGER=0 (the pre-contract world) and the same expect must fail — proving the scenario discriminates the class, not the plumbing."
 }

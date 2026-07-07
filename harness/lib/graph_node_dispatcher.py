@@ -420,6 +420,7 @@ from graph_scheduler import (  # noqa: E402
     enqueue_ready,
     set_node_status,
     node_status,
+    node_recorded_status,
     mark_node_result,
     parent_ready_check,
     sync_status_cache_from_graph,
@@ -8295,6 +8296,31 @@ def dispatch_ready(graph_path: str, dry_run: bool = False, ttl: int = 900,
     }
 
 
+def _node_policy_passed(graph: dict[str, Any], sid: str, node_id: str) -> bool:
+    """AC-R4.1 hold discriminator (round-4 G1): was the node RECORDED passed?
+
+    node_status() fail-closed-downgrades a passed-without-required-eval node to
+    "reviewing" — and the real v5 shape (handoff present, eval.json missing) is
+    exactly the state that produces the mechanical FAIL the hold exists for, so
+    gating the hold on the effective status bypassed it. Consult the recorded
+    fold first, then the ledger projection (an applied audited pass survives
+    even a graph-side clobber)."""
+    try:
+        if node_recorded_status(graph, node_id) == "passed":
+            return True
+    except Exception:
+        pass
+    try:
+        if (
+            _gate_ledger is not None
+            and _gate_ledger.project_node_status(SPRINTS_DIR, sid, node_id) == "passed"
+        ):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
                  eval_json: str = "", dry_run: bool = False, ttl: int = 900,
                  dispatch_downstream: bool = True, verdict_kind: str = "") -> dict[str, Any]:
@@ -8332,10 +8358,12 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
         and effective_verdict_kind in {"mechanical", "infrastructure"}
         and _ledger_enabled()
         and _gate_ledger.contracted(graph)
-        and node_status(graph, node_id) == "passed"
+        and _node_policy_passed(graph, sid, node_id)
     ):
         # v5 replay (AC-R4.1): a mechanical/infrastructure FAIL must not flip a
-        # policy-passed node — archive the verdict, never apply it.
+        # policy-passed node — archive the verdict, never apply it. Gated on the
+        # RECORDED pass, not node_status(): the fail-closed passed-without-eval
+        # downgrade projects the real v5 shape as "reviewing" (round-4 G1).
         _ledger_record(sid, node_id=node_id, kind="eval_verdict",
                        author={"type": "evaluator"}, verdict="FAIL",
                        verdict_kind=effective_verdict_kind,
