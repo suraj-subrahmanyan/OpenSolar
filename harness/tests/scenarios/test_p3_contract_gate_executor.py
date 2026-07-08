@@ -138,6 +138,30 @@ def test_gate_none_writes_policy_pass_sidecar(sandbox):
     assert md.strip()
 
 
+def test_gate_waits_for_builder_completion(sandbox):
+    """P3 live run 1: on the pool path the handoff appears while the builder
+    is still in flight, and the executor fired at status=dispatched — D1
+    passed prematurely (then the builder-complete mark downgraded it back to
+    reviewing, where its now-stale sidecar was never re-consumed) and D3
+    evaluated half-written artifacts (research_eval_json_missing -> FAIL ->
+    repair archived the handoff -> both in-flight builders failed contract
+    closeout exit 67). Deterministic gates evaluate COMPLETED stage outputs:
+    the executor must wait for the builder-complete `reviewing` mark. D2 —
+    whose gate happened to run after reviewing — passed cleanly in the same
+    run, the controlled experiment for this rule."""
+    gate = {"kind": "deterministic_command",
+            "command": "python3 -c \"import sys; sys.exit(0)\""}
+    node = _node(gate, status="dispatched")
+    result = _dispatch(_graph([node]), sandbox)
+    assert not any(d.get("dispatch_mode") == "deterministic_gate" for d in result.get("dispatched", []))
+    assert any(
+        s.get("reason") == "deterministic_gate_waiting_for_builder"
+        for s in result.get("skipped", [])
+    ), result
+    payload, _ = _eval_sidecars(sandbox, "D2")
+    assert not payload, "no sidecar may be written while the builder is in flight"
+
+
 def test_llm_eval_stage_keeps_legacy_path(sandbox):
     """llm_eval must NOT be executed deterministically — with no evaluators
     discovered the node is skipped for capacity, exactly the legacy shape."""

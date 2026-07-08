@@ -8031,6 +8031,24 @@ def _maybe_execute_contract_gate(graph: dict[str, Any], sid: str, node: dict[str
     if kind not in _cge.EXECUTABLE_GATE_KINDS:
         return None
     node_id = str(node.get("id") or "")
+    # Deterministic gates evaluate COMPLETED stage outputs. On the pool path
+    # the handoff appears while the builder is still in flight, and
+    # _node_eval_needed accepts dispatched/in_progress — fine for slow llm
+    # evals, fatal for a gate that runs in seconds (P3 live run 1: D1
+    # evaluated at status=dispatched -> premature pass -> the builder-complete
+    # mark downgraded it back to reviewing where its now-stale sidecar was
+    # never re-consumed; D3 evaluated half-written artifacts ->
+    # research_eval_json_missing FAIL -> repair archived the handoff -> both
+    # in-flight builders failed contract closeout exit 67. D2, whose gate
+    # happened to run after the reviewing mark, passed cleanly in the same
+    # run). Wait for the builder-complete `reviewing` mark.
+    if str(node_status(graph, node_id) or "").strip().lower() != "reviewing":
+        return {
+            "node": node_id,
+            "dispatch_mode": "deterministic_gate",
+            "gate_kind": kind,
+            "skip_reason": "deterministic_gate_waiting_for_builder",
+        }
     if dry_run:
         return {
             "node": node_id,
@@ -8076,7 +8094,14 @@ def dispatch_node_evals(graph_path: str, dry_run: bool = False, ttl: int = 900,
             _emit_node_proof_sidecars(sid, node)
         gate_result = _maybe_execute_contract_gate(graph, sid, node, dry_run=dry_run)
         if gate_result is not None:
-            dispatched.append(gate_result)
+            if gate_result.get("skip_reason"):
+                skipped.append({
+                    "node": gate_result.get("node"),
+                    "reason": gate_result["skip_reason"],
+                    "gate_kind": gate_result.get("gate_kind"),
+                })
+            else:
+                dispatched.append(gate_result)
             continue
         requested_plan = _plan_node_evaluation(graph, node)
         loop_evaluators = [
