@@ -137,10 +137,12 @@
       "status": "verified_lane_5",
       "scenario": null,
       "required_seam": "scripts/live_codex_epic_status.py --contract (reads contract terminal states)",
-      "note": "artifact-check --contract validates a finished contracted sprint end-to-end (contract terminal states + canonical-layout copy validation + route-proof gates); also proven against the real P3 run-5 PASS bundle (run-archive/p3-sprint-20260708-161906-...-passed-20260708T164000Z): ok:true state:passed.",
+      "note": "artifact-check --contract validates a finished contracted sprint end-to-end (contract terminal states + canonical-layout copy validation + route-proof gates); also proven against the real P3 run-5 PASS bundle (run-archive/p3-sprint-20260708-161906-...-passed-20260708T164000Z): ok:true state:passed. LIVE-PROVEN P4 2026-07-08: dashboard-initiated contracted run (webapp composer /workflow directive, sprint-20260708-185911) — displayed stage states reconciled against the gate ledger, 0 violations over 49 UI snapshots (run-archive/p4-sprint-20260708-185911-...-passed-20260708T191732Z, truthful-states-verdict.json). Same run exposed a residual heuristic surface: human_action_required advertised plan_review for the whole contracted run (39 sightings, zero plan verdicts in the ledger) — retired by contracted/build_started guards in _human_action_required.",
       "verified_by": [
         "contract/p2-staging@25110e20 harness/tests/scenarios/test_p4_class14_artifact_check.py::test_contract_artifact_check_validates_a_finished_contracted_sprint",
-        "contract/p2-staging@25110e20 harness/tests/scenarios/test_p4_class14_artifact_check.py::test_contract_artifact_check_still_fails_on_missing_artifacts"
+        "contract/p2-staging@25110e20 harness/tests/scenarios/test_p4_class14_artifact_check.py::test_contract_artifact_check_still_fails_on_missing_artifacts",
+        "harness/tests/scenarios/test_p4_false_plan_review_card.py::test_contracted_inflight_run_never_advertises_plan_review",
+        "harness/tests/scenarios/test_p4_false_plan_review_card.py::test_generic_unstarted_plan_still_asks_for_review"
       ]
     },
     {
@@ -149,7 +151,7 @@
       "status": "verified_lane_5",
       "scenario": null,
       "required_seam": "wrapper contract terminal-state signal",
-      "note": "wrapper terminal-state signal is now LEVEL-triggered (parent projection converges on every dispatch tick, not on a single completion edge) — structurally retires the v8 18ms edge race; live-proven P3 run 5: wrapper printed PASS, projection flipped 15s after the final node (previous run: frozen forever).",
+      "note": "wrapper terminal-state signal is now LEVEL-triggered (parent projection converges on every dispatch tick, not on a single completion edge) — structurally retires the v8 18ms edge race; live-proven P3 run 5: wrapper printed PASS, projection flipped 15s after the final node (previous run: frozen forever). LIVE-PROVEN P4 2026-07-08 on the dashboard path: run submitted through the webapp UI, parent status.json flipped passed within seconds of S3 terminal, dashboard displayed terminal truthfully (run-archive/p4-sprint-20260708-185911-...-passed-20260708T191732Z).",
       "verified_by": [
         "contract/p2-staging@25110e20 harness/tests/scenarios/test_p3_run4_projection_convergence.py::test_dispatch_tick_converges_the_parent_projection",
         "contract/p2-staging@25110e20 harness/tests/scenarios/test_p3_run4_projection_convergence.py::test_inflight_graph_projection_stays_active"
@@ -284,53 +286,14 @@
     }
   ],
   "summary": {
-    "verified_here": [
-      6,
-      9,
-      10,
-      12,
-      13,
-      16,
-      17,
-      18,
-      19,
-      20,
-      23,
-      27,
-      28,
-      29,
-      30
-    ],
-    "partial": [
-      8,
-      21
-    ],
-    "verified_lane_1": [
-      1,
-      4,
-      5,
-      7
-    ],
-    "verified_lane_0_5": [
-      22
-    ],
-    "pending_lane_0": [
-      "19-allowlist-half"
-    ],
-    "pending_lane_1": [
-      2,
-      3,
-      11,
-      25,
-      26
-    ],
-    "delegated_lane_6": [
-      24
-    ],
-    "verified_lane_5": [
-      14,
-      15
-    ]
+    "verified_here": [6, 9, 10, 12, 13, 16, 17, 18, 19, 20, 23, 27, 28, 29, 30],
+    "partial": [8, 21],
+    "verified_lane_1": [1, 4, 5, 7],
+    "verified_lane_0_5": [22],
+    "pending_lane_0": ["19-allowlist-half"],
+    "pending_lane_1": [2, 3, 11, 25, 26],
+    "delegated_lane_6": [24],
+    "verified_lane_5": [14, 15]
   },
   "integration_merge": "contract/integration@d3ea9a68"
 }

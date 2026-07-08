@@ -1286,7 +1286,20 @@ def _human_action_required(status: dict, dashboard: dict, artifacts: list[dict],
             "detail": f"No worker advertises {missing}.",
             "primary_artifact": _first_artifact(artifacts, "task_graph"),
         }
-    if plan_ready and (sprint_status in {"active", "planning"} or phase in {"planning", "planning_complete"}):
+    # plan_review is only a real decision while the runtime is actually waiting
+    # on it: a contracted graph's gates come from the contract (no human plan
+    # gate — contracted runs self-advance), and once any node has left
+    # "pending" the runtime has already consumed the plan. Without these two
+    # guards the artifact heuristic below kept the card up for entire
+    # contracted runs (P4 finding: 39 sightings, zero plan verdicts).
+    contracted = bool(dashboard.get("workflow_contract_id"))
+    dag = dashboard.get("dag") if isinstance(dashboard.get("dag"), dict) else {}
+    build_started = any(
+        _normalize_status(str(node.get("status") or "")) != "pending"
+        for node in (dag.get("nodes") or [])
+        if isinstance(node, dict)
+    )
+    if plan_ready and not contracted and not build_started and (sprint_status in {"active", "planning"} or phase in {"planning", "planning_complete"}):
         return {
             "type": "plan_review",
             "severity": "decision",
@@ -2015,6 +2028,7 @@ def build_dashboard_payload(sprint_id: str | None = None) -> tuple[dict, list[st
         "title": status.get("title", ""),
         "sprint_status": status.get("status", ""),
         "phase": status.get("phase", ""),
+        "workflow_contract_id": str(tg.get("workflow_contract_id") or ""),
         "generated_from": {
             "status_json": _display_path(SPRINTS_DIR / f"{sid}.status.json") if sid else "",
             "task_graph_json": _display_path(_existing_task_graph_path(sid)) if sid else "",
