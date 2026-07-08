@@ -201,3 +201,34 @@ def test_instantiate_stamps_repair_budget_from_on_fail():
     assert nodes["D3"].get("max_repair_attempts") == 1
     for nid in ("D1", "D4", "D5"):
         assert "max_repair_attempts" not in nodes[nid]
+
+
+def test_repaired_node_gate_verdict_is_consumed_not_archived(sandbox):
+    """P3 live run 2: after repair_start, every fresh executor FAIL was
+    archived as late_pre_repair_eval_output (the classifier keys on
+    node.eval_dispatched_at being NEWER than the repair marker, which only the
+    llm dispatch path stamped) -> the gate re-fired every ~11s forever. The
+    executor now stamps eval_dispatched_at; a post-repair FAIL at an exhausted
+    budget must therefore be CONSUMED and terminalize the node as failed."""
+    gate = {"kind": "deterministic_command",
+            "command": "python3 -c \"import sys; sys.exit(4)\"",
+            "on_fail": "repair_once_then_fail"}
+    node = _node(gate)
+    node["repair_attempts"] = 1
+    node["max_repair_attempts"] = 1
+    node["repair_context"] = {"attempt": 1, "created_at": "2026-07-08T00:00:00Z"}
+    graph = _graph([node])
+    result = _dispatch(graph, sandbox)
+    assert any(d.get("dispatch_mode") == "deterministic_gate" for d in result.get("dispatched", [])), result
+    payload, _ = _eval_sidecars(sandbox, "D2")
+    assert payload.get("verdict") == "FAIL"
+    assert payload.get("eval_generation") == 1
+    # dispatch_node_evals loads+saves its own graph copy — reread from disk
+    graph_path = sandbox / "sprints" / f"{SID}.task_graph.json"
+    saved = json.loads(graph_path.read_text(encoding="utf-8"))
+    saved_node = next(n for n in saved["nodes"] if n["id"] == "D2")
+    assert saved_node.get("eval_dispatched_at"), "executor must stamp eval_dispatched_at (staleness classifier input)"
+    gnd._reconcile_existing_dispatches(saved, str(graph_path))
+    ej = sandbox / "sprints" / f"{SID}.D2-eval.json"
+    assert ej.exists(), "post-repair executor verdict must NOT be archived as late_pre_repair"
+    assert saved_node["status"] in {"failed", "failed_review"}, saved["nodes"]

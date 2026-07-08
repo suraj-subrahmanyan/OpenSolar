@@ -1,9 +1,9 @@
 {
   "artifact_roots": {
     "aliases": [
-      "sprints/golden-sid/workdir/rsi-deep-research-report/"
+      "workspace/rsi-deep-research-report/"
     ],
-    "canonical": "workspace/rsi-deep-research-report/",
+    "canonical": "sprints/golden-sid/workdir/rsi-deep-research-report/",
     "publish_rule": "export stage copies canonical set to evidence/report/rsi-deep-research-report/"
   },
   "dag_variant": "research",
@@ -38,7 +38,7 @@
       "node_kind": "analysis",
       "outputs": [
         {
-          "path": "workspace/rsi-deep-research-report/scope-contract.json",
+          "path": "sprints/golden-sid/workdir/rsi-deep-research-report/scope-contract.json",
           "type": "json"
         }
       ],
@@ -57,7 +57,7 @@
         "result_timeout_sec": 900
       },
       "write_scope": [
-        "workspace/rsi-deep-research-report/scope-contract.json"
+        "sprints/golden-sid/workdir/rsi-deep-research-report/scope-contract.json"
       ]
     },
     {
@@ -81,7 +81,7 @@
       ],
       "dispatch_task_type": "knowledge-extraction",
       "evaluator_gate": {
-        "command": "research source-audit --output-dir workspace/rsi-deep-research-report --json",
+        "command": "python3 scripts/validate_rsi_demo_report.py --workspace sprints/golden-sid/workdir --sources-only",
         "kind": "deterministic_command",
         "on_fail": "repair_once_then_fail"
       },
@@ -94,7 +94,7 @@
       "outputs": [
         {
           "demo_artifact": true,
-          "path": "workspace/rsi-deep-research-report/sources.json",
+          "path": "sprints/golden-sid/workdir/rsi-deep-research-report/sources.json",
           "type": "json"
         }
       ],
@@ -123,7 +123,7 @@
         "result_timeout_sec": 900
       },
       "write_scope": [
-        "workspace/rsi-deep-research-report/sources.json"
+        "sprints/golden-sid/workdir/rsi-deep-research-report/sources.json"
       ]
     },
     {
@@ -148,7 +148,7 @@
       ],
       "dispatch_task_type": "evidence",
       "evaluator_gate": {
-        "command": "python3 scripts/validate_rsi_demo_report.py --workspace workspace --claims-only",
+        "command": "python3 scripts/validate_rsi_demo_report.py --workspace sprints/golden-sid/workdir --claims-only",
         "inputs_produced_by_this_gate": [
           "research_eval.json"
         ],
@@ -172,7 +172,7 @@
       "outputs": [
         {
           "demo_artifact": true,
-          "path": "workspace/rsi-deep-research-report/claims.json",
+          "path": "sprints/golden-sid/workdir/rsi-deep-research-report/claims.json",
           "type": "json"
         }
       ],
@@ -201,7 +201,7 @@
         "result_timeout_sec": 1200
       },
       "write_scope": [
-        "workspace/rsi-deep-research-report/claims.json"
+        "sprints/golden-sid/workdir/rsi-deep-research-report/claims.json"
       ]
     },
     {
@@ -231,7 +231,7 @@
       "node_kind": "analysis",
       "outputs": [
         {
-          "path": "workspace/rsi-deep-research-report/contradiction-matrix.json",
+          "path": "sprints/golden-sid/workdir/rsi-deep-research-report/contradiction-matrix.json",
           "type": "json"
         }
       ],
@@ -249,7 +249,7 @@
         "result_timeout_sec": 900
       },
       "write_scope": [
-        "workspace/rsi-deep-research-report/contradiction-matrix.json"
+        "sprints/golden-sid/workdir/rsi-deep-research-report/contradiction-matrix.json"
       ]
     },
     {
@@ -293,12 +293,12 @@
       "outputs": [
         {
           "demo_artifact": true,
-          "path": "workspace/rsi-deep-research-report/report.md",
+          "path": "sprints/golden-sid/workdir/rsi-deep-research-report/report.md",
           "type": "markdown"
         },
         {
           "demo_artifact": true,
-          "path": "workspace/rsi-deep-research-report/report.html",
+          "path": "sprints/golden-sid/workdir/rsi-deep-research-report/report.html",
           "type": "html"
         }
       ],
@@ -334,8 +334,8 @@
         "result_timeout_sec": 1800
       },
       "write_scope": [
-        "workspace/rsi-deep-research-report/report.md",
-        "workspace/rsi-deep-research-report/report.html"
+        "sprints/golden-sid/workdir/rsi-deep-research-report/report.md",
+        "sprints/golden-sid/workdir/rsi-deep-research-report/report.html"
       ]
     },
     {
@@ -356,7 +356,7 @@
       ],
       "dispatch_task_type": "documentation",
       "evaluator_gate": {
-        "command": "python3 scripts/validate_rsi_demo_report.py --workspace workspace",
+        "command": "python3 scripts/validate_rsi_demo_report.py --workspace sprints/golden-sid/workdir",
         "kind": "deterministic_command",
         "on_fail": "fail"
       },
@@ -369,7 +369,7 @@
       "outputs": [
         {
           "demo_artifact": true,
-          "path": "workspace/rsi-deep-research-report/evaluation-checklist.md",
+          "path": "sprints/golden-sid/workdir/rsi-deep-research-report/evaluation-checklist.md",
           "type": "markdown"
         }
       ],
@@ -402,7 +402,7 @@
         "result_timeout_sec": 600
       },
       "write_scope": [
-        "workspace/rsi-deep-research-report/evaluation-checklist.md"
+        "sprints/golden-sid/workdir/rsi-deep-research-report/evaluation-checklist.md"
       ]
     }
   ],
@@ -434,8 +434,8 @@
   },
   "sprint_id": "sprint-golden",
   "title": "RSI DeepDive Report",
-  "validator_command": "python3 scripts/validate_rsi_demo_report.py --workspace workspace",
-  "workflow_contract_hash": "sha256:fcdb5594e742ee7280b077db78ac3feacf70e967e2e01f8955080736208eb1af",
+  "validator_command": "python3 scripts/validate_rsi_demo_report.py --workspace sprints/golden-sid/workdir",
+  "workflow_contract_hash": "sha256:e3cec868fa5bbdd10c37c897b28a07038e7fd8518596432e81d4ee57a0a6d8ce",
   "workflow_contract_id": "research.deepdive.rsi_demo",
-  "workflow_contract_version": "1.2"
+  "workflow_contract_version": "1.3"
 }

@@ -67,28 +67,35 @@ def test_contracted_intake_succeeds(tmp_path):
 
 
 def test_resolved_root_is_canonical_parent(contract):
-    graph = wc.instantiate(contract, {"sprint_id": "p3-sub-probe"})
-    # canonical: workspace/rsi-deep-research-report/ -> resolved_root: workspace
+    # v1.3: the canonical root anchors at the node WORKDIR (the P2-proven
+    # anchor builders actually write under — live run 2 proved they resolve
+    # relative roots against their workdir, and $HARNESS/workspace never
+    # existed, so the D3 gate hit WORKSPACE_UNREACHABLE while artifacts sat
+    # at sprints/<sid>/workdir/...). resolved_root = the workdir.
+    graph = wc.instantiate(contract, {"sprint_id": "p3-sub-probe", "sid": "p3-sub-probe"})
     cmd = str(graph.get("validator_command") or "")
     assert "<resolved_root>" not in cmd
-    assert "--workspace workspace" in cmd, cmd
+    assert "--workspace sprints/p3-sub-probe/workdir" in cmd, cmd
 
 
 def test_gate_commands_are_executable_shapes(contract):
     """v1.1 contract: every deterministic gate command must name real flags."""
-    graph = wc.instantiate(contract, {"sprint_id": "p3-cmd-probe"})
+    graph = wc.instantiate(contract, {"sprint_id": "p3-cmd-probe", "sid": "p3-cmd-probe"})
     gates = {n["id"]: (n.get("evaluator_gate") or {}) for n in graph["nodes"]}
     d2 = str(gates["D2"].get("command") or "")
-    assert d2.startswith("research source-audit "), d2
-    assert "--output-dir workspace/rsi-deep-research-report" in d2, d2
-    assert "--sources" not in d2  # the flag that never existed
+    # v1.3: `research source-audit` is VACUOUS on a missing/empty dir
+    # (ok:true, source_count:0, exit 0 — live run 2 "passed" D2 against a
+    # directory that did not exist). The demo validator's --sources-only mode
+    # actually fails on missing dir / too-few sources.
+    assert d2.startswith("python3 scripts/validate_rsi_demo_report.py "), d2
+    assert d2.endswith("--sources-only"), d2
     d3 = str(gates["D3"].get("command") or "")
     # v1.2: the bounded seed-pack demo gates D3 on the deterministic
     # claims/linkage validator — `research eval-artifacts` fundamentally needs
     # a NATIVE engine run's research_eval.json (build_research_eval_payload is
     # sqlite-backed), which the seed-pack demo path does not produce; the
     # native gate remains the engine-native path's gate (P4+/AutoSci).
-    assert d3 == "python3 scripts/validate_rsi_demo_report.py --workspace workspace --claims-only", d3
+    assert d3 == "python3 scripts/validate_rsi_demo_report.py --workspace sprints/p3-cmd-probe/workdir --claims-only", d3
     d6 = str(gates["D6"].get("command") or "")
     assert d6 == str(graph.get("validator_command") or ""), (
         "D6 stage gate must match the contract-level validator_command"
@@ -163,6 +170,8 @@ def test_d3_gate_is_the_claims_only_validator(contract):
     d3 = next(s for s in contract["stages"] if s["id"] == "D3")
     cmd = str((d3.get("evaluator_gate") or {}).get("command") or "")
     assert cmd == "python3 scripts/validate_rsi_demo_report.py --workspace <resolved_root> --claims-only", cmd
+    canonical = str((contract.get("artifact_roots") or {}).get("canonical") or "")
+    assert canonical == "sprints/<sid>/workdir/rsi-deep-research-report/", canonical
 
 
 def test_claims_only_validator_red_green(tmp_path):
@@ -191,3 +200,30 @@ def test_claims_only_validator_red_green(tmp_path):
     )
     assert red.returncode != 0
     assert "LINKAGE" in (red.stdout + red.stderr)
+
+
+def test_sources_only_validator_red_green(tmp_path):
+    """The v1.3 D2 gate: fails on a MISSING workspace (the source-audit
+    vacuity contrast) and on too-few sources; passes on a faithful pack set."""
+    import subprocess, sys as _sys
+    validator = _HARNESS / "scripts" / "validate_rsi_demo_report.py"
+    missing = subprocess.run(
+        [_sys.executable, str(validator), "--workspace", str(tmp_path / "nope"), "--sources-only"],
+        capture_output=True, text=True)
+    assert missing.returncode != 0
+    assert "WORKSPACE_UNREACHABLE" in (missing.stdout + missing.stderr)
+    ws = tmp_path / "ws"
+    root = ws / "rsi-deep-research-report"
+    root.mkdir(parents=True)
+    (root / "sources.json").write_text(json.dumps(
+        [{"id": f"s{i}", "title": f"T{i}", "citation_hint": f"C{i}"} for i in range(6)]), encoding="utf-8")
+    green = subprocess.run(
+        [_sys.executable, str(validator), "--workspace", str(ws), "--sources-only"],
+        capture_output=True, text=True)
+    assert green.returncode == 0, green.stdout + green.stderr
+    (root / "sources.json").write_text(json.dumps([{"id": "s1", "title": "T", "citation_hint": "C"}]), encoding="utf-8")
+    few = subprocess.run(
+        [_sys.executable, str(validator), "--workspace", str(ws), "--sources-only"],
+        capture_output=True, text=True)
+    assert few.returncode != 0
+    assert "TOO_FEW_SOURCES" in (few.stdout + few.stderr)

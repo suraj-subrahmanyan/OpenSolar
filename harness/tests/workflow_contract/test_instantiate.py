@@ -71,7 +71,7 @@ def test_instantiation_matches_committed_golden(shipped_contracts, workflow_id, 
 
 def test_graph_identity_is_workflow_contract_id_not_dag_variant(rsi_graph, cli_graph, cli_anthropic_graph):
     assert rsi_graph["workflow_contract_id"] == "research.deepdive.rsi_demo"
-    assert rsi_graph["workflow_contract_version"] == "1.2"
+    assert rsi_graph["workflow_contract_version"] == "1.3"
     assert rsi_graph["dag_variant"] == "research"
     assert cli_graph["workflow_contract_id"] == "code.cli_smoke"
     assert cli_graph["dag_variant"] == "short"
@@ -126,7 +126,7 @@ def test_required_artifacts_all_produced_by_stages(shipped_contracts, rsi_graph)
 # ---------------------------------------------------------------------------
 
 def test_nodes_carry_the_existing_task_graph_fields(rsi_graph):
-    canonical_root = "workspace/rsi-deep-research-report/"
+    canonical_root = "sprints/golden-sid/workdir/rsi-deep-research-report/"
     for node in rsi_graph["nodes"]:
         assert node["status"] == "pending"
         assert node["dispatch_task_type"] == node["task_type"]
@@ -177,7 +177,7 @@ def test_unknown_placeholders_are_left_verbatim(shipped_contracts):
 
 def test_resolved_root_derives_from_canonical_and_caller_input_wins(shipped_contracts):
     graph = wc.instantiate(shipped_contracts["research.deepdive.rsi_demo"], dict(RSI_INPUTS))
-    assert graph["validator_command"].endswith("--workspace workspace")
+    assert graph["validator_command"].endswith("--workspace sprints/golden-sid/workdir")
     overridden = wc.instantiate(
         shipped_contracts["research.deepdive.rsi_demo"],
         {**RSI_INPUTS, "resolved_root": "/custom/ws"},

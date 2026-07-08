@@ -102,6 +102,16 @@ def main() -> None:
             "report/checklist artifacts are checked later at D6"
         ),
     )
+    parser.add_argument(
+        "--sources-only",
+        action="store_true",
+        help=(
+            "validate only sources.json (existence, unique-id count, non-empty "
+            "title/citation_hint) — the workflow-contract D2 gate. Replaces "
+            "`research source-audit`, which returns ok on a MISSING dir "
+            "(source_count 0, exit 0 — a vacuous pass, observed live)"
+        ),
+    )
     args = parser.parse_args()
     if args.workspace:
         try:
@@ -110,13 +120,18 @@ def main() -> None:
             fail(f"WORKSPACE_UNREACHABLE: {args.workspace}: {exc}")
 
     # 1. required files exist
-    required = ["sources.json", "claims.json"] if args.claims_only else REQUIRED
+    if args.sources_only:
+        required = ["sources.json"]
+    elif args.claims_only:
+        required = ["sources.json", "claims.json"]
+    else:
+        required = REQUIRED
     missing = [p for p in required if not (ROOT / p).is_file()]
     if missing:
         fail(f"ARTIFACT_MISSING: {missing}")
 
     html = md = ""
-    if not args.claims_only:
+    if not (args.claims_only or args.sources_only):
         # 2. report.html is real HTML
         html = (ROOT / "report.html").read_text(encoding="utf-8", errors="replace")
         if "<html" not in html.lower():
@@ -130,25 +145,39 @@ def main() -> None:
 
     # 3. JSON files parse
     parsed = {}
-    for name in ["sources.json", "claims.json"]:
+    json_names = ["sources.json"] if args.sources_only else ["sources.json", "claims.json"]
+    for name in json_names:
         try:
             parsed[name] = json.loads((ROOT / name).read_text(encoding="utf-8"))
         except Exception as exc:  # noqa: BLE001
             fail(f"JSON_INVALID: {name}: {type(exc).__name__}: {exc}")
 
     sources = _as_list(parsed["sources.json"], "sources")
-    claims = _as_list(parsed["claims.json"], "claims")
     if sources is None:
         fail("SCHEMA: sources.json is not a list (nor {sources:[...]})")
-    if claims is None:
-        fail("SCHEMA: claims.json is not a list (nor {claims:[...]})")
 
     source_ids = _unique_required_ids(sources, "id", "SOURCE")
-    claim_ids = _unique_required_ids(claims, "claim_id", "CLAIM")
 
     # 5/6. counts are evidence breadth gates; duplicates do not count.
     if len(source_ids) < MIN_SOURCES:
         fail(f"TOO_FEW_SOURCES: {len(source_ids)} unique ids < {MIN_SOURCES}")
+
+    if args.sources_only:
+        thin = [s.get("id") for s in sources if isinstance(s, dict)
+                and not (str(s.get("title") or "").strip() and str(s.get("citation_hint") or "").strip())]
+        if thin:
+            fail(f"SOURCE_METADATA_MISSING: sources without title/citation_hint: {thin[:3]}")
+        print(
+            "RSI demo source layer validated (sources-only): "
+            f"{len(source_ids)} unique sources, all with title + citation_hint"
+        )
+        return
+
+    claims = _as_list(parsed["claims.json"], "claims")
+    if claims is None:
+        fail("SCHEMA: claims.json is not a list (nor {claims:[...]})")
+
+    claim_ids = _unique_required_ids(claims, "claim_id", "CLAIM")
     if len(claim_ids) < MIN_CLAIMS:
         fail(f"TOO_FEW_CLAIMS: {len(claim_ids)} unique ids < {MIN_CLAIMS}")
 

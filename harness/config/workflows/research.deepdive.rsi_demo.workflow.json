@@ -1,7 +1,7 @@
 {
   "schema_version": "solar.workflow_contract.v1",
   "workflow_id": "research.deepdive.rsi_demo",
-  "version": "1.2",
+  "version": "1.3",
   "title": "RSI DeepDive Report",
   "dag_variant": "research",
   "trigger": {
@@ -41,9 +41,9 @@
     "seed_pack": "demo-rsi/source-pack/"
   },
   "artifact_roots": {
-    "canonical": "workspace/rsi-deep-research-report/",
+    "canonical": "sprints/<sid>/workdir/rsi-deep-research-report/",
     "aliases": [
-      "sprints/<sid>/workdir/rsi-deep-research-report/"
+      "workspace/rsi-deep-research-report/"
     ],
     "publish_rule": "export stage copies canonical set to evidence/report/rsi-deep-research-report/"
   },
@@ -149,7 +149,7 @@
       ],
       "evaluator_gate": {
         "kind": "deterministic_command",
-        "command": "research source-audit --output-dir <resolved_root>/rsi-deep-research-report --json",
+        "command": "python3 scripts/validate_rsi_demo_report.py --workspace <resolved_root> --sources-only",
         "on_fail": "repair_once_then_fail"
       },
       "dashboard_label": "D2 · Sources",

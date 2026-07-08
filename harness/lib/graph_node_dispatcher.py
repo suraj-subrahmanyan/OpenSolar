@@ -8056,6 +8056,13 @@ def _maybe_execute_contract_gate(graph: dict[str, Any], sid: str, node: dict[str
             "gate_kind": kind,
             "dry_run": True,
         }
+    # The staleness classifiers (_archive_late_pre_repair_eval_sidecars and
+    # friends) accept a verdict only when the node's eval dispatch is NEWER
+    # than the repair marker — a field only the llm dispatch path stamped.
+    # Without it every post-repair executor FAIL was archived as
+    # late_pre_repair_eval_output and the gate re-fired forever (P3 live run
+    # 2: D3 looped every ~11s after repair exhaustion).
+    node["eval_dispatched_at"] = _utc_now()
     result = _cge.execute_gate(SPRINTS_DIR, sid, node, gate or {}, harness_dir=HARNESS_DIR)
     _ledger_record(
         sid, node_id=node_id, kind="gate_check", author={"type": "policy"},
