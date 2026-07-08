@@ -1,7 +1,7 @@
 {
   "schema_version": "solar.workflow_contract.v1",
   "workflow_id": "research.deepdive.rsi_demo",
-  "version": "1.0",
+  "version": "1.1",
   "title": "RSI DeepDive Report",
   "dag_variant": "research",
   "trigger": {
@@ -128,7 +128,7 @@
       ],
       "evaluator_gate": {
         "kind": "deterministic_command",
-        "command": "research eval-artifacts --sources",
+        "command": "research source-audit --output-dir <resolved_root>/rsi-deep-research-report --json",
         "on_fail": "repair_once_then_fail"
       },
       "dashboard_label": "D2 · Sources",
@@ -179,7 +179,7 @@
       ],
       "evaluator_gate": {
         "kind": "deterministic_command",
-        "command": "research eval-artifacts",
+        "command": "research eval-artifacts --eval-json <resolved_root>/rsi-deep-research-report/research_eval.json --json",
         "inputs_produced_by_this_gate": ["research_eval.json"],
         "on_fail": "repair_once_then_fail",
         "on_capacity_unavailable": "wait",
@@ -331,7 +331,7 @@
       ],
       "evaluator_gate": {
         "kind": "deterministic_command",
-        "command": "python3 scripts/validate_rsi_demo_report.py",
+        "command": "python3 scripts/validate_rsi_demo_report.py --workspace <resolved_root>",
         "on_fail": "fail"
       },
       "dashboard_label": "D6 · Publish",

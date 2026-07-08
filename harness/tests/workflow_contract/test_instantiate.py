@@ -71,7 +71,7 @@ def test_instantiation_matches_committed_golden(shipped_contracts, workflow_id, 
 
 def test_graph_identity_is_workflow_contract_id_not_dag_variant(rsi_graph, cli_graph, cli_anthropic_graph):
     assert rsi_graph["workflow_contract_id"] == "research.deepdive.rsi_demo"
-    assert rsi_graph["workflow_contract_version"] == "1.0"
+    assert rsi_graph["workflow_contract_version"] == "1.1"
     assert rsi_graph["dag_variant"] == "research"
     assert cli_graph["workflow_contract_id"] == "code.cli_smoke"
     assert cli_graph["dag_variant"] == "short"
@@ -160,9 +160,29 @@ def test_placeholder_substitution(cli_graph):
     assert "wordfreq.py" in cli_graph["required_artifacts"]
 
 
-def test_unknown_placeholders_are_left_verbatim(rsi_graph):
-    # <resolved_root> is resolved by the wrapper at run time, not at instantiation
-    assert "<resolved_root>" in rsi_graph["validator_command"]
+def test_unknown_placeholders_are_left_verbatim(shipped_contracts):
+    # A token nobody supplies stays verbatim (intake's fail-closed
+    # UNRESOLVED_PLACEHOLDERS check catches it downstream). NOTE:
+    # <resolved_root> is no longer such a token — the original "resolved by
+    # the wrapper at run time" design had no wrapper on the contracted intake
+    # path (P3 rehearsal: intake failed closed on it), so instantiate() now
+    # derives it from artifact_roots.canonical (parent-dir semantics); see
+    # test_rsi_demo_p3_intake.py.
+    import copy
+    contract = copy.deepcopy(shipped_contracts["research.deepdive.rsi_demo"])
+    contract["validator_command"] = "echo <never_supplied_token>"
+    graph = wc.instantiate(contract, dict(RSI_INPUTS))
+    assert "<never_supplied_token>" in graph["validator_command"]
+
+
+def test_resolved_root_derives_from_canonical_and_caller_input_wins(shipped_contracts):
+    graph = wc.instantiate(shipped_contracts["research.deepdive.rsi_demo"], dict(RSI_INPUTS))
+    assert graph["validator_command"].endswith("--workspace workspace")
+    overridden = wc.instantiate(
+        shipped_contracts["research.deepdive.rsi_demo"],
+        {**RSI_INPUTS, "resolved_root": "/custom/ws"},
+    )
+    assert overridden["validator_command"].endswith("--workspace /custom/ws")
 
 
 def test_planner_generated_contract_cannot_instantiate(shipped_contracts):

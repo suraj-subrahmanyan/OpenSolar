@@ -85,6 +85,21 @@ def _unique_required_ids(rows, field: str, label: str) -> set[str]:
 
 
 def main() -> None:
+    # Optional --workspace: chdir to the directory CONTAINING
+    # rsi-deep-research-report/ before checking (the workflow-contract D6 gate
+    # runs `... --workspace <resolved_root>`; ROOT stays cwd-relative).
+    # No flag = legacy behavior byte-identical (live wrapper runs with cwd ==
+    # the copied workspace).
+    import argparse
+    parser = argparse.ArgumentParser(description="RSI demo report content validator")
+    parser.add_argument("--workspace", default="", help="directory containing rsi-deep-research-report/")
+    args = parser.parse_args()
+    if args.workspace:
+        try:
+            os.chdir(args.workspace)
+        except OSError as exc:
+            fail(f"WORKSPACE_UNREACHABLE: {args.workspace}: {exc}")
+
     # 1. required files exist
     missing = [p for p in REQUIRED if not (ROOT / p).is_file()]
     if missing:

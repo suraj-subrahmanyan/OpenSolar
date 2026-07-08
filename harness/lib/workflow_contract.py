@@ -829,6 +829,16 @@ def instantiate(contract: Dict[str, Any], inputs: Optional[Dict[str, Any]] = Non
     canonical_root = _substitute(
         str(contract.get("artifact_roots", {}).get("canonical") or ""), substitutions
     )
+    # <resolved_root> = the resolved WORKSPACE dir that CONTAINS the canonical
+    # artifact dir (its parent), derived here so contract-level commands like
+    # `validate_rsi_demo_report.py --workspace <resolved_root>` substitute
+    # deterministically (that validator's ROOT constant is the artifact dir
+    # basename, so --workspace must be the parent; P3 rehearsal blocker:
+    # intake failed closed on UNRESOLVED_PLACEHOLDERS ['resolved_root']).
+    # Caller-provided inputs win via setdefault.
+    if canonical_root:
+        parent = str(Path(canonical_root.rstrip("/")).parent)
+        substitutions.setdefault("resolved_root", "" if parent == "." else parent)
 
     nodes: List[Dict[str, Any]] = []
     required_gates: List[str] = []
