@@ -134,18 +134,26 @@
     {
       "class": 14,
       "name": "Wrapper epic observation",
-      "status": "pending_lane_5",
+      "status": "verified_lane_5",
       "scenario": null,
       "required_seam": "scripts/live_codex_epic_status.py --contract (reads contract terminal states)",
-      "note": "R- wrapper contract consumption; depends on Lane 1 contract + Lane 5 wrapper."
+      "note": "artifact-check --contract validates a finished contracted sprint end-to-end (contract terminal states + canonical-layout copy validation + route-proof gates); also proven against the real P3 run-5 PASS bundle (run-archive/p3-sprint-20260708-161906-...-passed-20260708T164000Z): ok:true state:passed.",
+      "verified_by": [
+        "contract/p2-staging@25110e20 harness/tests/scenarios/test_p4_class14_artifact_check.py::test_contract_artifact_check_validates_a_finished_contracted_sprint",
+        "contract/p2-staging@25110e20 harness/tests/scenarios/test_p4_class14_artifact_check.py::test_contract_artifact_check_still_fails_on_missing_artifacts"
+      ]
     },
     {
       "class": 15,
       "name": "Wrapper timing race",
-      "status": "pending_lane_5",
+      "status": "verified_lane_5",
       "scenario": null,
       "required_seam": "wrapper contract terminal-state signal",
-      "note": "producer-completion mechanism at Lane 5; historical 18ms race = preserved v8 replay at P1."
+      "note": "wrapper terminal-state signal is now LEVEL-triggered (parent projection converges on every dispatch tick, not on a single completion edge) — structurally retires the v8 18ms edge race; live-proven P3 run 5: wrapper printed PASS, projection flipped 15s after the final node (previous run: frozen forever).",
+      "verified_by": [
+        "contract/p2-staging@25110e20 harness/tests/scenarios/test_p3_run4_projection_convergence.py::test_dispatch_tick_converges_the_parent_projection",
+        "contract/p2-staging@25110e20 harness/tests/scenarios/test_p3_run4_projection_convergence.py::test_inflight_graph_projection_stays_active"
+      ]
     },
     {
       "class": 16,
@@ -316,12 +324,12 @@
       25,
       26
     ],
-    "pending_lane_5": [
-      14,
-      15
-    ],
     "delegated_lane_6": [
       24
+    ],
+    "verified_lane_5": [
+      14,
+      15
     ]
   },
   "integration_merge": "contract/integration@d3ea9a68"

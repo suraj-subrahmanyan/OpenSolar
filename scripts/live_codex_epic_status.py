@@ -542,6 +542,46 @@ def build_artifact_manifest(
     }
 
 
+def _contract_command_for_copy(command: str, harness_dir: Path) -> str:
+    """Rewrite a contract validator_command for copied-workspace execution.
+
+    Contract commands are written for the gate executor's convention
+    (cwd=HARNESS_DIR: `python3 scripts/validate_x.py --workspace
+    sprints/<sid>/workdir`). _run_test_command_in_copy executes with cwd = a
+    COPY of the workspace where neither the script's relative path nor the
+    harness-relative workspace exists (P3 run-5 note: literal
+    `<resolved_root>` even read as shell redirection when unsubstituted).
+    Rewrites: script path -> absolute under the harness (harness/scripts
+    first); the --workspace value and any leftover `<resolved_root>` -> `.`
+    (the copy root, where the overlay reconstructs the canonical layout)."""
+    import shlex
+    try:
+        argv = shlex.split(str(command or ""))
+    except ValueError:
+        return str(command or "")
+    if not argv:
+        return str(command or "")
+    out: list[str] = []
+    idx = 0
+    while idx < len(argv):
+        token = argv[idx]
+        if "<resolved_root>" in token:
+            token = token.replace("<resolved_root>", ".")
+        if idx == 1 and argv[0] in {"python3", "python"} and token.endswith(".py") and not Path(token).is_absolute():
+            for candidate in (harness_dir / token, harness_dir / "scripts" / Path(token).name):
+                if candidate.is_file():
+                    token = str(candidate)
+                    break
+        if token == "--workspace" and idx + 1 < len(argv):
+            out.append(token)
+            out.append(".")
+            idx += 2
+            continue
+        out.append(token)
+        idx += 1
+    return " ".join(shlex.quote(t) if " " in t else t for t in out)
+
+
 def _run_test_command_in_copy(
     workspace: Path, command: str, timeout_seconds: int,
     *, overlay: list[tuple[str, str]] | None = None,
@@ -1004,9 +1044,33 @@ def summarize_artifact_validation(
     elif artifacts_present:
         # Producers terminal/pass-equivalent (or none) AND artifacts stable: validate.
         # Overlay the resolved artifacts (workspace + sprint-workdir) into the copied
-        # validation workspace at their expected relative paths.
-        overlay = [(row["resolved_path"], row["path"])
-                   for row in artifact_manifest["expected_artifacts"] if row.get("resolved_path")]
+        # validation workspace at their expected relative paths. In CONTRACT mode
+        # (resolution_roots provided) the contract's expected artifacts are BARE
+        # names — overlaying them at the copy root loses the canonical layout the
+        # contract validator checks (rsi_demo: ROOT constant expects
+        # rsi-deep-research-report/<file>). Reconstruct <root_basename>/<inner>
+        # from the resolving root so the copy mirrors the canonical dir.
+        contract_layout = bool(resolution_roots)
+        manifest_roots = [
+            str(row.get("root"))
+            for row in artifact_manifest.get("roots", [])
+            if isinstance(row, dict) and row.get("root")
+        ]
+        overlay = []
+        for row in artifact_manifest["expected_artifacts"]:
+            src = row.get("resolved_path")
+            if not src:
+                continue
+            rel = row["path"]
+            if contract_layout:
+                for root in manifest_roots:
+                    try:
+                        inner = Path(src).relative_to(root)
+                    except ValueError:
+                        continue
+                    rel = str(Path(Path(root).name) / inner)
+                    break
+            overlay.append((src, rel))
         test_result = _run_test_command_in_copy(workspace, test_command, test_timeout_seconds, overlay=overlay)
         if not test_result.get("ok"):
             blocking_failures.append({
@@ -1532,7 +1596,9 @@ def main(argv: list[str] | None = None) -> int:
                 if isinstance(row, dict) and row.get("root")
             ]
             if contract_options.get("validator_command"):
-                test_command = str(contract_options["validator_command"])
+                test_command = _contract_command_for_copy(
+                    str(contract_options["validator_command"]), Path(args.harness_dir)
+                )
         summary = summarize_artifact_validation(
             Path(args.harness_dir),
             args.id,

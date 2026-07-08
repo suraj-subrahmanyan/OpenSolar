@@ -44,7 +44,7 @@ import run_scenario as rs  # noqa: E402 — after path setup
 # Statuses that carry a runnable red-green scenario in THIS branch's engine.
 SCENARIO_BACKED = ("verified_here", "partial")
 # Statuses whose proof lives in another lane's committed suite (cite, don't run here).
-CROSS_LANE_VERIFIED = ("verified_lane_1", "verified_lane_0_5")
+CROSS_LANE_VERIFIED = ("verified_lane_1", "verified_lane_0_5", "verified_lane_5")
 
 
 def _scenario_gated_files() -> list[Path]:
@@ -91,7 +91,7 @@ def test_catalog_is_complete_and_honest():
     assert seen == set(range(1, 31)), f"catalog must cover classes 1..30, missing/extra: {seen ^ set(range(1,31))}"
 
     valid_status = {
-        "verified_here", "partial", "verified_lane_1", "verified_lane_0_5",
+        "verified_here", "partial", "verified_lane_1", "verified_lane_0_5", "verified_lane_5",
         "pending_lane_0", "pending_lane_1", "pending_lane_3", "pending_lane_5",
         "delegated_lane_6",
     }
