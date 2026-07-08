@@ -38,6 +38,62 @@ FALLBACK_ARTIFACT_ROOTS: Dict[str, Any] = {
 
 ERRORS_ARTIFACT_SUFFIX = ".plan-compile-errors.json"
 
+# --- P5 G1: planner-graph policy (P5-RUNBOOK owner defaults) ----------------
+
+# R2(e): gate kinds a PLANNER may author. Contracts may waive evaluation with
+# "none"; a planner may not — every planner node gets evaluated (llm_eval is
+# the default when the gate is absent) unless it runs an allowlisted
+# deterministic command.
+PLANNABLE_GATE_KINDS = {"llm_eval", "deterministic_command"}
+
+# Launch allowlist (owner decision 2): matched as a TOKEN prefix, not a
+# substring — "python3 -m pytest2" must not ride on "python3 -m pytest"
+# (vacuous/lookalike-gate hazard, P3 run-2 D2).
+GATE_COMMAND_ALLOWLIST = (
+    ("python3", "-m", "pytest"),
+    ("python3", "scripts/validate_rsi_demo_report.py"),
+)
+
+# R2(f): the repair-budget ceiling. instantiate stamps 0/1 from on_fail; 2 is
+# headroom for future policies. Anything beyond is an unbounded repair loop.
+MAX_REPAIR_ATTEMPTS_CEILING = 2
+
+# on_fail -> budget, the workflow_contract.instantiate convention.
+ON_FAIL_BUDGETS = {"fail": 0, "repair_once_then_fail": 1}
+
+# R2(g): over-decomposition bound (epic-explosion hazard) when the contract
+# does not carry plan_limits.max_nodes.
+DEFAULT_MAX_NODES = 12
+
+ERROR_PLAN_GATE_KIND_ILLEGAL = "PLAN_GATE_KIND_ILLEGAL"
+ERROR_PLAN_GATE_COMMAND_NOT_ALLOWLISTED = "PLAN_GATE_COMMAND_NOT_ALLOWLISTED"
+ERROR_PLAN_REPAIR_BUDGET_MISSING = "PLAN_REPAIR_BUDGET_MISSING"
+ERROR_PLAN_GRAPH_EMPTY = "PLAN_GRAPH_EMPTY"
+ERROR_PLAN_GRAPH_TOO_LARGE = "PLAN_GRAPH_TOO_LARGE"
+ERROR_PLAN_CERTIFICATE_MISSING = "PLAN_CERTIFICATE_MISSING"
+ERROR_PLAN_CERTIFICATE_NOT_PASS = "PLAN_CERTIFICATE_NOT_PASS"
+ERROR_PLAN_CERTIFICATE_HASH_MISMATCH = "PLAN_CERTIFICATE_HASH_MISMATCH"
+
+PLAN_CERTIFICATE_SCHEMA = "solar.plan_certificate.v1"
+
+# The GOVERNED node subset the certificate hashes. Runtime fields (status,
+# pane, dispatch_id, repair_attempts, ...) mutate on every tick and MUST stay
+# outside the hash or dispatch would invalidate its own certificate.
+CERTIFICATE_NODE_FIELDS = (
+    "id",
+    "depends_on",
+    "task_type",
+    "dispatch_task_type",
+    "capability_capsule_id",
+    "allowed_capsules",
+    "allowed_operators",
+    "evaluator_gate",
+    "write_scope",
+    "proof_obligations",
+    "max_repair_attempts",
+    "on_human_review",
+)
+
 
 def _generic_contract(workflows_dir: Optional[os.PathLike] = None) -> Optional[Dict[str, Any]]:
     try:
@@ -169,6 +225,49 @@ def validate_plan(
                     declared=str(scope_entry),
                 ))
 
+        # R2(e): gate legality — a planner may not waive evaluation ("none")
+        # or run an arbitrary command; deterministic gates come from the
+        # launch allowlist only, everything else is llm_eval.
+        gate = node.get("evaluator_gate") if isinstance(node.get("evaluator_gate"), dict) else {}
+        gate_kind = str(gate.get("kind") or "llm_eval").strip()
+        if gate_kind not in PLANNABLE_GATE_KINDS:
+            errors.append(wc.compile_error(
+                ERROR_PLAN_GATE_KIND_ILLEGAL, node_id,
+                f"node {node_id}: evaluator_gate.kind {gate_kind!r} is not plannable "
+                f"(plannable: {sorted(PLANNABLE_GATE_KINDS)}; contracts may waive "
+                f"evaluation, a planner may not)",
+                declared=gate_kind, admitted=sorted(PLANNABLE_GATE_KINDS),
+            ))
+        elif gate_kind == "deterministic_command":
+            command_tokens = str(gate.get("command") or "").split()
+            allowed = any(
+                command_tokens[: len(prefix)] == list(prefix)
+                for prefix in GATE_COMMAND_ALLOWLIST
+            )
+            if not allowed:
+                errors.append(wc.compile_error(
+                    ERROR_PLAN_GATE_COMMAND_NOT_ALLOWLISTED, node_id,
+                    f"node {node_id}: deterministic_command {gate.get('command')!r} does not "
+                    f"match the launch allowlist "
+                    f"({[' '.join(p) for p in GATE_COMMAND_ALLOWLIST]}); use llm_eval or an "
+                    f"allowlisted checker",
+                    declared=str(gate.get("command") or ""),
+                ))
+
+        # R2(f): the repair budget is stamped at birth (contract-determined on
+        # the fixed path; planner-declared here), never a runtime default.
+        budget = node.get("max_repair_attempts")
+        if budget is None:
+            budget = ON_FAIL_BUDGETS.get(str(gate.get("on_fail") or ""))
+        if not isinstance(budget, int) or not (0 <= budget <= MAX_REPAIR_ATTEMPTS_CEILING):
+            errors.append(wc.compile_error(
+                ERROR_PLAN_REPAIR_BUDGET_MISSING, node_id,
+                f"node {node_id}: no stamped repair budget "
+                f"(max_repair_attempts int in [0,{MAX_REPAIR_ATTEMPTS_CEILING}], or "
+                f"evaluator_gate.on_fail in {sorted(ON_FAIL_BUDGETS)})",
+                declared=repr(node.get("max_repair_attempts")),
+            ))
+
         # R2(d): the node's role resolves under the provider policy.
         if operator_registry is not None:
             role = _node_role(node)
@@ -188,7 +287,104 @@ def validate_plan(
     # dangling-dep graph must reject at compile, never hang the scheduler.
     errors.extend(_validate_graph_structure(task_graph))
 
+    # R2(g): size bound — an empty plan does nothing; an epic explosion
+    # (corpus hazard) is rejected at compile, not discovered at dispatch.
+    node_count = len([n for n in task_graph.get("nodes", []) or [] if isinstance(n, dict)])
+    max_nodes = ((contract or {}).get("plan_limits") or {}).get("max_nodes") or DEFAULT_MAX_NODES
+    if node_count == 0:
+        errors.append(wc.compile_error(
+            ERROR_PLAN_GRAPH_EMPTY, "?",
+            "planner graph has no nodes",
+        ))
+    elif node_count > int(max_nodes):
+        errors.append(wc.compile_error(
+            ERROR_PLAN_GRAPH_TOO_LARGE, "?",
+            f"planner graph has {node_count} nodes; the bound is {max_nodes} "
+            f"(plan_limits.max_nodes / DEFAULT_MAX_NODES) — decompose into epics "
+            f"or raise the contract limit deliberately",
+            declared=node_count, admitted=int(max_nodes),
+        ))
+
     return errors
+
+
+# --- P5 G1: plan_certificate (governed graph birth) --------------------------
+
+def plan_certificate_hash(task_graph: Dict[str, Any]) -> str:
+    """sha256 over the governed subset — contract identity + per-node policy
+    fields. Runtime fields (status/pane/dispatch_id/...) are excluded so
+    dispatch cannot invalidate its own certificate."""
+    import hashlib
+
+    governed = {
+        "workflow_contract_id": str(task_graph.get("workflow_contract_id") or ""),
+        "workflow_contract_version": str(task_graph.get("workflow_contract_version") or ""),
+        "nodes": [
+            {field: node.get(field) for field in CERTIFICATE_NODE_FIELDS if field in node}
+            for node in sorted(
+                (n for n in task_graph.get("nodes", []) or [] if isinstance(n, dict)),
+                key=lambda n: str(n.get("id") or ""),
+            )
+        ],
+    }
+    canonical = json.dumps(governed, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def stamp_plan_certificate(
+    task_graph: Dict[str, Any],
+    capsule_registry: Optional[Dict[str, Dict[str, Any]]] = None,
+    operator_registry: Optional[Dict[str, Dict[str, Any]]] = None,
+    contract: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Validate and stamp. Raises ValueError on a graph that does not compile —
+    a certificate is a PASS verdict, never a participation trophy."""
+    errors = validate_plan(task_graph, capsule_registry, operator_registry, contract=contract)
+    if errors:
+        raise ValueError(
+            f"plan does not compile ({len(errors)} errors); refusing to stamp: "
+            f"{[e.get('code') for e in errors]}"
+        )
+    import time
+
+    certificate = {
+        "schema": PLAN_CERTIFICATE_SCHEMA,
+        "validator": "plan_validator",
+        "verdict": "PASS",
+        "graph_hash": plan_certificate_hash(task_graph),
+        "validated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    task_graph["plan_certificate"] = certificate
+    return certificate
+
+
+def check_plan_certificate(task_graph: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Re-derive the governed hash and compare against the stamped verdict.
+    Empty list = the graph is certificate-covered and untampered."""
+    certificate = task_graph.get("plan_certificate")
+    if not isinstance(certificate, dict) or not certificate:
+        return [wc.compile_error(
+            ERROR_PLAN_CERTIFICATE_MISSING, "?",
+            "planner graph carries no plan_certificate; it was never validated "
+            "(or the certificate was stripped)",
+        )]
+    if str(certificate.get("verdict") or "") != "PASS":
+        return [wc.compile_error(
+            ERROR_PLAN_CERTIFICATE_NOT_PASS, "?",
+            f"plan_certificate verdict is {certificate.get('verdict')!r}, not PASS",
+            declared=str(certificate.get("verdict") or ""),
+        )]
+    expected = plan_certificate_hash(task_graph)
+    stamped = str(certificate.get("graph_hash") or "")
+    if stamped != expected:
+        return [wc.compile_error(
+            ERROR_PLAN_CERTIFICATE_HASH_MISMATCH, "?",
+            "plan_certificate.graph_hash does not match the governed graph "
+            "content — a governed field changed after validation "
+            f"(stamped {stamped[:12]}..., recomputed {expected[:12]}...)",
+            declared=stamped, admitted=expected,
+        )]
+    return []
 
 
 def _validate_graph_structure(task_graph: Dict[str, Any]) -> List[Dict[str, Any]]:

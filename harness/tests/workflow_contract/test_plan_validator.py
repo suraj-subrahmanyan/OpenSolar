@@ -11,6 +11,7 @@ capsule/operator registries:
 """
 from __future__ import annotations
 
+import copy
 import json
 import subprocess
 import sys
@@ -36,6 +37,18 @@ def _load(path: Path) -> dict:
 
 
 def _validate(graph, capsule_registry, operator_registry, shipped_contracts):
+    # This file isolates the R2(a-d)+F3 families on corpus fixtures that
+    # predate the P5 G1 gate/repair-budget/size checks (which have their own
+    # suite, scenarios/test_p5_g1_plan_certificate.py). Stamp a compliant
+    # default gate on a COPY so exact-set assertions here don't also collect
+    # PLAN_REPAIR_BUDGET_MISSING from the fixtures' era.
+    graph = copy.deepcopy(graph)
+    for node in graph.get("nodes", []) or []:
+        if isinstance(node, dict) and node.get("max_repair_attempts") is None:
+            gate = node.setdefault("evaluator_gate", {})
+            if isinstance(gate, dict):
+                gate.setdefault("kind", "llm_eval")
+                gate.setdefault("on_fail", "repair_once_then_fail")
     return pv.validate_plan(
         graph, capsule_registry, operator_registry,
         contract=shipped_contracts["pm.generic.v1"],
@@ -504,6 +517,8 @@ def test_route_unresolvable_for_plan_node(capsule_registry, shipped_contracts):
         "dispatch_task_type": "audit_inventory",
         "write_scope": ["workspace/x/report.md"],
         "depends_on": [],
+        # G1-compliant gate so the ONLY error is the empty registry's.
+        "evaluator_gate": {"kind": "llm_eval", "on_fail": "repair_once_then_fail"},
     })
     errors = pv.validate_plan(
         graph, capsule_registry, {}, contract=shipped_contracts["pm.generic.v1"]

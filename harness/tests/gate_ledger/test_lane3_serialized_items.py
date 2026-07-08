@@ -117,16 +117,21 @@ class TestWorkflowContractGuard:
         assert result is not None
         assert any("WORKFLOW_CONTRACT_STRUCTURE_MISMATCH" in e for e in result["errors"])
 
-    def test_planner_contract_skips_structure_check(self):
-        # pm.generic.v1 stages come from the LLM planner (plan_validator's job) —
-        # the guard checks registration + version only.
+    def test_planner_contract_requires_plan_certificate(self):
+        # pm.generic.v1 stages come from the LLM planner. Pre-P5 the guard
+        # checked registration + version only — a graph merely CLAIMING the
+        # generic contract dispatched ungoverned. G1: the guard demands the
+        # plan_validator's hash-stamped PASS (full matrix in
+        # scenarios/test_p5_g1_plan_certificate.py).
         graph = {
             "sprint_id": "x",
             "workflow_contract_id": "pm.generic.v1",
             "workflow_contract_version": "1.0",
             "nodes": [{"id": "anything", "depends_on": [], "task_type": "planning"}],
         }
-        assert gnd._workflow_contract_guard(graph) is None
+        verdict = gnd._workflow_contract_guard(graph)
+        assert verdict is not None and not verdict.get("ok")
+        assert any("PLAN_CERTIFICATE_MISSING" in e for e in verdict.get("errors") or [])
 
     def test_flag_off_never_trips(self, monkeypatch):
         monkeypatch.setenv("SOLAR_GATE_LEDGER", "0")

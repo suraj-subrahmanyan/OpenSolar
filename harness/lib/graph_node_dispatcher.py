@@ -129,6 +129,20 @@ def _workflow_contract_guard(graph: dict[str, Any]) -> dict[str, Any] | None:
                 f"WORKFLOW_CONTRACT_VERSION_MISMATCH:{graph_version}!={contract_version}"
             )
         planner_generated = contract.get("stages_mode") == getattr(wc, "STAGES_MODE_PLANNER", "planner_generated")
+        if planner_generated and not errors:
+            # P5 G1: a planner-generated contract has no fixed structure to
+            # compare, so the guard demands PROOF the stages were validated —
+            # a plan_certificate whose hash still matches the governed graph
+            # content. Without this, claiming pm.generic.v1 was a free pass.
+            try:
+                import plan_validator as _plan_validator
+            except Exception:
+                errors.append("PLAN_CERTIFICATE_UNCHECKABLE:plan_validator_module_missing")
+            else:
+                for cert_error in _plan_validator.check_plan_certificate(graph):
+                    errors.append(
+                        f"{cert_error.get('code')}:{cert_error.get('node_id', '?')}"
+                    )
         if not planner_generated and not errors:
             stages = {str(s.get("id") or ""): s for s in contract.get("stages") or []}
             nodes = {str(n.get("id") or ""): n for n in graph.get("nodes") or []}
