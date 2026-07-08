@@ -8494,12 +8494,34 @@ def dispatch_ready(graph_path: str, dry_run: bool = False, ttl: int = 900,
         drain_result = {"ok": all(r.get("ok", False) for r in results), "processed": len(results), "results": results}
     else:
         drain_result = drain_queue(str(sid), dry_run=dry_run, max_items=len(enqueue_result.get("enqueued", [])), ttl=ttl)
+    status_sync: dict[str, Any] = {}
+    if not dry_run:
+        # Converge the legacy parent projection EVERY tick, regardless of
+        # which loop consumed the final node's eval. Two reconcile loops race
+        # (this dispatcher tick and the multi-task auto-advance loop); only
+        # the latter synced, and only when ITS reconcile was non-empty — so
+        # when this tick consumed the final sidecar (P3 run 4: D6 passed
+        # 15:08:24, status.json last write 15:08:21), no sync ever ran and
+        # the sprint projection froze at active/open_nodes=["D6"] until the
+        # wrapper timed out with the graph fully closed underneath. The sync
+        # is idempotent and cheap (already_synced / parent_not_ready
+        # short-circuit) and must never break the dispatch hot path.
+        try:
+            status_sync = sync_status_cache_from_graph(
+                graph,
+                graph_path,
+                actor="graph_node_dispatcher",
+                event="dispatch_tick_projection",
+            )
+        except Exception as exc:
+            status_sync = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     return {
         "ok": enqueue_result.get("ok") and drain_result.get("ok"),
         "reconciled": reconciled,
         "concurrency": {"graph_max_parallel": effective_max_parallel},
         "enqueue": enqueue_result,
         "drain": drain_result,
+        "status_sync": {k: status_sync.get(k) for k in ("ok", "updated", "reason", "error") if k in status_sync},
     }
 
 

@@ -3666,17 +3666,23 @@ def _advance_graph(graph_path: Path | str) -> dict[str, Any]:
                         op_id = str(closeout.get("operator_id") or "")
                     if op_id:
                         _record_operator_runtime_failure(op_id, str(r.get("reason") or "closeout"))
-                try:
-                    import graph_scheduler
+            # Projection sync must NOT be gated on `if reconciled` — when a
+            # concurrent loop (the coordinator's dispatch-ready tick) consumes
+            # the final node's eval first, this reconcile is empty and the
+            # parent projection would never converge (P3 run 4: status.json
+            # froze at active with a fully-passed graph until wrapper timeout).
+            # The sync is idempotent; run it every advance tick.
+            try:
+                import graph_scheduler
 
-                    summary["status_sync"] = graph_scheduler.sync_status_cache_from_graph(
-                        graph,
-                        str(graph_path),
-                        actor="multi_task_runner",
-                        event="multi_task_auto_advance_reconciled",
-                    )
-                except Exception as sync_exc:
-                    summary["status_sync_error"] = f"{type(sync_exc).__name__}: {sync_exc}"
+                summary["status_sync"] = graph_scheduler.sync_status_cache_from_graph(
+                    graph,
+                    str(graph_path),
+                    actor="multi_task_runner",
+                    event="multi_task_auto_advance_reconciled",
+                )
+            except Exception as sync_exc:
+                summary["status_sync_error"] = f"{type(sync_exc).__name__}: {sync_exc}"
         except Exception as exc:
             summary["reconcile_error"] = f"{type(exc).__name__}: {exc}"
     except Exception as exc:
