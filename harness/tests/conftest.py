@@ -28,6 +28,224 @@ if _HARNESS_LIB not in sys.path:
 os.environ.setdefault("HARNESS_DIR", str(_HARNESS_DIR))
 os.environ.setdefault("SOLAR_HARNESS_DIR", str(_HARNESS_DIR))
 
+_HARNESS_CLI = _HARNESS_DIR / "lib" / "cli"
+_cli_pkg = types.ModuleType("cli")
+_cli_pkg.__path__ = [str(_HARNESS_CLI)]
+sys.modules["cli"] = _cli_pkg
+
+
+QUARANTINE_EXPECTED_COUNT = 41
+
+COLLECTION_QUARANTINE_MANIFEST: dict[str, dict[str, str]] = {
+    # B stale-import: benchmark tests import harness.lib.* from harness cwd; modules exist under lib/benchmark.
+    "tests/benchmark/test_benchmark_registry.py": {
+        "class": "B stale-import",
+        "cause": "imports harness.lib.benchmark while pytest is invoked from harness/",
+    },
+    # B stale-import: benchmark tests import harness.lib.* from harness cwd; modules exist under lib/benchmark.
+    "tests/benchmark/test_benchmark_report_schema.py": {
+        "class": "B stale-import",
+        "cause": "imports harness.lib.benchmark while pytest is invoked from harness/",
+    },
+    # B stale-import: benchmark tests import harness.lib.* from harness cwd; module exists under lib/benchmark.
+    "tests/benchmark/test_solar_solver.py": {
+        "class": "B stale-import",
+        "cause": "imports harness.lib.benchmark.solar_solver while pytest is invoked from harness/",
+    },
+    # B stale-import: benchmark tests import and patch harness.lib.* from harness cwd; modules exist under lib/benchmark.
+    "tests/benchmark/test_terminal_bench_adapter.py": {
+        "class": "B stale-import",
+        "cause": "imports harness.lib.benchmark and patch targets while pytest is invoked from harness/",
+    },
+    # B stale-import: multi_task_runner no longer exports the older epic_child_status_lines helper.
+    "tests/graph/test_multi_task_runner_status_surface.py": {
+        "class": "B stale-import",
+        "cause": "expects removed multi_task_runner.epic_child_status_lines API",
+    },
+    # duplicate-basename: full-suite import name test_models collides with tests/code_signal/test_models.py.
+    "tests/influence/test_models.py": {
+        "class": "duplicate-basename",
+        "cause": "module basename test_models collides during flat pytest collection",
+    },
+    # C dead-module: youtube migration modules are absent; harness/migrations does not exist at this commit.
+    "tests/integration/test_youtube_e2e.py": {
+        "class": "C dead-module",
+        "cause": "imports missing youtube_001/youtube_002/youtube_004/youtube_005/youtube_010 migrations",
+    },
+    # duplicate-basename: full-suite import name test_schemas collides; individually also imports stale harness.lib.livework.
+    "tests/livework/test_schemas.py": {
+        "class": "duplicate-basename",
+        "cause": "module basename test_schemas collides during flat pytest collection",
+    },
+    # namespace-collision: tests/research/integration is imported as top-level integration.
+    "tests/research/integration/test_deepresearch_s6_integration.py": {
+        "class": "namespace-collision",
+        "cause": "research integration package collides with top-level tests/integration package",
+    },
+    # namespace-collision: tests/research/integration is imported as top-level integration; file also uses harness.lib.
+    "tests/research/integration/test_local_command_fixture.py": {
+        "class": "namespace-collision",
+        "cause": "research integration package collides with top-level tests/integration package",
+    },
+    # namespace-collision: tests/research/integration is imported as top-level integration.
+    "tests/research/integration/test_pipeline.py": {
+        "class": "namespace-collision",
+        "cause": "research integration package collides with top-level tests/integration package",
+    },
+    # namespace-collision: tests/research/integration is imported as top-level integration; file also uses harness.lib.
+    "tests/research/integration/test_real_vs_estimated_switch.py": {
+        "class": "namespace-collision",
+        "cause": "research integration package collides with top-level tests/integration package",
+    },
+    # duplicate-basename: full-suite import name test_negative_control collides; file also uses stale harness.lib imports.
+    "tests/research/negative/test_negative_control.py": {
+        "class": "duplicate-basename",
+        "cause": "module basename test_negative_control collides during flat pytest collection",
+    },
+    # C dead-module: test targets cli.cmd_status_epic, but no cmd_status_epic.py exists in lib/cli.
+    "tests/research/survey/activation_proof/test_status_epic_activation.py": {
+        "class": "C dead-module",
+        "cause": "imports missing cli.cmd_status_epic module",
+    },
+    # namespace-collision: tests/research/survey/cli package shadows the real lib/cli package.
+    "tests/research/survey/cli/test_argument_density_view.py": {
+        "class": "namespace-collision",
+        "cause": "test cli package shadows real lib/cli namespace during full-suite collection",
+    },
+    # namespace-collision: tests/research/survey/cli package shadows the real lib/cli package.
+    "tests/research/survey/cli/test_contradiction_matrix_view.py": {
+        "class": "namespace-collision",
+        "cause": "test cli package shadows real lib/cli namespace during full-suite collection",
+    },
+    # namespace-collision: tests/research/survey/cli package shadows the real lib/cli package.
+    "tests/research/survey/cli/test_exploration_view.py": {
+        "class": "namespace-collision",
+        "cause": "test cli package shadows real lib/cli namespace during full-suite collection",
+    },
+    # namespace-collision: tests/research/survey/cli package shadows the real lib/cli package.
+    "tests/research/survey/cli/test_gate_report_view.py": {
+        "class": "namespace-collision",
+        "cause": "test cli package shadows real lib/cli namespace during full-suite collection",
+    },
+    # namespace-collision: tests/research/survey/cli package shadows the real lib/cli package.
+    "tests/research/survey/cli/test_source_quality_view.py": {
+        "class": "namespace-collision",
+        "cause": "test cli package shadows real lib/cli namespace during full-suite collection",
+    },
+    # duplicate-basename: full-suite import name test_schemas collides with tests/influence/test_schemas.py.
+    "tests/research/survey/test_schemas.py": {
+        "class": "duplicate-basename",
+        "cause": "module basename test_schemas collides during flat pytest collection",
+    },
+    # duplicate-basename: full-suite import name test_schemas collides with tests/influence/test_schemas.py.
+    "tests/research_survey/test_schemas.py": {
+        "class": "duplicate-basename",
+        "cause": "module basename test_schemas collides during flat pytest collection",
+    },
+    # duplicate-basename: full-suite import name test_cli collides with tests/integrations/gepa_optimizer/test_cli.py.
+    "tests/research_unit/test_cli.py": {
+        "class": "duplicate-basename",
+        "cause": "module basename test_cli collides during flat pytest collection",
+    },
+    # duplicate-basename: full-suite import name test_evaluator collides with tests/integrations/gepa_optimizer/test_evaluator.py.
+    "tests/research_unit/test_evaluator.py": {
+        "class": "duplicate-basename",
+        "cause": "module basename test_evaluator collides during flat pytest collection",
+    },
+    # duplicate-basename: full-suite import name test_schemas collides with tests/influence/test_schemas.py.
+    "tests/research_unit/test_schemas.py": {
+        "class": "duplicate-basename",
+        "cause": "module basename test_schemas collides during flat pytest collection",
+    },
+    # B stale-import: github_intelligence.briefs no longer exports generate_planning_brief.
+    "tests/test_briefs.py": {
+        "class": "B stale-import",
+        "cause": "expects removed github_intelligence.briefs.generate_planning_brief API",
+    },
+    # B stale-import: github_intelligence.cards no longer exports generate_analysis_card.
+    "tests/test_cards.py": {
+        "class": "B stale-import",
+        "cause": "expects removed github_intelligence.cards.generate_analysis_card API",
+    },
+    # B stale-import: github_intelligence.detectors now exposes functional detector APIs, not detector classes.
+    "tests/test_detectors.py": {
+        "class": "B stale-import",
+        "cause": "expects removed github_intelligence detector classes and run_all_detectors API",
+    },
+    # B stale-import: github_intelligence.evidence no longer exports older helper names/signatures.
+    "tests/test_evidence_compression.py": {
+        "class": "B stale-import",
+        "cause": "expects removed github_intelligence.evidence helper APIs such as clean_readme",
+    },
+    # duplicate-basename: full-suite import name test_evidence_ledger collides with tests/research_unit/test_evidence_ledger.py.
+    "tests/test_evidence_ledger.py": {
+        "class": "duplicate-basename",
+        "cause": "module basename test_evidence_ledger collides during flat pytest collection",
+    },
+    # duplicate-basename: full-suite import name test_operator_router collides with gepa optimizer tests.
+    "tests/test_operator_router.py": {
+        "class": "duplicate-basename",
+        "cause": "module basename test_operator_router collides during flat pytest collection",
+    },
+    # duplicate-basename: full-suite import name test_pipeline collides with tests/influence/test_pipeline.py.
+    "tests/test_pipeline.py": {
+        "class": "duplicate-basename",
+        "cause": "module basename test_pipeline collides during flat pytest collection",
+    },
+    # duplicate-basename: full-suite import name test_prerequisite_resolver collides with graph tests.
+    "tests/test_prerequisite_resolver.py": {
+        "class": "duplicate-basename",
+        "cause": "module basename test_prerequisite_resolver collides during flat pytest collection",
+    },
+    # duplicate-basename: full-suite import name test_schemas collides with tests/influence/test_schemas.py.
+    "tests/test_schemas.py": {
+        "class": "duplicate-basename",
+        "cause": "module basename test_schemas collides during flat pytest collection",
+    },
+    # C dead-module: youtube transcript job migration module is absent; harness/migrations does not exist.
+    "tests/test_youtube_cli.py": {
+        "class": "C dead-module",
+        "cause": "imports missing youtube_005_transcript_jobs migration",
+    },
+    # C dead-module: youtube migration modules are absent; harness/migrations does not exist.
+    "tests/test_youtube_dashboard.py": {
+        "class": "C dead-module",
+        "cause": "imports missing youtube_001/youtube_002/youtube_004/youtube_005/youtube_010 migrations",
+    },
+    # C dead-module: youtube transcript job migration module is absent; harness/migrations does not exist.
+    "tests/test_youtube_job_scheduler.py": {
+        "class": "C dead-module",
+        "cause": "imports missing youtube_005_transcript_jobs migration",
+    },
+    # C dead-module: first youtube migration module is absent; harness/migrations does not exist.
+    "tests/test_youtube_migration.py": {
+        "class": "C dead-module",
+        "cause": "imports missing youtube_001_subtitle_tracks migration",
+    },
+    # C dead-module: youtube transcript migration module is absent; harness/migrations does not exist.
+    "tests/test_youtube_pollution_repair.py": {
+        "class": "C dead-module",
+        "cause": "imports missing youtube_002_transcripts migration",
+    },
+    # C dead-module: youtube premium ASR migration module is absent; harness/migrations does not exist.
+    "tests/test_youtube_premium_escape.py": {
+        "class": "C dead-module",
+        "cause": "imports missing youtube_010_premium_asr_calls migration",
+    },
+    # C dead-module: youtube transcript and quality-check migration modules are absent; harness/migrations does not exist.
+    "tests/test_youtube_quality_gate.py": {
+        "class": "C dead-module",
+        "cause": "imports missing youtube_002_transcripts/youtube_008_quality_checks migrations",
+    },
+    # C dead-module: youtube transcript migration module is absent; harness/migrations does not exist.
+    "tests/test_youtube_transcript_storage.py": {
+        "class": "C dead-module",
+        "cause": "imports missing youtube_002_transcripts migration",
+    },
+}
+
+collect_ignore = [str(_HARNESS_DIR / rel_path) for rel_path in COLLECTION_QUARANTINE_MANIFEST]
+
 
 def _path_is_installed_harness(raw: object) -> bool:
     if raw in (None, ""):
