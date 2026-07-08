@@ -232,3 +232,37 @@ def test_repaired_node_gate_verdict_is_consumed_not_archived(sandbox):
     ej = sandbox / "sprints" / f"{SID}.D2-eval.json"
     assert ej.exists(), "post-repair executor verdict must NOT be archived as late_pre_repair"
     assert saved_node["status"] in {"failed", "failed_review"}, saved["nodes"]
+
+
+def test_late_progress_mark_cannot_regress_a_passed_node(sandbox):
+    """P3 live run 3: EVERY stage gate passed live, but the generated worker
+    runner marks its node `reviewing` AFTER the worker process exits
+    (rc==0 && fresh handoff), and the worker's own closing instruction does
+    the same mid-run. With llm evals (minutes) the window between those
+    progress marks and node close was harmless; the deterministic gate closes
+    nodes in SECONDS, so the runner's post-exit mark landed 4s after D2
+    passed and regressed it to reviewing (ledger reopen:true) — the graph
+    never reached all-terminal. Progress marks (reviewing/dispatched/...)
+    must never regress a pass; repair reopens use their own dedicated path
+    (failed_review -> assigned), and terminal flips (passed -> failed via a
+    human/eval verdict) stay allowed."""
+    import graph_scheduler as gs
+    gate = {"kind": "deterministic_command",
+            "command": "python3 -c \"import sys; sys.exit(0)\""}
+    node = _node(gate)
+    graph = _graph([node])
+    _dispatch(graph, sandbox)
+    graph_path = sandbox / "sprints" / f"{SID}.task_graph.json"
+    saved = json.loads(graph_path.read_text(encoding="utf-8"))
+    gnd._reconcile_existing_dispatches(saved, str(graph_path))
+    d2 = next(n for n in saved["nodes"] if n["id"] == "D2")
+    assert d2["status"] == "passed"
+    # the runner's late completion mark (graph-scheduler mark --status reviewing)
+    result = gs.mark_node_result(saved, "D2", "reviewing", note="builder complete")
+    assert gs.node_status(saved, "D2") == "passed", (
+        "late progress mark regressed a passed node (P3 run-3 reopen wedge)"
+    )
+    assert result.get("refused_progress_regression"), result
+    # terminal flip stays allowed (human/eval verdict semantics)
+    gs.mark_node_result(saved, "D2", "failed", note="human overturn")
+    assert gs.node_status(saved, "D2") == "failed"

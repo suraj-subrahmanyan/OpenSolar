@@ -2427,6 +2427,27 @@ def mark_node_result(graph: dict[str, Any], node_id: str, status: str,
         raise ValueError(f"unknown node: {node_id}")
     _assert_pass_mark_allowed(graph, node_id, status)
     _ledger_previous_status = node_status(graph, node_id)
+    # A PROGRESS mark must never regress a passed node. The generated worker
+    # runner marks `reviewing` AFTER the worker process exits, and the worker's
+    # own closing instruction marks `reviewing` mid-run — two late progress
+    # writers per node. With llm evals (minutes) the window between them and
+    # node close was unhittable; the deterministic gate closes nodes in
+    # seconds, so a late runner mark landed 4s after P3 run-3's D2 passed and
+    # reopened it (ledger reopen:true) — the graph never reached all-terminal.
+    # Repair reopens use their own path (failed_review -> assigned via
+    # set_node_status) and terminal flips (passed -> failed by a human/eval
+    # verdict) remain allowed — only forward-progress statuses are refused.
+    if _ledger_previous_status in PASS_STATUSES and str(status or "").lower() in {
+        "reviewing", "pending", "queued", "assigned", "dispatched", "in_progress", "running",
+    }:
+        refused = parent_ready_check(graph)
+        refused["refused_progress_regression"] = {
+            "node": node_id,
+            "kept_status": _ledger_previous_status,
+            "refused_status": status,
+            "note": note or "",
+        }
+        return refused
 
     updated_at = _now()
     graph.setdefault("node_results", {})
