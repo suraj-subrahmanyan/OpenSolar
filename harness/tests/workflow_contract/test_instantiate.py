@@ -71,7 +71,7 @@ def test_instantiation_matches_committed_golden(shipped_contracts, workflow_id, 
 
 def test_graph_identity_is_workflow_contract_id_not_dag_variant(rsi_graph, cli_graph, cli_anthropic_graph):
     assert rsi_graph["workflow_contract_id"] == "research.deepdive.rsi_demo"
-    assert rsi_graph["workflow_contract_version"] == "1.1"
+    assert rsi_graph["workflow_contract_version"] == "1.2"
     assert rsi_graph["dag_variant"] == "research"
     assert cli_graph["workflow_contract_id"] == "code.cli_smoke"
     assert cli_graph["dag_variant"] == "short"

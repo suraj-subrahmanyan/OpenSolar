@@ -32,7 +32,7 @@
         "kind": "none"
       },
       "gate_family": "DD_SCOPE",
-      "goal": "D1 \u00b7 Scope",
+      "goal": "Freeze the demo scope. Read the seed source pack shipped at demo-rsi/source-pack/ under the harness root (sources.json + source-notes/*.md) \u2014 it is the ENTIRE corpus; do not fetch the web. Write scope-contract.json to the canonical artifact root declaring: the bounded research question (what recursive self-improvement is, what limits it, and what the pack's evidence shows), the D1-D6 stage plan, the in-scope seed-pack source ids, and the output contract (sources.json, claims.json, contradiction-matrix.json, report.md, report.html, evaluation-checklist.md).",
       "id": "D1",
       "logical_operator": "DeepDiveBriefCapture",
       "node_kind": "analysis",
@@ -86,7 +86,7 @@
         "on_fail": "repair_once_then_fail"
       },
       "gate_family": "DD_SOURCE",
-      "goal": "D2 \u00b7 Sources",
+      "goal": "Produce sources.json at the canonical artifact root from the seed pack at demo-rsi/source-pack/ under the harness root: one entry per pack source carrying id, title, authors, year, venue, citation_hint and topic_tags copied faithfully from the pack's sources.json and source-notes/*.md. Every pack source must be represented; do not invent sources; do not fetch the web. The deterministic gate audits the exported set for authority and profile gaps.",
       "id": "D2",
       "logical_operator": "DeepDiveSourceCollector",
       "max_repair_attempts": 1,
@@ -148,7 +148,7 @@
       ],
       "dispatch_task_type": "evidence",
       "evaluator_gate": {
-        "command": "research eval-artifacts --eval-json workspace/rsi-deep-research-report/research_eval.json --json",
+        "command": "python3 scripts/validate_rsi_demo_report.py --workspace workspace --claims-only",
         "inputs_produced_by_this_gate": [
           "research_eval.json"
         ],
@@ -163,7 +163,7 @@
         ]
       },
       "gate_family": "DD_EVIDENCE",
-      "goal": "D3 \u00b7 Claims",
+      "goal": "Compile claims.json at the canonical artifact root: at least 10 claims extracted from the seed pack source notes (demo-rsi/source-pack/source-notes/ under the harness root), each an object {claim_id, source_id, claim_text, claim_type, stance, confidence} where source_id is an id present in sources.json and claim_text quotes or faithfully paraphrases that source note. No claims from memory or the open web \u2014 every claim must be traceable to its note. The deterministic gate enforces counts, claim-to-source linkage and non-empty claim text.",
       "id": "D3",
       "logical_operator": "DeepDiveClaimCompiler",
       "max_repair_attempts": 1,
@@ -225,7 +225,7 @@
         "kind": "none"
       },
       "gate_family": "DD_EVIDENCE",
-      "goal": "D4 \u00b7 Contradictions",
+      "goal": "Write contradiction-matrix.json at the canonical artifact root: cross-source tensions, weak-evidence flags and open questions derived ONLY from claims.json \u2014 each entry must cite the claim_ids involved and state the nature of the tension (direct contradiction, scope mismatch, unsupported extrapolation, or evidence gap).",
       "id": "D4",
       "logical_operator": "DeepDiveContradictionScanner",
       "node_kind": "analysis",
@@ -285,7 +285,7 @@
         ]
       },
       "gate_family": "DD_SYNTHESIS",
-      "goal": "D5 \u00b7 Report",
+      "goal": "Synthesize report.md and report.html at the canonical artifact root from claims.json and contradiction-matrix.json: an evidence-grounded report on the bounded RSI question with an inline [source_id] citation for every substantive statement, a contradictions/tensions section, and a limitations section. No placeholder or TODO text; report.html must be a complete standalone HTML document rendering the same content.",
       "id": "D5",
       "logical_operator": "DeepDiveChiefEditor",
       "node_kind": "artifact",
@@ -361,7 +361,7 @@
         "on_fail": "fail"
       },
       "gate_family": "DD_PUBLISH",
-      "goal": "D6 \u00b7 Publish",
+      "goal": "Write evaluation-checklist.md at the canonical artifact root summarizing, per stage, the gate outcome and the produced artifacts (with one-line provenance for each), then verify the canonical artifact set is complete and consistent. The deterministic validator enforces the full artifact contract and fails the stage on any gap.",
       "id": "D6",
       "logical_operator": "DeepDiveArtifactPublisher",
       "max_repair_attempts": 0,
@@ -435,7 +435,7 @@
   "sprint_id": "sprint-golden",
   "title": "RSI DeepDive Report",
   "validator_command": "python3 scripts/validate_rsi_demo_report.py --workspace workspace",
-  "workflow_contract_hash": "sha256:00c27b8b4723840189d0bfb42308379dd8014d4608d149c83c6ab4e8a367a904",
+  "workflow_contract_hash": "sha256:fcdb5594e742ee7280b077db78ac3feacf70e967e2e01f8955080736208eb1af",
   "workflow_contract_id": "research.deepdive.rsi_demo",
-  "workflow_contract_version": "1.1"
+  "workflow_contract_version": "1.2"
 }

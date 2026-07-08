@@ -83,8 +83,12 @@ def test_gate_commands_are_executable_shapes(contract):
     assert "--output-dir workspace/rsi-deep-research-report" in d2, d2
     assert "--sources" not in d2  # the flag that never existed
     d3 = str(gates["D3"].get("command") or "")
-    assert d3.startswith("research eval-artifacts "), d3
-    assert "--eval-json workspace/rsi-deep-research-report/research_eval.json" in d3, d3
+    # v1.2: the bounded seed-pack demo gates D3 on the deterministic
+    # claims/linkage validator — `research eval-artifacts` fundamentally needs
+    # a NATIVE engine run's research_eval.json (build_research_eval_payload is
+    # sqlite-backed), which the seed-pack demo path does not produce; the
+    # native gate remains the engine-native path's gate (P4+/AutoSci).
+    assert d3 == "python3 scripts/validate_rsi_demo_report.py --workspace workspace --claims-only", d3
     d6 = str(gates["D6"].get("command") or "")
     assert d6 == str(graph.get("validator_command") or ""), (
         "D6 stage gate must match the contract-level validator_command"
@@ -120,3 +124,70 @@ def test_cli_smoke_goldens_unaffected_by_resolved_root():
         produced = wc.canonical_graph_json(wc.instantiate(contract, dict(inputs)))
         golden = (goldens / f"{wf_id}.instantiated.golden.json").read_text(encoding="utf-8")
         assert produced == golden, f"{wf_id} drifted — resolved_root must be inert for P2 contracts"
+
+
+# ---------------------------------------------------------------------------
+# v1.2 — the demo has CONTENT: authored stage goals + shipped seed pack
+# (P3 live run 1: every D-stage had an EMPTY goal and the seed pack did not
+# exist, so builders improvised hand-written JSON that the D3 gate rightly
+# refused — Turing/STaR/Reflexion boilerplate, research_eval_json_missing.)
+# ---------------------------------------------------------------------------
+
+SEED_PACK = _HARNESS / "demo-rsi" / "source-pack"
+
+
+def test_seed_pack_ships_inside_the_harness_tree():
+    """inputs.seed_pack must resolve under the harness root (installed and
+    sandboxed harnesses copy harness/** only — a repo-root pack never ships)."""
+    assert (SEED_PACK / "sources.json").is_file()
+    notes = sorted(p.name for p in (SEED_PACK / "source-notes").glob("*.md"))
+    assert len(notes) >= 9, notes
+    pack = json.loads((SEED_PACK / "sources.json").read_text(encoding="utf-8"))
+    rows = pack if isinstance(pack, list) else pack.get("sources", [])
+    assert len(rows) >= 9
+    for row in rows:
+        assert row.get("id") and row.get("title") and row.get("citation_hint"), row
+
+
+def test_every_stage_has_an_authored_goal(contract):
+    for stage in contract["stages"]:
+        goal = str(stage.get("goal") or "").strip()
+        assert len(goal) > 80, f"{stage['id']} goal is empty/thin: {goal!r}"
+    # the evidence stages must anchor builders to the seed pack, not the web
+    for sid_ in ("D1", "D2", "D3"):
+        stage = next(s for s in contract["stages"] if s["id"] == sid_)
+        assert "demo-rsi/source-pack" in stage["goal"], sid_
+
+
+def test_d3_gate_is_the_claims_only_validator(contract):
+    d3 = next(s for s in contract["stages"] if s["id"] == "D3")
+    cmd = str((d3.get("evaluator_gate") or {}).get("command") or "")
+    assert cmd == "python3 scripts/validate_rsi_demo_report.py --workspace <resolved_root> --claims-only", cmd
+
+
+def test_claims_only_validator_red_green(tmp_path):
+    """The D3 gate command itself: green on linked claims, red on boilerplate
+    with dangling source ids (the live failure shape)."""
+    import subprocess, sys as _sys
+    ws = tmp_path / "ws"
+    root = ws / "rsi-deep-research-report"
+    root.mkdir(parents=True)
+    sources = [{"id": f"s{i}", "title": f"T{i}", "citation_hint": f"C{i}"} for i in range(6)]
+    claims = [{"claim_id": f"c{i}", "source_id": f"s{i % 6}", "claim_text": f"claim {i}"} for i in range(12)]
+    (root / "sources.json").write_text(json.dumps(sources), encoding="utf-8")
+    (root / "claims.json").write_text(json.dumps(claims), encoding="utf-8")
+    validator = _HARNESS / "scripts" / "validate_rsi_demo_report.py"
+    green = subprocess.run(
+        [_sys.executable, str(validator), "--workspace", str(ws), "--claims-only"],
+        capture_output=True, text=True,
+    )
+    assert green.returncode == 0, green.stdout + green.stderr
+    # red: a claim citing a source that does not exist (boilerplate shape)
+    claims.append({"claim_id": "c99", "source_id": "turing1950", "claim_text": "boilerplate"})
+    (root / "claims.json").write_text(json.dumps(claims), encoding="utf-8")
+    red = subprocess.run(
+        [_sys.executable, str(validator), "--workspace", str(ws), "--claims-only"],
+        capture_output=True, text=True,
+    )
+    assert red.returncode != 0
+    assert "LINKAGE" in (red.stdout + red.stderr)

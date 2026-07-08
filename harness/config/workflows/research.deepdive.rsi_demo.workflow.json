@@ -1,7 +1,7 @@
 {
   "schema_version": "solar.workflow_contract.v1",
   "workflow_id": "research.deepdive.rsi_demo",
-  "version": "1.1",
+  "version": "1.2",
   "title": "RSI DeepDive Report",
   "dag_variant": "research",
   "trigger": {
@@ -21,12 +21,18 @@
       }
     ],
     "requirement_compiler_type": "RESEARCH",
-    "generic_words_insufficient": ["research", "研究", "调研"],
+    "generic_words_insufficient": [
+      "research",
+      "研究",
+      "调研"
+    ],
     "on_match": "bypass should_epic_decompose_request and PM epic decomposition; instantiate this contract as the task graph (identity = workflow_contract_id; dag_variant stays in its closed enum)"
   },
   "provider_policy": {
     "runtime": "codex",
-    "allowed_providers": ["openai"],
+    "allowed_providers": [
+      "openai"
+    ],
     "route_proof_required": true,
     "route_records": "per_stage_execution_append_only"
   },
@@ -36,7 +42,9 @@
   },
   "artifact_roots": {
     "canonical": "workspace/rsi-deep-research-report/",
-    "aliases": ["sprints/<sid>/workdir/rsi-deep-research-report/"],
+    "aliases": [
+      "sprints/<sid>/workdir/rsi-deep-research-report/"
+    ],
     "publish_rule": "export stage copies canonical set to evidence/report/rsi-deep-research-report/"
   },
   "validator_command": "python3 scripts/validate_rsi_demo_report.py --workspace <resolved_root>",
@@ -45,7 +53,9 @@
     "pipeline_strip": true
   },
   "forbidden": {
-    "capsules": ["cap.requirement-compiler-implementation"],
+    "capsules": [
+      "cap.requirement-compiler-implementation"
+    ],
     "proof_obligations": [
       "patch_diff",
       "patch_within_scope",
@@ -60,10 +70,14 @@
       "logical_operator": "DeepDiveBriefCapture",
       "depends_on": [],
       "task_type": "audit_inventory",
-      "allowed_capsules": ["cap.requirement-compiler-audit"],
+      "allowed_capsules": [
+        "cap.requirement-compiler-audit"
+      ],
       "allowed_operators": {
         "role": "builder",
-        "providers": ["openai"]
+        "providers": [
+          "openai"
+        ]
       },
       "outputs": [
         {
@@ -86,19 +100,26 @@
       "timeouts": {
         "result_timeout_sec": 900,
         "on_timeout_classification": "ORCHESTRATION_WEDGE_NOT_PRODUCT_PROOF"
-      }
+      },
+      "goal": "Freeze the demo scope. Read the seed source pack shipped at demo-rsi/source-pack/ under the harness root (sources.json + source-notes/*.md) — it is the ENTIRE corpus; do not fetch the web. Write scope-contract.json to the canonical artifact root declaring: the bounded research question (what recursive self-improvement is, what limits it, and what the pack's evidence shows), the D1-D6 stage plan, the in-scope seed-pack source ids, and the output contract (sources.json, claims.json, contradiction-matrix.json, report.md, report.html, evaluation-checklist.md)."
     },
     {
       "id": "D2",
       "gate_family": "DD_SOURCE",
       "node_kind": "artifact",
       "logical_operator": "DeepDiveSourceCollector",
-      "depends_on": ["D1"],
+      "depends_on": [
+        "D1"
+      ],
       "task_type": "knowledge-extraction",
-      "allowed_capsules": ["cap.requirement-research-scout"],
+      "allowed_capsules": [
+        "cap.requirement-research-scout"
+      ],
       "allowed_operators": {
         "role": "builder",
-        "providers": ["openai"]
+        "providers": [
+          "openai"
+        ]
       },
       "outputs": [
         {
@@ -134,14 +155,17 @@
       "dashboard_label": "D2 · Sources",
       "timeouts": {
         "result_timeout_sec": 900
-      }
+      },
+      "goal": "Produce sources.json at the canonical artifact root from the seed pack at demo-rsi/source-pack/ under the harness root: one entry per pack source carrying id, title, authors, year, venue, citation_hint and topic_tags copied faithfully from the pack's sources.json and source-notes/*.md. Every pack source must be represented; do not invent sources; do not fetch the web. The deterministic gate audits the exported set for authority and profile gaps."
     },
     {
       "id": "D3",
       "gate_family": "DD_EVIDENCE",
       "node_kind": "artifact",
       "logical_operator": "DeepDiveClaimCompiler",
-      "depends_on": ["D2"],
+      "depends_on": [
+        "D2"
+      ],
       "task_type": "evidence",
       "allowed_capsules": [
         "cap.requirement-research-synthesizer",
@@ -149,7 +173,9 @@
       ],
       "allowed_operators": {
         "role": "builder",
-        "providers": ["openai"]
+        "providers": [
+          "openai"
+        ]
       },
       "outputs": [
         {
@@ -179,29 +205,42 @@
       ],
       "evaluator_gate": {
         "kind": "deterministic_command",
-        "command": "research eval-artifacts --eval-json <resolved_root>/rsi-deep-research-report/research_eval.json --json",
-        "inputs_produced_by_this_gate": ["research_eval.json"],
+        "command": "python3 scripts/validate_rsi_demo_report.py --workspace <resolved_root> --claims-only",
+        "inputs_produced_by_this_gate": [
+          "research_eval.json"
+        ],
         "on_fail": "repair_once_then_fail",
         "on_capacity_unavailable": "wait",
         "on_human_review": "warn_and_continue",
-        "verdict_kinds": ["content", "mechanical", "infrastructure"]
+        "verdict_kinds": [
+          "content",
+          "mechanical",
+          "infrastructure"
+        ]
       },
       "dashboard_label": "D3 · Claims",
       "timeouts": {
         "result_timeout_sec": 1200
-      }
+      },
+      "goal": "Compile claims.json at the canonical artifact root: at least 10 claims extracted from the seed pack source notes (demo-rsi/source-pack/source-notes/ under the harness root), each an object {claim_id, source_id, claim_text, claim_type, stance, confidence} where source_id is an id present in sources.json and claim_text quotes or faithfully paraphrases that source note. No claims from memory or the open web — every claim must be traceable to its note. The deterministic gate enforces counts, claim-to-source linkage and non-empty claim text."
     },
     {
       "id": "D4",
       "gate_family": "DD_EVIDENCE",
       "node_kind": "analysis",
       "logical_operator": "DeepDiveContradictionScanner",
-      "depends_on": ["D3"],
+      "depends_on": [
+        "D3"
+      ],
       "task_type": "evidence",
-      "allowed_capsules": ["cap.requirement-research-synthesizer"],
+      "allowed_capsules": [
+        "cap.requirement-research-synthesizer"
+      ],
       "allowed_operators": {
         "role": "builder",
-        "providers": ["openai"]
+        "providers": [
+          "openai"
+        ]
       },
       "outputs": [
         {
@@ -223,19 +262,27 @@
       "dashboard_label": "D4 · Contradictions",
       "timeouts": {
         "result_timeout_sec": 900
-      }
+      },
+      "goal": "Write contradiction-matrix.json at the canonical artifact root: cross-source tensions, weak-evidence flags and open questions derived ONLY from claims.json — each entry must cite the claim_ids involved and state the nature of the tension (direct contradiction, scope mismatch, unsupported extrapolation, or evidence gap)."
     },
     {
       "id": "D5",
       "gate_family": "DD_SYNTHESIS",
       "node_kind": "artifact",
       "logical_operator": "DeepDiveChiefEditor",
-      "depends_on": ["D3", "D4"],
+      "depends_on": [
+        "D3",
+        "D4"
+      ],
       "task_type": "reporting",
-      "allowed_capsules": ["cap.requirement-compiler-audit"],
+      "allowed_capsules": [
+        "cap.requirement-compiler-audit"
+      ],
       "allowed_operators": {
         "role": "builder",
-        "providers": ["openai"]
+        "providers": [
+          "openai"
+        ]
       },
       "outputs": [
         {
@@ -280,24 +327,35 @@
         "role": "evaluator",
         "on_capacity_unavailable": "wait",
         "on_human_review": "warn_and_continue",
-        "verdict_kinds": ["content", "mechanical", "infrastructure"]
+        "verdict_kinds": [
+          "content",
+          "mechanical",
+          "infrastructure"
+        ]
       },
       "dashboard_label": "D5 · Report",
       "timeouts": {
         "result_timeout_sec": 1800
-      }
+      },
+      "goal": "Synthesize report.md and report.html at the canonical artifact root from claims.json and contradiction-matrix.json: an evidence-grounded report on the bounded RSI question with an inline [source_id] citation for every substantive statement, a contradictions/tensions section, and a limitations section. No placeholder or TODO text; report.html must be a complete standalone HTML document rendering the same content."
     },
     {
       "id": "D6",
       "gate_family": "DD_PUBLISH",
       "node_kind": "publish",
       "logical_operator": "DeepDiveArtifactPublisher",
-      "depends_on": ["D5"],
+      "depends_on": [
+        "D5"
+      ],
       "task_type": "documentation",
-      "allowed_capsules": ["cap.requirement-compiler-audit"],
+      "allowed_capsules": [
+        "cap.requirement-compiler-audit"
+      ],
       "allowed_operators": {
         "role": "builder",
-        "providers": ["openai"]
+        "providers": [
+          "openai"
+        ]
       },
       "outputs": [
         {
@@ -337,7 +395,8 @@
       "dashboard_label": "D6 · Publish",
       "timeouts": {
         "result_timeout_sec": 600
-      }
+      },
+      "goal": "Write evaluation-checklist.md at the canonical artifact root summarizing, per stage, the gate outcome and the produced artifacts (with one-line provenance for each), then verify the canonical artifact set is complete and consistent. The deterministic validator enforces the full artifact contract and fails the stage on any gap."
     }
   ],
   "required_artifacts": [
