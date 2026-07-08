@@ -1611,6 +1611,26 @@ def _builder_ready_nodes_for_sprint(sprint_id: str) -> tuple[list[dict[str, Any]
     try:
         graph_scheduler.SPRINTS_DIR = SPRINTS_DIR
         graph = graph_scheduler.load_graph(graph_path)
+        try:
+            import plan_validator  # type: ignore
+
+            plan_guard = plan_validator.check_planner_graph_dispatchable(graph)
+        except Exception as guard_exc:
+            if str(os.environ.get("SOLAR_PLAN_VALIDATOR") or "").strip().lower() in {"1", "true", "yes", "on"}:
+                return [], {
+                    "ok": False,
+                    "reason": "plan_validator_dispatch_refused",
+                    "errors": [f"PLAN_VALIDATOR_UNCHECKABLE:{type(guard_exc).__name__}"],
+                    "graph": str(graph_path),
+                }
+            plan_guard = {"ok": True}
+        if not plan_guard.get("ok"):
+            return [], {
+                "ok": False,
+                "reason": "plan_validator_dispatch_refused",
+                "errors": plan_guard.get("errors") or [],
+                "graph": str(graph_path),
+            }
         ready = graph_scheduler.ready_nodes(graph)
     except Exception as exc:
         return [], {"ok": False, "reason": f"ready_nodes_failed:{type(exc).__name__}", "error": str(exc), "graph": str(graph_path)}
@@ -2522,6 +2542,26 @@ def cmd_drain_builder_ready(args: argparse.Namespace) -> int:
 
     if requested_sprint:
         nodes, meta = _builder_ready_nodes_for_sprint(requested_sprint)
+        if not meta.get("ok"):
+            payload = {
+                "ok": False,
+                "dry_run": dry_run,
+                "max_items": max_items,
+                "sprint": requested_sprint,
+                "latent_builder_ready": 0,
+                "submitted": [],
+                "marked": [],
+                "skipped": [{**meta, "sprint_id": requested_sprint}],
+            }
+            if json_mode:
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                print(
+                    "drain_builder_ready "
+                    f"dry_run={dry_run} latent=0 submitted=0 marked=0 skipped=1"
+                )
+                print(f"  - {requested_sprint} reason={meta.get('reason')}")
+            return 1
         items = [
             {
                 "sprint_id": requested_sprint,

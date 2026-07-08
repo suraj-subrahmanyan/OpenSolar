@@ -2712,6 +2712,46 @@ workflow_guard_violations() {
   python3 "$HARNESS_DIR/lib/workflow_guard.py" route "$sid" --field violations 2>/dev/null || echo '[]'
 }
 
+compile_generic_plan_graph() {
+  local sid="$1" out rc
+  out=$(HARNESS_DIR="$HARNESS_DIR" HARNESS_SPRINTS_DIR="$SPRINTS_DIR" \
+    python3 "$HARNESS_DIR/lib/plan_validator.py" compile-generic "$sid" --sprints-dir "$SPRINTS_DIR" 2>&1)
+  rc=$?
+  case "$rc" in
+    0)
+      return 0
+      ;;
+    3)
+      log "${Y}[plan-compile] ${sid} failed; planner bounce remains available: ${out}${N}"
+      emit_event "$sid" "plan_compile_failed" "coordinator" "$(python3 -c 'import json,sys; print(json.dumps({"rc": int(sys.argv[1]), "output": sys.argv[2][-2000:]}))' "$rc" "$out" 2>/dev/null || echo '{}')"
+      return 1
+      ;;
+    4)
+      log "${R}[plan-compile] ${sid} exhausted planner bounce budget; terminal failed/plan_compile_failed written: ${out}${N}"
+      emit_event "$sid" "plan_compile_terminal" "coordinator" "$(python3 -c 'import json,sys; print(json.dumps({"rc": int(sys.argv[1]), "output": sys.argv[2][-2000:]}))' "$rc" "$out" 2>/dev/null || echo '{}')"
+      return 1
+      ;;
+    *)
+      log "${R}[plan-compile] ${sid} validator error rc=${rc}: ${out}${N}"
+      emit_event "$sid" "plan_compile_error" "coordinator" "$(python3 -c 'import json,sys; print(json.dumps({"rc": int(sys.argv[1]), "output": sys.argv[2][-2000:]}))' "$rc" "$out" 2>/dev/null || echo '{}')"
+      return 1
+      ;;
+  esac
+}
+
+plan_validator_dispatch_ready() {
+  local sid="$1" out rc
+  out=$(HARNESS_DIR="$HARNESS_DIR" HARNESS_SPRINTS_DIR="$SPRINTS_DIR" \
+    python3 "$HARNESS_DIR/lib/plan_validator.py" check-generic-dispatch "$sid" --sprints-dir "$SPRINTS_DIR" 2>&1)
+  rc=$?
+  if (( rc == 0 )); then
+    return 0
+  fi
+  log "${R}[plan-compile] ${sid} graph dispatch refused by plan validator rc=${rc}: ${out}${N}"
+  emit_event "$sid" "plan_validator_dispatch_refused" "coordinator" "$(python3 -c 'import json,sys; print(json.dumps({"rc": int(sys.argv[1]), "output": sys.argv[2][-2000:]}))' "$rc" "$out" 2>/dev/null || echo '{}')"
+  return 1
+}
+
 status_has_bypass_pm() {
   local sid="$1"
   local sf="$SPRINTS_DIR/${sid}.status.json"
@@ -3255,6 +3295,10 @@ PY
     rollback_state_cache "$sid"
     return 0
   fi
+  if ! compile_generic_plan_graph "$sid"; then
+    rollback_state_cache "$sid"
+    return 0
+  fi
 
   log "${G}Drafting sprint 已有 PRD + design + plan + task_graph → 自动推进 active/planning_complete${N}"
   runtime_status_transition "$sid" "active" "planner_graph_completed" "coordinator" '{"status_fields":{"phase":"planning_complete","handoff_to":"builder_main","target_role":"builder_main"},"note":"Auto-promoted drafting sprint because planner artifacts and task_graph are complete."}' || true
@@ -3484,6 +3528,10 @@ handle_active() {
         local _guard_role _old_phase="$phase"
         _guard_role="$(workflow_guard_route_role "$sid" 2>/dev/null || true)"
         if [[ "$_guard_role" == "builder_main" || "$_guard_role" == "builder" ]]; then
+          if ! compile_generic_plan_graph "$sid"; then
+            rollback_state_cache "$sid"
+            return 0
+          fi
           log "${G}[backfill] ${sid} active/${_old_phase} but planner artifacts+task_graph ready (guard=${_guard_role}) → promote planning_complete/builder_main${N}"
           drafting_flow_clear "$sid" "planner"
           runtime_status_transition "$sid" "active" "active_artifacts_ready_backfill" "coordinator" '{"status_fields":{"phase":"planning_complete","handoff_to":"builder_main","target_role":"builder_main"},"note":"Backfilled split active/prd_ready state: planner artifacts and task_graph are complete."}' || true
@@ -3575,6 +3623,10 @@ EOF
   esac
   if [[ "$phase" == "graph_dispatch_active" || "$phase" == "planning_complete" ]]; then
     if [[ -f "$SPRINTS_DIR/${sid}.task_graph.json" ]]; then
+      if ! plan_validator_dispatch_ready "$sid"; then
+        rollback_state_cache "$sid"
+        return 0
+      fi
       log "${G}Sprint ${sid} ${phase} + task_graph → DAG graph_node 派发${N}"
       # Option A self-complete: for an APPROVED sprint (graph_dispatch_active), advance the DAG via the
       # proven multi-task path (build->eval->verdict->next-node) instead of graph-dispatch panes. Run a

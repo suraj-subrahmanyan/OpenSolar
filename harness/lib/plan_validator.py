@@ -7,15 +7,15 @@ root containment (R2c, the pm.generic.v1 root policy), and route resolvability
 (R2d) — to planner-emitted task graphs. Error codes and the node-kind legality
 table are imported from workflow_contract (single source), never redefined.
 
-The bounce-to-planner loop and the PLAN_COMPILE_FAILED terminal live at the
-call site (coordinator/pm path, env gate SOLAR_PLAN_VALIDATOR); this module is
-pure validation plus the errors-artifact writer that call site uses.
-
-No runtime imports.
+The env-gated graph-birth helper below wires that pure validator into the
+generic acceptance seams: it stamps pm.generic.v1, persists PASS certificates,
+tracks planner-bounce metadata in the errors artifact, and writes the approved
+terminal status on exhaustion. Runtime imports remain local to that helper.
 """
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -73,6 +73,8 @@ ERROR_PLAN_GRAPH_TOO_LARGE = "PLAN_GRAPH_TOO_LARGE"
 ERROR_PLAN_CERTIFICATE_MISSING = "PLAN_CERTIFICATE_MISSING"
 ERROR_PLAN_CERTIFICATE_NOT_PASS = "PLAN_CERTIFICATE_NOT_PASS"
 ERROR_PLAN_CERTIFICATE_HASH_MISMATCH = "PLAN_CERTIFICATE_HASH_MISMATCH"
+ERROR_PLAN_GENERIC_CONTRACT_MISSING = "PLAN_GENERIC_CONTRACT_MISSING"
+ERROR_PLAN_GRAPH_MISSING = "PLAN_GRAPH_MISSING"
 
 PLAN_CERTIFICATE_SCHEMA = "solar.plan_certificate.v1"
 
@@ -419,6 +421,11 @@ def write_errors_artifact(
     sprints_dir: os.PathLike,
     sid: str,
     errors: List[Dict[str, Any]],
+    *,
+    bounce_count: Optional[int] = None,
+    graph_hash: Optional[str] = None,
+    exhausted: Optional[bool] = None,
+    terminal: Optional[bool] = None,
 ) -> Path:
     """Write <sid>.plan-compile-errors.json atomically (design §1.3); the
     caller appends these to the planner re-dispatch prompt."""
@@ -431,10 +438,312 @@ def write_errors_artifact(
         "errors": errors,
         "terminal_state_on_exhaustion": "PLAN_COMPILE_FAILED",
     }
+    if bounce_count is not None:
+        payload["bounce_count"] = int(bounce_count)
+    if graph_hash is not None:
+        payload["graph_hash"] = str(graph_hash)
+    if exhausted is not None:
+        payload["exhausted"] = bool(exhausted)
+    if terminal is not None:
+        payload["terminal"] = bool(terminal)
     tmp = target.with_suffix(target.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
     os.replace(tmp, target)
     return target
+
+
+def _env_gate_enabled() -> bool:
+    return str(os.environ.get("SOLAR_PLAN_VALIDATOR", "") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _is_epic_graph(task_graph: Dict[str, Any]) -> bool:
+    schema = str(task_graph.get("schema_version") or "")
+    return schema.startswith("solar.epic.")
+
+
+def _generic_graph_kind(task_graph: Dict[str, Any]) -> str:
+    contract_id = str(task_graph.get("workflow_contract_id") or "").strip()
+    if _is_epic_graph(task_graph):
+        return "epic_graph"
+    if contract_id and contract_id != GENERIC_CONTRACT_ID:
+        return "non_generic_contract"
+    return "generic"
+
+
+def _error(code: str, node_id: str, message: str, **extra: Any) -> Dict[str, Any]:
+    try:
+        return wc.compile_error(code, node_id, message, **extra)
+    except Exception:
+        out = {"code": code, "node_id": node_id, "message": message}
+        out.update(extra)
+        return out
+
+
+def _graph_hash_for_bounce(task_graph: Dict[str, Any], contract_version: str = "") -> str:
+    candidate = copy.deepcopy(task_graph)
+    candidate["workflow_contract_id"] = GENERIC_CONTRACT_ID
+    candidate["workflow_contract_version"] = contract_version
+    candidate.pop("plan_certificate", None)
+    return plan_certificate_hash(candidate)
+
+
+def _read_errors_artifact(sprints_dir: Path, sid: str) -> Dict[str, Any]:
+    path = sprints_dir / f"{sid}{ERRORS_ARTIFACT_SUFFIX}"
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _bounce_count_for_failure(sprints_dir: Path, sid: str, graph_hash: str) -> int:
+    previous = _read_errors_artifact(sprints_dir, sid)
+    previous_count = int(previous.get("bounce_count") or 0)
+    if previous.get("graph_hash") == graph_hash and previous_count > 0:
+        return previous_count
+    return previous_count + 1
+
+
+def _plan_compile_config(contract: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    return dict((contract or {}).get("plan_compile") or {})
+
+
+def _max_planner_bounces(contract: Optional[Dict[str, Any]]) -> int:
+    try:
+        return int(_plan_compile_config(contract).get("max_planner_bounces") or 2)
+    except Exception:
+        return 2
+
+
+def _transition_plan_compile_failed(sprints_dir: Path, sid: str, from_status: str) -> Dict[str, Any]:
+    status_path = sprints_dir / f"{sid}.status.json"
+    out: Dict[str, Any] = {"attempted": False}
+    if not status_path.exists():
+        out["error"] = f"status_missing:{status_path}"
+        return out
+    try:
+        from runtime_status import transition_status  # noqa: WPS433
+
+        updated, message = transition_status(
+            status_path,
+            "failed",
+            "plan_compile_failed",
+            "plan_validator",
+            extra={
+                "reason": "PLAN_COMPILE_FAILED",
+                "status_fields": {
+                    "phase": "plan_compile_failed",
+                    "handoff_to": "",
+                    "target_role": "",
+                    "plan_compile_state": "PLAN_COMPILE_FAILED",
+                },
+            },
+        )
+        out.update({"attempted": True, "ok": True, "status": updated, "message": message})
+    except Exception as exc:
+        out.update({"attempted": True, "ok": False, "error": f"{type(exc).__name__}: {exc}"})
+    try:
+        import gate_ledger  # noqa: WPS433
+
+        gate_ledger.record_status_transition(
+            sprints_dir,
+            sid,
+            "__sprint__",
+            from_status=from_status,
+            to_status="plan_compile_failed",
+            author_type="policy",
+            writer="plan_validator",
+            note="PLAN_COMPILE_FAILED",
+        )
+    except Exception:
+        pass
+    return out
+
+
+def compile_planner_graph(
+    sprints_dir: os.PathLike,
+    sid: str,
+    *,
+    config_dir: Optional[os.PathLike] = None,
+    workflows_dir: Optional[os.PathLike] = None,
+) -> Dict[str, Any]:
+    """Env-gated generic graph compile/stamp helper for acceptance seams."""
+    verdict: Dict[str, Any] = {
+        "ok": True,
+        "stamped": False,
+        "skipped_reason": "",
+        "errors": [],
+        "bounce_count": 0,
+        "exhausted": False,
+        "terminal": False,
+    }
+    if not _env_gate_enabled():
+        verdict["skipped_reason"] = "env_off"
+        return verdict
+
+    sprints = Path(sprints_dir)
+    graph_path = sprints / f"{sid}.task_graph.json"
+    if not graph_path.exists():
+        error = _error(ERROR_PLAN_GRAPH_MISSING, "?", f"task_graph not found: {graph_path}")
+        write_errors_artifact(sprints, sid, [error], bounce_count=0, exhausted=False, terminal=False)
+        return {**verdict, "ok": False, "errors": [error], "skipped_reason": "graph_missing"}
+
+    task_graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    graph_kind = _generic_graph_kind(task_graph)
+    if graph_kind != "generic":
+        verdict["skipped_reason"] = graph_kind
+        return verdict
+
+    contract = _generic_contract(workflows_dir)
+    if contract is None:
+        error = _error(
+            ERROR_PLAN_GENERIC_CONTRACT_MISSING,
+            "?",
+            f"{GENERIC_CONTRACT_ID} workflow contract is missing; refusing ungoverned generic acceptance",
+        )
+        graph_hash = _graph_hash_for_bounce(task_graph)
+        bounce_count = _bounce_count_for_failure(sprints, sid, graph_hash)
+        max_bounces = _max_planner_bounces(None)
+        exhausted = bounce_count >= max_bounces
+        terminal_status: Dict[str, Any] = {}
+        if exhausted:
+            current = _read_status_value(sprints / f"{sid}.status.json")
+            terminal_status = _transition_plan_compile_failed(sprints, sid, current)
+        write_errors_artifact(
+            sprints,
+            sid,
+            [error],
+            bounce_count=bounce_count,
+            graph_hash=graph_hash,
+            exhausted=exhausted,
+            terminal=exhausted,
+        )
+        return {
+            **verdict,
+            "ok": False,
+            "errors": [error],
+            "bounce_count": bounce_count,
+            "exhausted": exhausted,
+            "terminal": exhausted,
+            "terminal_status": terminal_status,
+        }
+
+    contract_version = str(contract.get("version") or "")
+    if str(task_graph.get("workflow_contract_id") or "") == GENERIC_CONTRACT_ID:
+        cert_errors = check_plan_certificate(task_graph)
+        if not cert_errors:
+            verdict["skipped_reason"] = "already_certified"
+            return verdict
+
+    directory = Path(config_dir) if config_dir else wc.default_config_dir()
+    capsules = wc.load_capsule_registry(directory)
+    operators = wc.load_operator_registry(directory / "physical-operators.json")
+    candidate = copy.deepcopy(task_graph)
+    candidate["workflow_contract_id"] = GENERIC_CONTRACT_ID
+    candidate["workflow_contract_version"] = contract_version
+    candidate.pop("plan_certificate", None)
+
+    errors = validate_plan(candidate, capsules, operators, contract=contract)
+    if not errors:
+        stamp_plan_certificate(candidate, capsules, operators, contract=contract)
+        _atomic_write_json(graph_path, candidate)
+        return {**verdict, "stamped": True, "workflow_contract_id": GENERIC_CONTRACT_ID}
+
+    graph_hash = _graph_hash_for_bounce(candidate, contract_version)
+    bounce_count = _bounce_count_for_failure(sprints, sid, graph_hash)
+    max_bounces = _max_planner_bounces(contract)
+    exhausted = bounce_count >= max_bounces
+    terminal_status = {}
+    if exhausted:
+        current = _read_status_value(sprints / f"{sid}.status.json")
+        terminal_status = _transition_plan_compile_failed(sprints, sid, current)
+    write_errors_artifact(
+        sprints,
+        sid,
+        errors,
+        bounce_count=bounce_count,
+        graph_hash=graph_hash,
+        exhausted=exhausted,
+        terminal=exhausted,
+    )
+    return {
+        **verdict,
+        "ok": False,
+        "errors": errors,
+        "bounce_count": bounce_count,
+        "exhausted": exhausted,
+        "terminal": exhausted,
+        "terminal_status": terminal_status,
+    }
+
+
+def _read_status_value(status_path: Path) -> str:
+    try:
+        data = json.loads(status_path.read_text(encoding="utf-8"))
+        return str(data.get("status") or "")
+    except Exception:
+        return ""
+
+
+def check_planner_graph_dispatchable(task_graph: Dict[str, Any]) -> Dict[str, Any]:
+    """Read-only dispatch-boundary check for generic planner graphs."""
+    verdict: Dict[str, Any] = {"ok": True, "skipped_reason": "", "errors": []}
+    if not _env_gate_enabled():
+        verdict["skipped_reason"] = "env_off"
+        return verdict
+    graph_kind = _generic_graph_kind(task_graph or {})
+    if graph_kind != "generic":
+        verdict["skipped_reason"] = graph_kind
+        return verdict
+    contract = _generic_contract()
+    if contract is None:
+        return {
+            "ok": False,
+            "reason": "plan_validator_dispatch_refused",
+            "errors": [
+                _error(
+                    ERROR_PLAN_GENERIC_CONTRACT_MISSING,
+                    "?",
+                    f"{GENERIC_CONTRACT_ID} workflow contract is missing; refusing generic dispatch",
+                )
+            ],
+        }
+    graph_version = str((task_graph or {}).get("workflow_contract_version") or "")
+    contract_version = str(contract.get("version") or "")
+    if str((task_graph or {}).get("workflow_contract_id") or "") == GENERIC_CONTRACT_ID and graph_version != contract_version:
+        return {
+            "ok": False,
+            "reason": "plan_validator_dispatch_refused",
+            "errors": [
+                _error(
+                    "WORKFLOW_CONTRACT_VERSION_MISMATCH",
+                    "?",
+                    f"{GENERIC_CONTRACT_ID} version mismatch: graph={graph_version!r}, contract={contract_version!r}",
+                    declared=graph_version,
+                    admitted=contract_version,
+                )
+            ],
+        }
+    errors = check_plan_certificate(task_graph or {})
+    if errors:
+        return {
+            "ok": False,
+            "reason": "plan_validator_dispatch_refused",
+            "errors": errors,
+        }
+    return verdict
 
 
 def validate_plan_file(
@@ -450,7 +759,48 @@ def validate_plan_file(
     return validate_plan(task_graph, capsules, operators, contract=contract)
 
 
-def main(argv=None) -> int:
+def _main_compile_generic(argv: List[str]) -> int:
+    parser = argparse.ArgumentParser(prog="plan_validator compile-generic")
+    parser.add_argument("sid")
+    parser.add_argument("--sprints-dir", required=True)
+    parser.add_argument("--config-dir", default=None)
+    parser.add_argument("--workflows-dir", default=None)
+    args = parser.parse_args(argv)
+    try:
+        verdict = compile_planner_graph(
+            args.sprints_dir,
+            args.sid,
+            config_dir=args.config_dir,
+            workflows_dir=args.workflows_dir,
+        )
+    except Exception as exc:
+        print(f"plan_validator: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(verdict, indent=2, sort_keys=True, ensure_ascii=True))
+    if verdict.get("ok"):
+        return 0
+    if verdict.get("terminal") or verdict.get("exhausted"):
+        return 4
+    return 3
+
+
+def _main_check_generic_dispatch(argv: List[str]) -> int:
+    parser = argparse.ArgumentParser(prog="plan_validator check-generic-dispatch")
+    parser.add_argument("sid")
+    parser.add_argument("--sprints-dir", required=True)
+    args = parser.parse_args(argv)
+    graph_path = Path(args.sprints_dir) / f"{args.sid}.task_graph.json"
+    try:
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        verdict = check_planner_graph_dispatchable(graph)
+    except Exception as exc:
+        print(f"plan_validator: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(verdict, indent=2, sort_keys=True, ensure_ascii=True))
+    return 0 if verdict.get("ok") else 3
+
+
+def _main_validate_file(argv: List[str]) -> int:
     parser = argparse.ArgumentParser(prog="plan_validator", description=__doc__)
     parser.add_argument("task_graph", help="path to a <sid>.task_graph.json")
     parser.add_argument("--config-dir", default=None)
@@ -467,6 +817,15 @@ def main(argv=None) -> int:
         return 3
     print("plan compiles")
     return 0
+
+
+def main(argv=None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw and raw[0] == "compile-generic":
+        return _main_compile_generic(raw[1:])
+    if raw and raw[0] == "check-generic-dispatch":
+        return _main_check_generic_dispatch(raw[1:])
+    return _main_validate_file(raw)
 
 
 if __name__ == "__main__":

@@ -92,6 +92,32 @@ def _graph_valid(path: Path) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _plan_certificate_ready(path: Path) -> tuple[bool, str]:
+    if not _nonempty(path):
+        return True, "not_applicable"
+    try:
+        graph = json.loads(path.read_text())
+    except Exception as exc:
+        return False, f"plan_certificate_parse_error:{exc}"
+    try:
+        import plan_validator
+    except Exception as exc:
+        if str(os.environ.get("SOLAR_PLAN_VALIDATOR", "") or "").strip().lower() in {"1", "true", "yes", "on"}:
+            return False, f"plan_certificate_uncheckable:{type(exc).__name__}"
+        return True, "not_applicable"
+    verdict = plan_validator.check_planner_graph_dispatchable(graph)
+    if verdict.get("ok"):
+        return True, str(verdict.get("skipped_reason") or "ok")
+    errors = verdict.get("errors") if isinstance(verdict.get("errors"), list) else []
+    codes = []
+    for error in errors:
+        if isinstance(error, dict):
+            codes.append(str(error.get("code") or "PLAN_CERTIFICATE_ERROR"))
+        else:
+            codes.append(str(error))
+    return False, "plan_certificate_required:" + ",".join(codes or ["PLAN_CERTIFICATE_ERROR"])
+
+
 def _graph_parent_ready(path: Path) -> bool:
     if not _nonempty(path):
         return False
@@ -216,6 +242,10 @@ def route(sid: str) -> dict[str, Any]:
         if _triface_ok is None and _triface_reason == "spec_missing":
             # spec just not created yet — use legacy result
             pass
+    if graph_ok:
+        cert_ok, cert_reason = _plan_certificate_ready(graph)
+        if not cert_ok:
+            graph_ok, graph_reason = False, cert_reason
 
     # Parent-ready: prefer triface (closure/state), fall back to legacy
     triface_ready = _triface_parent_ready(sid)

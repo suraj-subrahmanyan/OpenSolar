@@ -2506,6 +2506,26 @@ def dispatch_ready_graph_nodes(sid: str, lease: bool = True) -> dict:
     if load_graph is None or validate_graph is None:
         return {"ok": False, "reason": "graph_scheduler_unavailable"}
     graph = load_graph(path)
+    try:
+        import plan_validator  # type: ignore
+
+        plan_guard = plan_validator.check_planner_graph_dispatchable(graph)
+    except Exception as guard_exc:
+        if str(os.environ.get("SOLAR_PLAN_VALIDATOR") or "").strip().lower() in {"1", "true", "yes", "on"}:
+            return {
+                "ok": False,
+                "reason": "plan_validator_dispatch_refused",
+                "errors": [f"PLAN_VALIDATOR_UNCHECKABLE:{type(guard_exc).__name__}"],
+                "sprint_id": sid,
+            }
+        plan_guard = {"ok": True}
+    if not plan_guard.get("ok"):
+        return {
+            "ok": False,
+            "reason": "plan_validator_dispatch_refused",
+            "errors": plan_guard.get("errors") or [],
+            "sprint_id": sid,
+        }
     validation = validate_graph(graph) if validate_graph else {"ok": False, "errors": ["graph_scheduler_unavailable"]}
     if not validation.get("ok"):
         return {"ok": False, "reason": "task_graph_invalid", "validation": validation}
@@ -2629,6 +2649,29 @@ def normalize_status_to_workflow_route(sid: str, status: dict, route: dict) -> b
         }.get(role)
         if not fields:
             return False
+        if role in {"builder", "builder_main"}:
+            try:
+                import plan_validator  # type: ignore
+
+                compile_verdict = plan_validator.compile_planner_graph(
+                    SPRINTS,
+                    sid,
+                    config_dir=HARNESS / "config",
+                    workflows_dir=HARNESS / "config" / "workflows",
+                )
+            except Exception as exc:
+                compile_verdict = {
+                    "ok": False,
+                    "errors": [f"PLAN_VALIDATOR_UNCHECKABLE:{type(exc).__name__}"],
+                }
+            if not compile_verdict.get("ok"):
+                append_event(
+                    sid,
+                    "plan_compile_failed",
+                    "warn",
+                    {"route_role": role, "stage": stage, "verdict": compile_verdict},
+                )
+                return False
     new_status, new_phase, handoff, target_role = fields
     changed = any(
         str(status.get(k, "")) != v
