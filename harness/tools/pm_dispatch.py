@@ -1678,14 +1678,61 @@ def _pm_expected_artifacts(record: dict[str, Any]) -> list[Path]:
     return []
 
 
+def _pm_recover_missing_artifact(expected: Path, sprint_id: str) -> dict[str, str] | None:
+    """Deterministic closeout recovery for the nested-write failure class.
+
+    Workers are given the flat sprints path, but a path transcription slip can
+    land the artifact — exact expected basename, non-empty — inside the
+    sprint's own directory tree instead (P2 smoke-5: the S2 builder wrote
+    sprints/<sid>/<basename> and then failed contract closeout with the file
+    sitting right there). If EXACTLY ONE such candidate exists under
+    SPRINTS_DIR/<sid>/, copy it to the canonical path and report the recovery;
+    zero or multiple matches keep the failure, and files outside the sprint
+    tree are never adopted. Only ever fires where the closeout would otherwise
+    FAIL. Kill-switch: SOLAR_PM_CLOSEOUT_RECOVERY=0."""
+    flag = str(os.environ.get("SOLAR_PM_CLOSEOUT_RECOVERY", "1")).strip().lower()
+    if flag in {"0", "false", "no", "off"}:
+        return None
+    sprint_tree = SPRINTS_DIR / sprint_id
+    if not sprint_id or not sprint_tree.is_dir():
+        return None
+    try:
+        matches = [
+            path for path in sprint_tree.rglob(expected.name)
+            if path.is_file() and path.stat().st_size > 0
+        ]
+    except Exception:
+        return None
+    if len(matches) != 1:
+        return None
+    try:
+        shutil.copy2(matches[0], expected)
+    except Exception:
+        return None
+    return {"artifact": str(expected), "recovered_from": str(matches[0])}
+
+
 def _pm_closeout_status(record: dict[str, Any]) -> dict[str, Any]:
     expected = _pm_expected_artifacts(record)
-    missing = [str(path) for path in expected if not path.exists() or path.stat().st_size <= 0]
-    return {
+    sprint_id = str(record.get("sprint_id") or "").strip()
+    missing: list[str] = []
+    recovered: list[dict[str, str]] = []
+    for path in expected:
+        if path.exists() and path.stat().st_size > 0:
+            continue
+        recovery = _pm_recover_missing_artifact(path, sprint_id)
+        if recovery:
+            recovered.append(recovery)
+            continue
+        missing.append(str(path))
+    closeout: dict[str, Any] = {
         "ok": not missing,
         "expected_artifacts": [str(path) for path in expected],
         "missing_artifacts": missing,
     }
+    if recovered:
+        closeout["recovered_artifacts"] = recovered
+    return closeout
 
 
 def _record_age_minutes(record: dict[str, Any], path: Path) -> float:
