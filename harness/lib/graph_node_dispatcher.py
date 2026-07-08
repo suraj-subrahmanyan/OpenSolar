@@ -7857,6 +7857,39 @@ def _discover_evaluators(dry_run: bool = False) -> list[dict[str, Any]]:
     return evaluators
 
 
+def _order_evaluators_for_graph(graph: dict[str, Any], evaluators: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Contracted-path evaluator ordering: dispatchable pool evaluators first.
+
+    _discover_evaluators sorts pane-first (cockpit :0.3 = priority 0, the
+    operator-pool virtual worker last) and _evaluation_capacity_snapshot
+    selects available[:required] — pure list order. That is the interactive
+    cockpit rule. On the contracted path it wedged the first live Claude
+    smoke: claude TUI panes accept direct dispatch and match the evaluator
+    role, so the live pane outranked the pool, the injected eval sat
+    unexecuted in the TUI, and the in-flight sidecar suppressed every later
+    dispatch tick (S1 reviewing for the whole budget, dispatched=[]). A pane
+    eval is also evidence-free — no operatord lease, no result.json, no route
+    records — while the pool is the evidence-generating seam the gate ledger
+    audits. So on contracted graphs (SOLAR_GATE_LEDGER + workflow_contract_id)
+    non-busy pool evaluators outrank panes; panes stay as fallback when the
+    pool has none. Uncontracted graphs keep pane-first ordering unchanged."""
+    if not evaluators:
+        return evaluators
+    if not (_ledger_enabled() and _gate_ledger is not None and _gate_ledger.contracted(graph)):
+        return evaluators
+    if not _eval_operator_pool_enabled():
+        return evaluators
+    pool = [
+        item for item in evaluators
+        if str(item.get("pane") or "").startswith("operator-pool:evaluator")
+    ]
+    if not any(not item.get("busy") for item in pool):
+        return evaluators
+    pool_ids = {id(item) for item in pool}
+    rest = [item for item in evaluators if id(item) not in pool_ids]
+    return pool + rest
+
+
 def _node_eval_self_graded(sid: str, node_id: str) -> bool:
     """The node's eval.json was written by the EXECUTING agent itself (generation_mode=manual_node_eval)
     with no INDEPENDENT evaluator report (no non-empty {node}-eval.md and no {node}-eval-dispatch sidecar).
@@ -7982,7 +8015,7 @@ def dispatch_node_evals(graph_path: str, dry_run: bool = False, ttl: int = 900,
     dispatched: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     used_evaluator_panes: set[str] = set()
-    evaluators = _discover_evaluators(dry_run)
+    evaluators = _order_evaluators_for_graph(graph, _discover_evaluators(dry_run))
 
     for node in graph.get("nodes", []):
         if max_items and len(dispatched) >= max_items:
