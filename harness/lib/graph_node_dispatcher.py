@@ -8008,6 +8008,55 @@ def _first_available_evaluator(dry_run: bool = False) -> dict[str, Any] | None:
     return None
 
 
+def _maybe_execute_contract_gate(graph: dict[str, Any], sid: str, node: dict[str, Any],
+                                 *, dry_run: bool = False) -> dict[str, Any] | None:
+    """Execute a contracted stage's none/deterministic_command evaluator gate.
+
+    Returns a dispatched-entry dict when this node's gate was executed (or
+    planned, under dry_run), None to fall through to the llm_eval path. The
+    executor writes the same eval.json/eval.md sidecar pair a live evaluator
+    writes, so the proven sidecar-reconcile -> mark -> ledger-verdict ->
+    repair machinery consumes the result unchanged (P3 rehearsal: nothing
+    executed non-llm gate kinds; contracted non-llm stages wedged in
+    reviewing). Contracted-path only — uncontracted graphs and llm_eval
+    stages keep legacy behavior byte-identically."""
+    if not (_ledger_enabled() and _gate_ledger is not None and _gate_ledger.contracted(graph)):
+        return None
+    gate = node.get("evaluator_gate") if isinstance(node.get("evaluator_gate"), dict) else {}
+    kind = str((gate or {}).get("kind") or "none")
+    try:
+        import contract_gate_executor as _cge
+    except Exception:
+        return None
+    if kind not in _cge.EXECUTABLE_GATE_KINDS:
+        return None
+    node_id = str(node.get("id") or "")
+    if dry_run:
+        return {
+            "node": node_id,
+            "dispatch_mode": "deterministic_gate",
+            "gate_kind": kind,
+            "dry_run": True,
+        }
+    result = _cge.execute_gate(SPRINTS_DIR, sid, node, gate or {}, harness_dir=HARNESS_DIR)
+    _ledger_record(
+        sid, node_id=node_id, kind="gate_check", author={"type": "policy"},
+        verdict="pass" if result.get("ok") else "fail",
+        verdict_kind=str(result.get("verdict_kind") or "") or None,
+        note=f"deterministic_gate_executed:{kind}",
+        exit_code=result.get("exit_code"),
+    )
+    return {
+        "node": node_id,
+        "dispatch_mode": "deterministic_gate",
+        "gate_kind": kind,
+        "verdict": result.get("verdict"),
+        "verdict_kind": result.get("verdict_kind"),
+        "eval_json": result.get("eval_json"),
+        "exit_code": result.get("exit_code"),
+    }
+
+
 def dispatch_node_evals(graph_path: str, dry_run: bool = False, ttl: int = 900,
                         force: bool = False, max_items: int = 0) -> dict[str, Any]:
     graph = load_graph(graph_path)
@@ -8025,6 +8074,10 @@ def dispatch_node_evals(graph_path: str, dry_run: bool = False, ttl: int = 900,
             continue
         if not dry_run:
             _emit_node_proof_sidecars(sid, node)
+        gate_result = _maybe_execute_contract_gate(graph, sid, node, dry_run=dry_run)
+        if gate_result is not None:
+            dispatched.append(gate_result)
+            continue
         requested_plan = _plan_node_evaluation(graph, node)
         loop_evaluators = [
             {**item, "busy": bool(item.get("busy")) or str(item.get("pane") or "") in used_evaluator_panes}

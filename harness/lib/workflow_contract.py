@@ -886,6 +886,16 @@ def instantiate(contract: Dict[str, Any], inputs: Optional[Dict[str, Any]] = Non
         on_human_review = (stage.get("evaluator_gate") or {}).get("on_human_review")
         if on_human_review:
             node["on_human_review"] = on_human_review
+        # The gate's on_fail policy IS the node's repair budget: "fail" means
+        # no repair cycle (the D6 publish gate), "repair_once_then_fail" means
+        # exactly one — consumed by the existing _node_repair_max_attempts
+        # lookup. Stamped at instantiation so it is contract-determined and
+        # golden-visible, not a runtime default.
+        on_fail = str((stage.get("evaluator_gate") or {}).get("on_fail") or "")
+        if on_fail == "fail":
+            node["max_repair_attempts"] = 0
+        elif on_fail == "repair_once_then_fail":
+            node["max_repair_attempts"] = 1
         nodes.append(node)
 
     graph: Dict[str, Any] = {

@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""P3 pre-live blocker — the contracted evaluator-gate EXECUTOR (rehearsal
+finding 1, 2026-07-08).
+
+The workflow-contract schema admits three evaluator_gate kinds (none |
+deterministic_command | llm_eval) and the structure guard enforces them, but
+NOTHING in the runtime executed the first two: `evaluator_gate` was consumed
+only by the guard. Both P2 contracts are all-llm_eval, so this stayed latent;
+research.deepdive.rsi_demo needs `none` (D1/D4) and `deterministic_command`
+(D2/D3/D6) and would wedge every non-llm stage in `reviewing`.
+
+The executor is deliberately a DETERMINISTIC EVALUATOR: it produces the same
+sidecar pair a live evaluator produces ({sid}.{node}-eval.json + -eval.md,
+correct generation, honest generation_mode), so the PROVEN consume machinery
+(sidecar reconcile -> mark -> ledger verdict -> repair on FAIL) runs
+unchanged. Verdict mapping: exit 0 -> PASS (verdict_kind content); nonzero
+exit -> FAIL content (a real content judgment); command-unrunnable/timeout ->
+FAIL infrastructure (which AC-R4.1 already holds back from flipping
+policy-passed nodes). Gate kind `none` writes a policy pass sidecar
+(generation_mode evaluator_gate_none) recording that the contract declares no
+evaluator for the stage. on_fail is enforced via instantiate() stamping
+max_repair_attempts (fail -> 0, repair_once_then_fail -> 1) — consumed by the
+EXISTING repair budget logic.
+
+Everything is contracted-path-gated: uncontracted graphs and llm_eval stages
+keep byte-identical legacy behavior.
+"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+_HARNESS = Path(__file__).resolve().parents[2]
+_HARNESS_LIB = str(_HARNESS / "lib")
+if _HARNESS_LIB not in sys.path:
+    sys.path.insert(0, _HARNESS_LIB)
+
+import graph_node_dispatcher as gnd  # noqa: E402
+import workflow_contract as wc  # noqa: E402
+
+WORKFLOWS_DIR = _HARNESS / "config" / "workflows"
+SID = "p3-gate-exec"
+
+
+def _node(gate: dict, node_id: str = "D2", status: str = "reviewing") -> dict:
+    return {
+        "id": node_id,
+        "status": status,
+        "task_type": "evidence",
+        "evaluator_gate": gate,
+        "depends_on": [],
+    }
+
+
+def _graph(nodes: list[dict], contracted: bool = True) -> dict:
+    graph: dict = {"sprint_id": SID, "nodes": nodes}
+    if contracted:
+        graph["workflow_contract_id"] = "research.deepdive.rsi_demo"
+        graph["workflow_contract_version"] = "1.1"
+    return graph
+
+
+@pytest.fixture()
+def sandbox(tmp_path, monkeypatch):
+    sprints = tmp_path / "sprints"
+    sprints.mkdir(parents=True)
+    monkeypatch.setenv("SOLAR_GATE_LEDGER", "1")
+    monkeypatch.setenv("HARNESS_DIR", str(tmp_path))
+    monkeypatch.setattr(gnd, "HARNESS_DIR", tmp_path)
+    monkeypatch.setattr(gnd, "SPRINTS_DIR", sprints)
+    monkeypatch.setattr(gnd, "_discover_evaluators", lambda dry_run=False: [])
+    return tmp_path
+
+
+def _dispatch(graph, tmp_path):
+    # a node only needs eval once its builder handoff exists (live shape)
+    for node in graph.get("nodes", []):
+        handoff = tmp_path / "sprints" / f"{SID}.{node['id']}-handoff.md"
+        if not handoff.exists():
+            handoff.write_text(f"# {node['id']} handoff\nbuilder done\n", encoding="utf-8")
+    graph_path = tmp_path / "sprints" / f"{SID}.task_graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    return gnd.dispatch_node_evals(str(graph_path))
+
+
+def _eval_sidecars(tmp_path, node_id):
+    sprints = tmp_path / "sprints"
+    ej = sprints / f"{SID}.{node_id}-eval.json"
+    em = sprints / f"{SID}.{node_id}-eval.md"
+    payload = json.loads(ej.read_text(encoding="utf-8")) if ej.exists() else {}
+    return payload, (em.read_text(encoding="utf-8") if em.exists() else "")
+
+
+def test_deterministic_gate_pass_writes_consumable_eval_sidecars(sandbox):
+    gate = {"kind": "deterministic_command",
+            "command": "python3 -c \"import sys; sys.exit(0)\""}
+    result = _dispatch(_graph([_node(gate)]), sandbox)
+    assert any(d.get("dispatch_mode") == "deterministic_gate" for d in result.get("dispatched", [])), result
+    payload, md = _eval_sidecars(sandbox, "D2")
+    assert payload.get("verdict") == "PASS"
+    assert payload.get("verdict_kind") == "content"
+    assert payload.get("generation_mode") == "deterministic_command"
+    assert payload.get("eval_generation") == 0
+    assert payload.get("exit_code") == 0
+    assert md.strip(), "eval.md must be non-empty (self-graded guard)"
+
+
+def test_deterministic_gate_fail_is_content_fail(sandbox):
+    gate = {"kind": "deterministic_command",
+            "command": "python3 -c \"import sys; print('bad artifacts'); sys.exit(3)\"",
+            "on_fail": "repair_once_then_fail"}
+    _dispatch(_graph([_node(gate)]), sandbox)
+    payload, md = _eval_sidecars(sandbox, "D2")
+    assert payload.get("verdict") == "FAIL"
+    assert payload.get("verdict_kind") == "content"
+    assert payload.get("exit_code") == 3
+    assert "bad artifacts" in md
+
+
+def test_unrunnable_gate_is_infrastructure_fail(sandbox):
+    gate = {"kind": "deterministic_command",
+            "command": "python3 scripts/does-not-exist-anywhere.py"}
+    _dispatch(_graph([_node(gate)]), sandbox)
+    payload, _ = _eval_sidecars(sandbox, "D2")
+    assert payload.get("verdict") == "FAIL"
+    assert payload.get("verdict_kind") == "infrastructure"
+
+
+def test_gate_none_writes_policy_pass_sidecar(sandbox):
+    result = _dispatch(_graph([_node({"kind": "none"}, node_id="D1")]), sandbox)
+    assert any(d.get("dispatch_mode") == "deterministic_gate" for d in result.get("dispatched", [])), result
+    payload, md = _eval_sidecars(sandbox, "D1")
+    assert payload.get("verdict") == "PASS"
+    assert payload.get("generation_mode") == "evaluator_gate_none"
+    assert md.strip()
+
+
+def test_llm_eval_stage_keeps_legacy_path(sandbox):
+    """llm_eval must NOT be executed deterministically — with no evaluators
+    discovered the node is skipped for capacity, exactly the legacy shape."""
+    result = _dispatch(_graph([_node({"kind": "llm_eval"}, node_id="D5")]), sandbox)
+    assert not any(d.get("dispatch_mode") == "deterministic_gate" for d in result.get("dispatched", []))
+    payload, _ = _eval_sidecars(sandbox, "D5")
+    assert not payload, "no executor sidecar for llm_eval stages"
+
+
+def test_uncontracted_graph_keeps_legacy_path(sandbox):
+    gate = {"kind": "deterministic_command", "command": "true"}
+    result = _dispatch(_graph([_node(gate)], contracted=False), sandbox)
+    assert not any(d.get("dispatch_mode") == "deterministic_gate" for d in result.get("dispatched", []))
+    payload, _ = _eval_sidecars(sandbox, "D2")
+    assert not payload
+
+
+def test_pass_sidecar_reconciles_node_to_passed(sandbox):
+    """The money path: executor sidecars -> existing reconcile -> passed."""
+    gate = {"kind": "deterministic_command",
+            "command": "python3 -c \"import sys; sys.exit(0)\""}
+    node = _node(gate)
+    graph = _graph([node])
+    _dispatch(graph, sandbox)
+    graph_path = sandbox / "sprints" / f"{SID}.task_graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    gnd._reconcile_existing_dispatches(graph, str(graph_path))
+    assert next(n for n in graph["nodes"] if n["id"] == "D2")["status"] == "passed"
+
+
+def test_instantiate_stamps_repair_budget_from_on_fail():
+    contract = wc.find_contract("research.deepdive.rsi_demo", WORKFLOWS_DIR)
+    graph = wc.instantiate(contract, {"sprint_id": "p3-budget-probe"})
+    nodes = {n["id"]: n for n in graph["nodes"]}
+    assert nodes["D6"].get("max_repair_attempts") == 0  # on_fail: fail
+    assert nodes["D2"].get("max_repair_attempts") == 1  # repair_once_then_fail
+    assert nodes["D3"].get("max_repair_attempts") == 1
+    for nid in ("D1", "D4", "D5"):
+        assert "max_repair_attempts" not in nodes[nid]

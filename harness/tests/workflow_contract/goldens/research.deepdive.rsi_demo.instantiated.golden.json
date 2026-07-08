@@ -89,6 +89,7 @@
       "goal": "D2 \u00b7 Sources",
       "id": "D2",
       "logical_operator": "DeepDiveSourceCollector",
+      "max_repair_attempts": 1,
       "node_kind": "artifact",
       "outputs": [
         {
@@ -165,6 +166,7 @@
       "goal": "D3 \u00b7 Claims",
       "id": "D3",
       "logical_operator": "DeepDiveClaimCompiler",
+      "max_repair_attempts": 1,
       "node_kind": "artifact",
       "on_human_review": "warn_and_continue",
       "outputs": [
@@ -362,6 +364,7 @@
       "goal": "D6 \u00b7 Publish",
       "id": "D6",
       "logical_operator": "DeepDiveArtifactPublisher",
+      "max_repair_attempts": 0,
       "node_kind": "publish",
       "outputs": [
         {
@@ -432,7 +435,7 @@
   "sprint_id": "sprint-golden",
   "title": "RSI DeepDive Report",
   "validator_command": "python3 scripts/validate_rsi_demo_report.py --workspace workspace",
-  "workflow_contract_hash": "sha256:c10f6444f927298046ad04c169b985db072ba2bf85d756ae55287725555572cc",
+  "workflow_contract_hash": "sha256:00c27b8b4723840189d0bfb42308379dd8014d4608d149c83c6ab4e8a367a904",
   "workflow_contract_id": "research.deepdive.rsi_demo",
   "workflow_contract_version": "1.1"
 }
