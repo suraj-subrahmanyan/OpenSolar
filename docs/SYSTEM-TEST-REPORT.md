@@ -3,8 +3,8 @@
 > **How to use this document:** everything is pre-filled **except the Status / Found Defects columns in §5**, which are left blank for the test executor to fill in after running each bench. The exact command (or manual procedure) for every test is given inline. The deterministic CI-grade gates that already ran during plan preparation are recorded separately in §5.0 and do not need re-running unless the tree changes.
 
 - **Target build:** `suraj-subrahmanyan/OpenSolar`, branch `pkg/migration` @ `cdc7e90`, `VERSION 1.0.0-rc.8`
-- **Baseline:** Solar-Harness runtime and research product line — authored by Sihao (`lisihao`, upstream `lisihao/Solar`, mirrored in this repo's `main`)
-- **Additions under test:** packaging, installer, distribution, desktop app, dashboard overhaul, runtime hardening — authored by Suraj (62 commits on `pkg/migration`)
+- **Baseline:** Solar-Harness runtime and research product line — authored by Sihao (`lisihao`, upstream `lisihao/Solar`, mirrored in this repo's `main`: 493 commits, all Sihao)
+- **Additions under test:** packaging, installer, distribution, desktop app, dashboard overhaul, runtime hardening — authored by Suraj (**401 commits ahead of `main` on `pkg/migration`**, 2026-06-10 → 2026-06-29, from the WS0 runtime purge through the rc.8 integration)
 - **Plan date:** 2026-07-08
 - **Test environment (to be filled by executor):** ________________ (developer local machine; note OS, Python, presence of `sqlite3`/`tmux`/`bun`, Claude/Codex auth state, browser profiles)
 
