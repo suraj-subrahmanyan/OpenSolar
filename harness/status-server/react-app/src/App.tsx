@@ -3666,7 +3666,11 @@ function activityLevel(count: number): number {
 function normalizeCrewPreset(value: string): string {
   const clean = value.trim().toLowerCase().replace(/_/g, "-");
   if (CREW_PRESETS.some((preset) => preset.id === clean)) return clean;
-  if (clean.includes("codex") || clean.includes("openai") || clean.includes("gpt"))
+  if (
+    clean.includes("codex") ||
+    clean.includes("openai") ||
+    clean.includes("gpt")
+  )
     return "all-codex";
   if (clean.includes("fast") || clean.includes("glm")) return "fast";
   if (clean.includes("quality") || clean.includes("opus"))
