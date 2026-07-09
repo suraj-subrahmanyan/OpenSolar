@@ -462,6 +462,16 @@ def test_execute_gate_does_not_import_conftest_from_gate_paths(tmp_path, monkeyp
     sprints = tmp_path / "sprints"
     marker = tmp_path / "conftest_imported.txt"
     (harness / "lib").mkdir(parents=True)
+    # hardening is scoped to certified-generic sprints (G4 default-on audit)
+    _write_json(
+        sprints / "sprint-g2bfix3-exec.task_graph.json",
+        {
+            "sprint_id": "sprint-g2bfix3-exec",
+            "workflow_contract_id": "pm.generic.v1",
+            "workflow_contract_version": "1.0",
+            "nodes": [{"id": "N1", "status": "pending"}],
+        },
+    )
     evil = harness / "workspace" / "evil"
     evil.mkdir(parents=True)
     (evil / "conftest.py").write_text(

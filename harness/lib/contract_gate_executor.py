@@ -73,6 +73,25 @@ def _plan_validator_enabled() -> bool:
     }
 
 
+def _sprint_is_certified_generic(sprints_dir: Path, sid: str) -> bool:
+    """True when the sprint's task graph is the pm.generic.v1 kind.
+
+    G4 default-on audit (blocker 1): pytest hardening keyed on the flag
+    alone would, once the flag defaults on, break fixed-contract suites
+    that keep fixtures in a local conftest.py (the REVIEW-FIXROUND2
+    finding-6 legacy case). The hardening target is planner-authored
+    generic gates, so key on the GRAPH KIND: fixed contracts and legacy
+    uncontracted graphs keep byte-identical pytest behavior regardless of
+    the flag."""
+    try:
+        graph = json.loads(
+            (sprints_dir / f"{sid}.task_graph.json").read_text(encoding="utf-8")
+        )
+        return str(graph.get("workflow_contract_id") or "").strip() == "pm.generic.v1"
+    except Exception:
+        return False
+
+
 def _gate_argv(command: str) -> list[str] | None:
     """Map a contract gate command string to argv; None means bash -lc."""
     try:
@@ -135,12 +154,18 @@ def execute_gate(
         started = datetime.datetime.now(datetime.timezone.utc)
         argv = _gate_argv(command)
         # Pytest hardening is scoped to the plan-validator flag (fix-round 2
-        # finding 6): validator-governed planner gates must not import
-        # conftest.py or env-named plugins, but a validator-OFF fixed-contract
-        # gate (e.g. code.cli_smoke's sprints/<sid>/workdir/tests suite, whose
-        # fixtures live in a local conftest.py) keeps legacy pytest behavior.
+        # finding 6) AND to the sprint's graph being certified-generic (G4
+        # default-on audit, blocker 1): validator-governed PLANNER gates must
+        # not import conftest.py or env-named plugins, but fixed-contract and
+        # legacy uncontracted gates (e.g. code.cli_smoke's
+        # sprints/<sid>/workdir/tests suite, whose fixtures live in a local
+        # conftest.py) keep legacy pytest behavior even when the flag
+        # defaults on.
         harden_pytest = (
-            argv is not None and argv[1:3] == ["-m", "pytest"] and _plan_validator_enabled()
+            argv is not None
+            and argv[1:3] == ["-m", "pytest"]
+            and _plan_validator_enabled()
+            and _sprint_is_certified_generic(sprints, sid)
         )
         if harden_pytest:
             # G2b review finding 3: pytest auto-imports conftest.py from every

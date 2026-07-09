@@ -276,6 +276,16 @@ def _run_env_plugin_gate(tmp_path, monkeypatch, env_var: str, env_value: str) ->
     import contract_gate_executor
 
     harness, sprints, marker = _gate_harness(tmp_path)
+    # hardening is scoped to certified-generic sprints (G4 default-on audit)
+    _write_json(
+        sprints / "sprint-r2fix3.task_graph.json",
+        {
+            "sprint_id": "sprint-r2fix3",
+            "workflow_contract_id": "pm.generic.v1",
+            "workflow_contract_version": "1.0",
+            "nodes": [{"id": "N1", "status": "pending"}],
+        },
+    )
     monkeypatch.setenv("PYTHONPATH", str(tmp_path / "plugins"))
     monkeypatch.setenv(env_var, env_value)
     result = contract_gate_executor.execute_gate(
@@ -363,14 +373,72 @@ def test_gate_env_passthrough_preserved_when_validator_off(tmp_path, monkeypatch
     assert marker.exists(), "flag-off gate env must pass through unchanged"
 
 
-def test_gate_still_pins_noconftest_when_validator_on(tmp_path, monkeypatch):
-    """Scoping must not weaken the validator-on hardening: a conftest.py
-    inside the (legal) artifact-root gate path still must not run import-time
-    code in the gate process."""
+def _write_gate_graph(sprints: Path, sid: str, contract_id: str | None) -> None:
+    graph: dict = {"sprint_id": sid, "nodes": [{"id": "N1", "status": "pending"}]}
+    if contract_id:
+        graph["workflow_contract_id"] = contract_id
+        graph["workflow_contract_version"] = "1.0"
+    _write_json(sprints / f"{sid}.task_graph.json", graph)
+
+
+def test_gate_keeps_conftest_for_fixed_contract_graph_even_with_flag_on(tmp_path, monkeypatch):
+    """G4 pre-work (default-on audit blocker 1): once the validator flag
+    defaults on, flag-scoped hardening would break fixed-contract suites that
+    keep fixtures in conftest.py. Hardening must key on the SPRINT'S graph
+    being pm.generic.v1, not on the flag alone."""
     import contract_gate_executor
 
     monkeypatch.setenv("SOLAR_PLAN_VALIDATOR", "1")
     harness, sprints, sid = _fixed_contract_suite(tmp_path)
+    _write_gate_graph(sprints, sid, "code.cli_smoke")
+
+    result = contract_gate_executor.execute_gate(
+        sprints,
+        sid,
+        {"id": "N1"},
+        {
+            "kind": "deterministic_command",
+            "command": f"python3 -m pytest sprints/{sid}/workdir/tests -q",
+        },
+        harness_dir=harness,
+    )
+
+    assert result.get("ok") is True, result
+    assert result.get("exit_code") == 0, result
+
+
+def test_gate_keeps_legacy_behavior_for_uncontracted_graph_with_flag_on(tmp_path, monkeypatch):
+    """A legacy graph with no contract id is not a certified-generic gate
+    target; its pytest behavior stays byte-identical under default-on."""
+    import contract_gate_executor
+
+    monkeypatch.setenv("SOLAR_PLAN_VALIDATOR", "1")
+    harness, sprints, sid = _fixed_contract_suite(tmp_path)
+    _write_gate_graph(sprints, sid, None)
+
+    result = contract_gate_executor.execute_gate(
+        sprints,
+        sid,
+        {"id": "N1"},
+        {
+            "kind": "deterministic_command",
+            "command": f"python3 -m pytest sprints/{sid}/workdir/tests -q",
+        },
+        harness_dir=harness,
+    )
+
+    assert result.get("ok") is True, result
+
+
+def test_gate_still_pins_noconftest_when_validator_on(tmp_path, monkeypatch):
+    """Scoping must not weaken the validator-on hardening: a conftest.py
+    inside the (legal) artifact-root gate path still must not run import-time
+    code in the gate process — for a certified-generic sprint."""
+    import contract_gate_executor
+
+    monkeypatch.setenv("SOLAR_PLAN_VALIDATOR", "1")
+    harness, sprints, sid = _fixed_contract_suite(tmp_path)
+    _write_gate_graph(sprints, sid, "pm.generic.v1")
     marker = tmp_path / "conftest-imported.txt"
     conftest = sprints / sid / "workdir" / "tests" / "conftest.py"
     conftest.write_text(
