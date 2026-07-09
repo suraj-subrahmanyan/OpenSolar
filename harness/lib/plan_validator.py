@@ -736,6 +736,84 @@ def _max_planner_bounces(contract: Optional[Dict[str, Any]]) -> int:
         return 2
 
 
+def record_certificate_mismatch_refusal(
+    sprints_dir: os.PathLike,
+    task_graph: Dict[str, Any],
+    errors: Optional[List[Any]],
+) -> Dict[str, Any]:
+    """Terminalize a sprint whose PASS-certified graph was refused at dispatch.
+
+    Scope: ONLY PLAN_CERTIFICATE_HASH_MISMATCH. An uncertified refusal
+    (PLAN_CERTIFICATE_MISSING) is the normal pre-planner / bounce state and
+    must never terminalize (the E5 starvation class). A stamped graph whose
+    governed content changed is unrecoverable at dispatch time — re-stamping
+    here would launder the edit — so the sprint fails closed with a truthful
+    terminal state. G3 live rung (p5-g3-live-rung-20260709T161420Z): without
+    this, the guard re-refused every coordinator tick and the sprint sat
+    drafting/spec for ~40 minutes until the run budget expired non-terminal.
+
+    Best-effort and idempotent: callers invoke it from dispatch guards on
+    every refusal; an already-failed sprint is left alone."""
+    out: Dict[str, Any] = {"attempted": False}
+    if not _env_gate_enabled():
+        return out
+    codes = {
+        str(error.get("code") or "")
+        for error in (errors or [])
+        if isinstance(error, dict)
+    }
+    if ERROR_PLAN_CERTIFICATE_HASH_MISMATCH not in codes:
+        return out
+    sid = str((task_graph or {}).get("sprint_id") or "")
+    if not sid:
+        return out
+    sprints = Path(sprints_dir)
+    status_path = sprints / f"{sid}.status.json"
+    if not status_path.exists():
+        out["error"] = f"status_missing:{status_path}"
+        return out
+    current = _read_status_value(status_path)
+    if current == "failed":
+        return out
+    try:
+        from runtime_status import transition_status  # noqa: WPS433
+
+        updated, message = transition_status(
+            status_path,
+            "failed",
+            "plan_certificate_invalid",
+            "plan_validator",
+            extra={
+                "reason": "PLAN_CERTIFICATE_HASH_MISMATCH",
+                "status_fields": {
+                    "phase": "plan_certificate_invalid",
+                    "handoff_to": "",
+                    "target_role": "",
+                    "plan_compile_state": "PLAN_CERTIFICATE_INVALID",
+                },
+            },
+        )
+        out.update({"attempted": True, "ok": True, "status": updated, "message": message})
+    except Exception as exc:
+        out.update({"attempted": True, "ok": False, "error": f"{type(exc).__name__}: {exc}"})
+    try:
+        import gate_ledger  # noqa: WPS433
+
+        gate_ledger.record_status_transition(
+            sprints,
+            sid,
+            "__sprint__",
+            from_status=current,
+            to_status="plan_certificate_invalid",
+            author_type="policy",
+            writer="plan_validator",
+            note="PLAN_CERTIFICATE_HASH_MISMATCH",
+        )
+    except Exception:
+        pass
+    return out
+
+
 def _transition_plan_compile_failed(sprints_dir: Path, sid: str, from_status: str) -> Dict[str, Any]:
     status_path = sprints_dir / f"{sid}.status.json"
     out: Dict[str, Any] = {"attempted": False}

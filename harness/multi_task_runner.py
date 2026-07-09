@@ -1442,6 +1442,16 @@ def _plan_validator_launch_refusal(graph: dict[str, Any]) -> dict[str, Any] | No
         return None
     if plan_guard.get("ok"):
         return None
+    try:
+        # G3 fix: a PASS-certified graph refused for hash mismatch is
+        # unrecoverable at dispatch time — terminalize the sprint truthfully
+        # instead of re-refusing every scheduler tick (helper is scoped to
+        # PLAN_CERTIFICATE_HASH_MISMATCH; uncertified refusals untouched).
+        plan_validator.record_certificate_mismatch_refusal(
+            SPRINTS_DIR, graph, plan_guard.get("errors")
+        )
+    except Exception:
+        pass
     errors = []
     for error in plan_guard.get("errors") or []:
         if isinstance(error, dict):
