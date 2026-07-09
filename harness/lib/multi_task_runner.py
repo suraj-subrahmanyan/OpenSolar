@@ -3454,8 +3454,50 @@ def _record_node_attribution(sid: str, node_id: str, payload: dict[str, Any], ta
         pass
 
 
+def _plan_validator_env_on() -> bool:
+    return str(os.environ.get("SOLAR_PLAN_VALIDATOR") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _plan_validator_launch_refusal(graph: dict[str, Any]) -> dict[str, Any] | None:
+    """Validator dispatch guard shared by schedule_once and launch_node.
+
+    launch_node() is a public dispatch surface: a direct caller skips the
+    schedule_once guard, so the check must run again BEFORE any dispatch/
+    status/runstate write (G2b fix-round 2 finding 1). Returns a refusal
+    record ({reason, errors}) or None when dispatch may proceed."""
+    try:
+        import plan_validator  # type: ignore
+
+        plan_guard = plan_validator.check_planner_graph_dispatchable(graph)
+    except Exception as guard_exc:
+        if _plan_validator_env_on():
+            return {
+                "reason": "plan_validator_dispatch_refused",
+                "errors": [f"PLAN_VALIDATOR_UNCHECKABLE:{type(guard_exc).__name__}"],
+            }
+        return None
+    if plan_guard.get("ok"):
+        return None
+    errors = []
+    for error in plan_guard.get("errors") or []:
+        if isinstance(error, dict):
+            errors.append(f"{error.get('code')}:{error.get('node_id', '?')}")
+        else:
+            errors.append(str(error))
+    return {"reason": "plan_validator_dispatch_refused", "errors": errors}
+
+
 def launch_node(graph_path: Path, graph: dict[str, Any], node: dict[str, Any], args: argparse.Namespace,
                 dry_run: bool = False) -> dict[str, Any]:
+    refusal = _plan_validator_launch_refusal(graph)
+    if refusal is not None:
+        return {
+            "status": "plan_validator_dispatch_refused",
+            "graph": str(graph_path),
+            "sprint_id": sprint_id_for(graph, graph_path),
+            "node_id": str(node.get("id") or ""),
+            **refusal,
+        }
     sid = sprint_id_for(graph, graph_path)
     node_id = str(node.get("id") or "")
     profile = select_profile(node, getattr(args, "profile", "") or "", getattr(args, "model", "") or "", getattr(args, "backend", "") or "")
@@ -3749,31 +3791,9 @@ def schedule_once(args: argparse.Namespace) -> dict[str, Any]:
         try:
             graph = load_graph(graph_path)
             summaries.append(status_summary_for_graph(graph_path))
-            try:
-                import plan_validator  # type: ignore
-
-                plan_guard = plan_validator.check_planner_graph_dispatchable(graph)
-            except Exception as guard_exc:
-                if str(os.environ.get("SOLAR_PLAN_VALIDATOR") or "").strip().lower() in {"1", "true", "yes", "on"}:
-                    skipped.append({
-                        "graph": str(graph_path),
-                        "reason": "plan_validator_dispatch_refused",
-                        "errors": [f"PLAN_VALIDATOR_UNCHECKABLE:{type(guard_exc).__name__}"],
-                    })
-                    continue
-                plan_guard = {"ok": True}
-            if not plan_guard.get("ok"):
-                errors = []
-                for error in plan_guard.get("errors") or []:
-                    if isinstance(error, dict):
-                        errors.append(f"{error.get('code')}:{error.get('node_id', '?')}")
-                    else:
-                        errors.append(str(error))
-                skipped.append({
-                    "graph": str(graph_path),
-                    "reason": "plan_validator_dispatch_refused",
-                    "errors": errors,
-                })
+            refusal = _plan_validator_launch_refusal(graph)
+            if refusal is not None:
+                skipped.append({"graph": str(graph_path), **refusal})
                 continue
             candidates = ready_nodes(graph)
         except Exception as exc:
