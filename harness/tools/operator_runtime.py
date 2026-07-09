@@ -41,3 +41,9 @@ globals().update({name: getattr(_LIB_MODULE, name) for name in __all__})
 
 if __name__ == "operator_runtime":
     _sys.modules[__name__] = _LIB_MODULE
+
+if __name__ == "__main__":
+    # The pre-shim tools copy was directly runnable (`python3
+    # tools/operator_runtime.py ...`); keep that entry for out-of-tree
+    # callers by forwarding to the lib CLI.
+    _sys.exit(_LIB_MODULE.main())
