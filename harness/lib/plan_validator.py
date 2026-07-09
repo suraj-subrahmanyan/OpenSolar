@@ -845,6 +845,107 @@ def check_planner_graph_dispatchable(task_graph: Dict[str, Any]) -> Dict[str, An
     return verdict
 
 
+_POLICY_BLOCK_MAX_ERRORS = 12
+
+
+def planner_compile_policy_block(
+    sprints_dir: Optional[os.PathLike] = None,
+    sid: str = "",
+    *,
+    config_dir: Optional[os.PathLike] = None,
+    workflows_dir: Optional[os.PathLike] = None,
+) -> str:
+    """Prompt block for planner dispatch: what a compilable graph must contain.
+
+    G2 battery measurement (p5-g2-battery-20260708T205146Z): compile_rate 0.0,
+    CAPSULE_UNBOUND x20, PLAN_REPAIR_BUDGET_MISSING x3 — the live planner was
+    never told the compile rules, so it emitted bare nodes. This block is the
+    single source both planner objective builders append.
+
+    Env-gated like every generic-path seam: returns "" when
+    SOLAR_PLAN_VALIDATOR is off, so legacy prompts stay byte-identical. The
+    capsule list, gate allowlist, and size bound are rendered from the live
+    registry/contract, never hardcoded. When sprints_dir+sid are given and a
+    bounce artifact exists, the previous compile errors are appended so a
+    bounced planner repairs the named defects instead of re-guessing."""
+    if not _env_gate_enabled():
+        return ""
+
+    contract = _generic_contract(workflows_dir)
+    artifact_roots = dict((contract or {}).get("artifact_roots") or FALLBACK_ARTIFACT_ROOTS)
+    max_nodes = ((contract or {}).get("plan_limits") or {}).get("max_nodes") or DEFAULT_MAX_NODES
+    canonical_root = str(artifact_roots.get("canonical") or "workspace/")
+    aliases = [str(a) for a in (artifact_roots.get("aliases") or [])]
+    allowlist = [" ".join(prefix) for prefix in GATE_COMMAND_ALLOWLIST]
+
+    lines: List[str] = [
+        "## Plan compile policy (pm.generic.v1)",
+        "",
+        "Your task_graph.json is compile-checked BEFORE any node is dispatched.",
+        "A graph that violates any rule below is bounced back to you with error",
+        "codes, and the sprint terminalizes after the bounce budget. Every node",
+        "MUST satisfy:",
+        "",
+        "1. capability_capsule_id — bind one registered capsule from the list at",
+        "   the end; an unbound node fails CAPSULE_UNBOUND.",
+        "2. task_type / dispatch_task_type — must be in the bound capsule's",
+        "   admitted task_type_in list (TASK_TYPE_NOT_ADMITTED otherwise).",
+        "3. evaluator_gate — {\"kind\": \"llm_eval\", \"on_fail\": \"fail\" |",
+        "   \"repair_once_then_fail\"}. \"none\" is not plannable",
+        "   (PLAN_GATE_KIND_ILLEGAL). \"deterministic_command\" only with a",
+        f"   command from the allowlist: {allowlist}; import/config-control",
+        f"   options ({', '.join(GATE_COMMAND_OPTION_DENYLIST)}) are denied",
+        "   (PLAN_GATE_OPTION_DENIED).",
+        f"4. max_repair_attempts — integer 0..{MAX_REPAIR_ATTEMPTS_CEILING}, or",
+        "   derivable from evaluator_gate.on_fail; a node with neither fails",
+        "   PLAN_REPAIR_BUDGET_MISSING.",
+        f"5. write_scope — every entry under a declared artifact root (canonical:",
+        f"   {canonical_root!r}, aliases: {aliases}); a bare relative path fails",
+        "   ARTIFACT_ROOT_UNRESOLVED.",
+        "6. proof_obligations — legal for the node kind the capsule defines",
+        "   (patch_diff proofs only on patch-producing capsules;",
+        "   OBLIGATION_UNSATISFIABLE otherwise).",
+        "7. graph shape — non-empty, acyclic, depends_on only references node",
+        f"   ids in this graph, at most {int(max_nodes)} nodes.",
+        "",
+        "Registered capsules (capability_capsule_id -> admitted task types):",
+    ]
+    try:
+        directory = Path(config_dir) if config_dir else wc.default_config_dir()
+        registry = wc.load_capsule_registry(directory)
+    except Exception:
+        registry = {}
+    if registry:
+        for capsule_id in sorted(registry):
+            admitted = sorted((registry.get(capsule_id) or {}).get("task_type_in") or [])
+            lines.append(f"- {capsule_id}: {admitted}")
+    else:
+        lines.append("- (capsule registry unavailable at prompt-render time; use")
+        lines.append("  harness/config/capability-capsules/ ids verbatim)")
+
+    if sprints_dir is not None and sid:
+        previous = _read_errors_artifact(Path(sprints_dir), sid)
+        errors = previous.get("errors") if isinstance(previous.get("errors"), list) else []
+        if errors:
+            bounce_count = int(previous.get("bounce_count") or 0)
+            lines += [
+                "",
+                f"## Previous compile errors (bounce {bounce_count}; fix these exactly)",
+                "",
+            ]
+            for error in errors[:_POLICY_BLOCK_MAX_ERRORS]:
+                if not isinstance(error, dict):
+                    continue
+                lines.append(
+                    f"- {error.get('code')} [{error.get('node_id', '?')}]: "
+                    f"{error.get('message', '')}"
+                )
+            if len(errors) > _POLICY_BLOCK_MAX_ERRORS:
+                lines.append(f"- (+{len(errors) - _POLICY_BLOCK_MAX_ERRORS} more in {sid}{ERRORS_ARTIFACT_SUFFIX})")
+
+    return "\n".join(lines)
+
+
 def validate_plan_file(
     graph_path: os.PathLike,
     config_dir: Optional[os.PathLike] = None,
