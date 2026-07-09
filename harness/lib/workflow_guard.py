@@ -288,7 +288,20 @@ def route(sid: str) -> dict[str, Any]:
     if phase in {"prd_ready", "contract_ready"} and not requirements_ready:
         violations.append("phase_requires_pm_prd")
     if _nonempty(graph) and not graph_ok:
-        violations.append(f"invalid_task_graph:{graph_reason}")
+        # A missing/failed plan certificate on a PRE-PLANNER sprint (no
+        # design/plan yet) is the expected state, not a violation: the intake
+        # parent graph is generic and uncertified until the planner runs, and
+        # the planner route is exactly the repair path. Emitting a violation
+        # here made autopilot's ok-and-no-violations gate refuse to advance
+        # handoff pm->planner, starving the sprint at drafting/prd_ready
+        # (G2b live finding, case E5). Builder-readiness still demands the
+        # certificate: with design+plan present the violation is emitted, and
+        # planner_ready stays false either way because graph_ok is false.
+        certificate_pending_planner = graph_reason.startswith("plan_certificate_required") and not (
+            artifacts["design"] and artifacts["plan"]
+        )
+        if not certificate_pending_planner:
+            violations.append(f"invalid_task_graph:{graph_reason}")
 
     if st == "failed":
         # Top-level "failed" is terminal (review G1+G1b finding 5): a failed +

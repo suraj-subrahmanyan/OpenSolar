@@ -483,6 +483,42 @@ def test_workflow_guard_routes_failed_plan_compile_sprint_as_terminal(tmp_path, 
     assert route["stage"] != "done"
 
 
+def test_workflow_guard_pre_planner_uncertified_graph_routes_planner_cleanly(tmp_path, monkeypatch):
+    """G2b live finding (E5, p5-g2b-battery-20260709T030014Z): a plain intake
+    sprint at drafting/prd_ready carries the requirement-compiler's parent
+    graph, which is generic and (correctly) uncertified — the planner hasn't
+    run yet. route() emitted invalid_task_graph:plan_certificate_required,
+    autopilot's ok-and-no-violations gate then refused to advance handoff
+    pm->planner, and the sprint starved. Pre-planner (no design/plan), the
+    missing certificate is the EXPECTED state, not a violation; the planner
+    route is exactly the repair path. Builder-readiness keeps demanding the
+    certificate (see test_workflow_guard_refuses_builder_ready_for_...)."""
+    sid = "sprint-fix6-pre-planner."  # trailing dot: E5's sid shape
+    sprints = tmp_path / "sprints"
+    sprints.mkdir()
+    _write_json(
+        sprints / f"{sid}.status.json",
+        {
+            "id": sid,
+            "status": "drafting",
+            "phase": "prd_ready",
+            "handoff_to": "pm",
+            "target_role": "pm",
+            "history": [],
+        },
+    )
+    (sprints / f"{sid}.prd.md").write_text("# PRD\n", encoding="utf-8")
+    _write_json(sprints / f"{sid}.task_graph.json", _graph(sid))
+    monkeypatch.setattr(wg, "SPRINTS_DIR", sprints)
+    monkeypatch.setenv("SOLAR_PLAN_VALIDATOR", "1")
+
+    route = wg.route(sid)
+
+    assert route["route_role"] == "planner"
+    assert route["ok"] is True
+    assert not any("plan_certificate" in v for v in route["violations"])
+
+
 def test_workflow_guard_failed_review_still_routes_builder_for_repair(tmp_path, monkeypatch):
     """Only top-level "failed" is terminal; failed_review keeps its repair route."""
     sid = "sprint-fix5-repair"
