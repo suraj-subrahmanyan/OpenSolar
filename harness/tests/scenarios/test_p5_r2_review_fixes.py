@@ -395,3 +395,53 @@ def test_gate_still_pins_noconftest_when_validator_on(tmp_path, monkeypatch):
 
     assert result.get("exit_code") == 0, result
     assert not marker.exists(), "conftest.py was imported by a validator-on gate process"
+
+
+# --- Finding 2 (owner decision: option B) — operator selection is runtime-owned
+
+
+_OPERATOR_SELECTION_VALUES = {
+    "preferred_model": "model-a",
+    "preferred_profile": "builder-a",
+    "preferred_operator": "operator-a",
+    "operator_selector": {"required_capabilities": ["code_impl"]},
+}
+
+
+@pytest.mark.parametrize("field", sorted(_OPERATOR_SELECTION_VALUES))
+def test_planner_may_not_author_operator_selection_fields(field):
+    """Owner decision on REVIEW-FIXROUND2 finding 2: the four operator-
+    selection fields stay OUT of the certificate hash because quota recovery
+    legitimately rewrites preferred_profile after PASS — so a planner must
+    not be able to pre-pin them either. Runtime-owned by construction."""
+    node = _valid_node(**{field: _OPERATOR_SELECTION_VALUES[field]})
+    graph = _graph("sprint-r2fix2b", node=node)
+
+    codes = [e["code"] for e in pv.validate_plan(graph, None, None)]
+
+    assert pv.ERROR_PLAN_OPERATOR_SELECTION_FORBIDDEN in codes, codes
+
+
+def test_clean_graph_carries_no_operator_selection_error():
+    graph = _graph("sprint-r2fix2b-ok")
+    codes = [e["code"] for e in pv.validate_plan(graph, None, None)]
+    assert pv.ERROR_PLAN_OPERATOR_SELECTION_FORBIDDEN not in codes, codes
+
+
+def test_operator_selection_fields_stay_out_of_the_certificate_hash():
+    """The other half of option B: the fields remain runtime-flexible, so a
+    runtime write (quota fallback) must NOT invalidate a certificate."""
+    graph = _graph("sprint-r2fix2b-hash")
+    base = pv.plan_certificate_hash(graph)
+    mutated = json.loads(json.dumps(graph))
+    mutated["nodes"][0]["preferred_profile"] = "fallback-profile"
+
+    assert pv.plan_certificate_hash(mutated) == base
+
+
+def test_policy_block_teaches_the_operator_selection_rule(monkeypatch):
+    """G2 lesson: never add a compile error the planner is not taught."""
+    monkeypatch.setenv("SOLAR_PLAN_VALIDATOR", "1")
+    block = pv.planner_compile_policy_block()
+    assert pv.ERROR_PLAN_OPERATOR_SELECTION_FORBIDDEN in block
+    assert "preferred_profile" in block

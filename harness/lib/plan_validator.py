@@ -142,7 +142,22 @@ ON_FAIL_BUDGETS = {"fail": 0, "repair_once_then_fail": 1}
 # does not carry plan_limits.max_nodes.
 DEFAULT_MAX_NODES = 12
 
+# Owner decision 2026-07-09 (REVIEW-FIXROUND2 finding 2, option B): operator
+# selection is deliberately RUNTIME-owned — quota/auth-failure recovery
+# rewrites preferred_profile after PASS (multi_task_runner
+# recover_quota_failed_nodes), so these fields stay OUT of the certificate
+# hash. The flip side: a planner may not author them either, so the channel
+# is runtime-only by construction. Operator constraints a planner MAY
+# declare live in allowed_operators (role/providers), which IS governed.
+OPERATOR_SELECTION_RUNTIME_FIELDS = (
+    "preferred_model",
+    "preferred_profile",
+    "preferred_operator",
+    "operator_selector",
+)
+
 ERROR_PLAN_GATE_KIND_ILLEGAL = "PLAN_GATE_KIND_ILLEGAL"
+ERROR_PLAN_OPERATOR_SELECTION_FORBIDDEN = "PLAN_OPERATOR_SELECTION_FORBIDDEN"
 ERROR_PLAN_GATE_COMMAND_NOT_ALLOWLISTED = "PLAN_GATE_COMMAND_NOT_ALLOWLISTED"
 ERROR_PLAN_GATE_OPTION_DENIED = "PLAN_GATE_OPTION_DENIED"
 ERROR_PLAN_GATE_PATH_DENIED = "PLAN_GATE_PATH_DENIED"
@@ -166,6 +181,10 @@ PLAN_CERTIFICATE_SCHEMA = "solar.plan_certificate.v1"
 # (review G1+G1b finding 2). read_scope / required_skills /
 # required_capabilities are likewise rendered into worker dispatch text and
 # drive operator selection, so they are governed too (G2b review finding 2).
+# OPERATOR_SELECTION_RUNTIME_FIELDS are deliberately NOT governed (owner
+# decision, REVIEW-FIXROUND2 finding 2 option B): quota recovery must be able
+# to rewrite preferred_profile after PASS without invalidating the
+# certificate; validate_plan rejects planner-authored values instead.
 CERTIFICATE_NODE_FIELDS = (
     "id",
     "depends_on",
@@ -238,6 +257,20 @@ def validate_plan(
             continue
         node_id = str(node.get("id") or "?")
         task_type = _node_task_type(node)
+
+        # Owner decision (REVIEW-FIXROUND2 finding 2, option B): operator
+        # selection is runtime-owned, so a planner may not pre-pin it. The
+        # governed channel for operator constraints is allowed_operators.
+        forbidden = [field for field in OPERATOR_SELECTION_RUNTIME_FIELDS if field in node]
+        if forbidden:
+            errors.append(wc.compile_error(
+                ERROR_PLAN_OPERATOR_SELECTION_FORBIDDEN, node_id,
+                f"node {node_id} sets runtime-owned operator-selection fields "
+                f"{forbidden}; these are not plannable (quota recovery rewrites "
+                f"them after certification). Remediation: remove them and "
+                f"constrain operators via allowed_operators (role/providers).",
+                declared=forbidden,
+            ))
 
         # R2(a): task_type admitted by the node's resolved capsule — the four
         # historical shapes (analysis / tests / implementationworker /
@@ -988,7 +1021,12 @@ def planner_compile_policy_block(
         "6. proof_obligations — legal for the node kind the capsule defines",
         "   (patch_diff proofs only on patch-producing capsules;",
         "   OBLIGATION_UNSATISFIABLE otherwise).",
-        "7. graph shape — non-empty, acyclic, depends_on only references node",
+        "7. operator selection — do NOT set preferred_model, preferred_profile,",
+        "   preferred_operator, or operator_selector; those fields are",
+        "   runtime-owned (quota fallback rewrites them) and fail",
+        "   PLAN_OPERATOR_SELECTION_FORBIDDEN. Constrain operators only via",
+        "   allowed_operators (role/providers).",
+        "8. graph shape — non-empty, acyclic, depends_on only references node",
         f"   ids in this graph, at most {int(max_nodes)} nodes.",
         "",
         "Registered capsules (capability_capsule_id -> admitted task types):",
