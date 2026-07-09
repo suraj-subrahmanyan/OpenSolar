@@ -185,6 +185,50 @@ def _workflow_contract_guard(graph: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _plan_validator_enabled() -> bool:
+    return str(os.environ.get("SOLAR_PLAN_VALIDATOR", "") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _plan_validator_dispatch_guard(graph: dict[str, Any]) -> dict[str, Any] | None:
+    """P5 G1b fix (review finding 1): certificate check at the launch path
+    itself, gated on SOLAR_PLAN_VALIDATOR — NOT on SOLAR_GATE_LEDGER, and NOT
+    skipped for graphs with no workflow_contract_id. _workflow_contract_guard
+    early-returns for uncontracted graphs, so before this guard an uncertified
+    generic graph enqueued even with the validator flag on.
+
+    check_planner_graph_dispatchable is env-gated internally and skips epic /
+    fixed-contract graphs, so with the flag off (or for non-generic graphs)
+    this is a no-op. Returns None when dispatch may proceed, a refusal dict
+    otherwise."""
+    if not _plan_validator_enabled():
+        return None
+    try:
+        import plan_validator as _plan_validator
+    except Exception:
+        return {
+            "ok": False,
+            "reason": "plan_validator_dispatch_refused",
+            "errors": ["PLAN_VALIDATOR_MODULE_MISSING"],
+        }
+    try:
+        verdict = _plan_validator.check_planner_graph_dispatchable(graph or {})
+    except Exception as exc:
+        return {
+            "ok": False,
+            "reason": "plan_validator_dispatch_refused",
+            "errors": [f"PLAN_VALIDATOR_UNCHECKABLE:{type(exc).__name__}"],
+        }
+    if verdict.get("ok"):
+        return None
+    return {
+        "ok": False,
+        "reason": "plan_validator_dispatch_refused",
+        "errors": verdict.get("errors") or [],
+    }
+
+
 def _manifest_presence(sid: str, node_id: str) -> dict[str, Any]:
     """The node's manifest presence view (design §1.5), or {} off the contracted path.
 
@@ -8100,6 +8144,15 @@ def dispatch_node_evals(graph_path: str, dry_run: bool = False, ttl: int = 900,
                         force: bool = False, max_items: int = 0) -> dict[str, Any]:
     graph = load_graph(graph_path)
     sid = str(graph.get("sprint_id") or Path(graph_path).stem.replace(".task_graph", ""))
+    validator_refusal = _plan_validator_dispatch_guard(graph)
+    if validator_refusal is not None:
+        _append_event(sid, {
+            "event": "plan_validator_dispatch_refused",
+            "by": "graph-dispatch",
+            "severity": "error",
+            "data": {"graph": str(graph_path), **validator_refusal},
+        })
+        return {**validator_refusal, "sprint_id": sid, "dispatched": [], "skipped": []}
     dispatched: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     used_evaluator_panes: set[str] = set()
@@ -8475,6 +8528,15 @@ def dispatch_ready(graph_path: str, dry_run: bool = False, ttl: int = 900,
             "data": {"graph": str(graph_path), **guard},
         })
         return {**guard, "graph": graph_path, "enqueue": {}, "drain": {}}
+    validator_refusal = _plan_validator_dispatch_guard(graph)
+    if validator_refusal is not None:
+        _append_event(str(sid), {
+            "event": "plan_validator_dispatch_refused",
+            "by": "graph-dispatch",
+            "severity": "error",
+            "data": {"graph": str(graph_path), **validator_refusal},
+        })
+        return {**validator_refusal, "graph": graph_path, "enqueue": {}, "drain": {}}
     effective_max_parallel = int(max_parallel) if max_parallel is not None else _effective_graph_max_parallel(8)
     reconciled: list[dict[str, Any]] = []
     if not dry_run:

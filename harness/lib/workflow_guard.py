@@ -290,7 +290,15 @@ def route(sid: str) -> dict[str, Any]:
     if _nonempty(graph) and not graph_ok:
         violations.append(f"invalid_task_graph:{graph_reason}")
 
-    if st in {"passed", "done", "eval_pass", "finalized", "superseded"} or graph_parent_ready:
+    if st == "failed":
+        # Top-level "failed" is terminal (review G1+G1b finding 5): a failed +
+        # phase=plan_compile_failed sprint that still has planner artifacts
+        # must not route as builder_main/planning_complete to chain-watcher/
+        # autopilot. Stage is deliberately NOT "done" — autopilot normalizes
+        # role=none + stage=done to status "passed". Repair statuses
+        # (failed_review) are untouched: only the top-level terminal is caught.
+        role, stage, reason = "none", "failed", "terminal_status"
+    elif st in {"passed", "done", "eval_pass", "finalized", "superseded"} or graph_parent_ready:
         role, stage, reason = "none", "done", "terminal_status"
     elif st in {"reviewing", "ready_for_review"} or (artifacts["handoff"] and handoff_to == "evaluator"):
         role, stage, reason = "evaluator", "build_complete", "handoff_ready_for_eval"

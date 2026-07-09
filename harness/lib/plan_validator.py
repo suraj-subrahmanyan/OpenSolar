@@ -54,6 +54,37 @@ GATE_COMMAND_ALLOWLIST = (
     ("python3", "scripts/validate_rsi_demo_report.py"),
 )
 
+# A matched allowlist prefix admits selection/reporting args only. Options
+# that change WHAT the gate process imports or which config it loads are
+# denied (review G1+G1b finding 3: `python3 -m pytest --co -p <module>`
+# imports a caller-named module inside the gate process). Long options are
+# matched exactly or as `--opt=value`; two-char short options also match with
+# an attached value (`-psample`).
+GATE_COMMAND_OPTION_DENYLIST = (
+    "-p",              # pytest: load a plugin module by name
+    "-c",              # pytest: alternate config file (can inject addopts)
+    "-o",              # pytest: override ini values (can inject addopts)
+    "--override-ini",
+    "--confcutdir",
+    "--rootdir",
+    "--import-mode",
+    "--pyargs",        # interpret args as importable module names
+)
+
+
+def _gate_command_denied_option(tokens: List[str]) -> Optional[str]:
+    """First denied option token in an allowlisted command suffix, else None."""
+    for token in tokens:
+        if not token.startswith("-"):
+            continue
+        for denied in GATE_COMMAND_OPTION_DENYLIST:
+            if token == denied or token.startswith(denied + "="):
+                return token
+            # attached-value short option: "-psample" (but not "--co" via "-c")
+            if len(denied) == 2 and not token.startswith("--") and token.startswith(denied):
+                return token
+    return None
+
 # R2(f): the repair-budget ceiling. instantiate stamps 0/1 from on_fail; 2 is
 # headroom for future policies. Anything beyond is an unbounded repair loop.
 MAX_REPAIR_ATTEMPTS_CEILING = 2
@@ -67,6 +98,7 @@ DEFAULT_MAX_NODES = 12
 
 ERROR_PLAN_GATE_KIND_ILLEGAL = "PLAN_GATE_KIND_ILLEGAL"
 ERROR_PLAN_GATE_COMMAND_NOT_ALLOWLISTED = "PLAN_GATE_COMMAND_NOT_ALLOWLISTED"
+ERROR_PLAN_GATE_OPTION_DENIED = "PLAN_GATE_OPTION_DENIED"
 ERROR_PLAN_REPAIR_BUDGET_MISSING = "PLAN_REPAIR_BUDGET_MISSING"
 ERROR_PLAN_GRAPH_EMPTY = "PLAN_GRAPH_EMPTY"
 ERROR_PLAN_GRAPH_TOO_LARGE = "PLAN_GRAPH_TOO_LARGE"
@@ -81,6 +113,10 @@ PLAN_CERTIFICATE_SCHEMA = "solar.plan_certificate.v1"
 # The GOVERNED node subset the certificate hashes. Runtime fields (status,
 # pane, dispatch_id, repair_attempts, ...) mutate on every tick and MUST stay
 # outside the hash or dispatch would invalidate its own certificate.
+# goal/description/acceptance are worker-visible execution text (the
+# dispatcher renders node.goal into the worker instruction), so they are
+# governed: editing them after a PASS must invalidate the certificate
+# (review G1+G1b finding 2).
 CERTIFICATE_NODE_FIELDS = (
     "id",
     "depends_on",
@@ -94,6 +130,9 @@ CERTIFICATE_NODE_FIELDS = (
     "proof_obligations",
     "max_repair_attempts",
     "on_human_review",
+    "goal",
+    "description",
+    "acceptance",
 )
 
 
@@ -242,11 +281,15 @@ def validate_plan(
             ))
         elif gate_kind == "deterministic_command":
             command_tokens = str(gate.get("command") or "").split()
-            allowed = any(
-                command_tokens[: len(prefix)] == list(prefix)
-                for prefix in GATE_COMMAND_ALLOWLIST
+            matched_prefix = next(
+                (
+                    prefix
+                    for prefix in GATE_COMMAND_ALLOWLIST
+                    if command_tokens[: len(prefix)] == list(prefix)
+                ),
+                None,
             )
-            if not allowed:
+            if matched_prefix is None:
                 errors.append(wc.compile_error(
                     ERROR_PLAN_GATE_COMMAND_NOT_ALLOWLISTED, node_id,
                     f"node {node_id}: deterministic_command {gate.get('command')!r} does not "
@@ -255,6 +298,17 @@ def validate_plan(
                     f"allowlisted checker",
                     declared=str(gate.get("command") or ""),
                 ))
+            else:
+                denied = _gate_command_denied_option(command_tokens[len(matched_prefix):])
+                if denied is not None:
+                    errors.append(wc.compile_error(
+                        ERROR_PLAN_GATE_OPTION_DENIED, node_id,
+                        f"node {node_id}: deterministic_command {gate.get('command')!r} carries "
+                        f"denied option {denied!r} — import/config-control options "
+                        f"({', '.join(GATE_COMMAND_OPTION_DENYLIST)}) are not plannable; "
+                        f"pass test paths and selection/reporting flags only",
+                        declared=denied,
+                    ))
 
         # R2(f): the repair budget is stamped at birth (contract-determined on
         # the fixed path; planner-declared here), never a runtime default.
@@ -319,6 +373,10 @@ def plan_certificate_hash(task_graph: Dict[str, Any]) -> str:
     import hashlib
 
     governed = {
+        # sprint_id binds the certificate to ONE sprint — a PASS stamped for
+        # sprint A must not validate a byte-identical graph smuggled into
+        # sprint B (review G1+G1b finding 2).
+        "sprint_id": str(task_graph.get("sprint_id") or ""),
         "workflow_contract_id": str(task_graph.get("workflow_contract_id") or ""),
         "workflow_contract_version": str(task_graph.get("workflow_contract_version") or ""),
         "nodes": [
@@ -508,8 +566,47 @@ def _read_errors_artifact(sprints_dir: Path, sid: str) -> Dict[str, Any]:
         return {}
 
 
+STATUS_BOUNCE_KEY = "plan_compile_bounces"
+
+
+def _read_status_bounce(sprints_dir: Path, sid: str) -> Dict[str, Any]:
+    try:
+        data = json.loads((sprints_dir / f"{sid}.status.json").read_text(encoding="utf-8"))
+        value = data.get(STATUS_BOUNCE_KEY)
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def _record_status_bounce(sprints_dir: Path, sid: str, bounce_count: int, graph_hash: str) -> None:
+    """Mirror the bounce budget into <sid>.status.json (review G1+G1b finding
+    4: the errors artifact was the ONLY store, and deleting it reset the retry
+    budget so a graph never terminalized). Metadata merge only — status/phase
+    are untouched, and transition_status preserves unknown keys, so the record
+    survives later transitions."""
+    status_path = sprints_dir / f"{sid}.status.json"
+    if not status_path.exists():
+        return
+    try:
+        data = json.loads(status_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return
+        data[STATUS_BOUNCE_KEY] = {
+            "bounce_count": int(bounce_count),
+            "graph_hash": str(graph_hash),
+        }
+        _atomic_write_json(status_path, data)
+    except Exception:
+        pass
+
+
 def _bounce_count_for_failure(sprints_dir: Path, sid: str, graph_hash: str) -> int:
-    previous = _read_errors_artifact(sprints_dir, sid)
+    # Consult BOTH stores and trust the higher counter — the errors artifact
+    # alone is deletable (finding 4).
+    previous = max(
+        (_read_errors_artifact(sprints_dir, sid), _read_status_bounce(sprints_dir, sid)),
+        key=lambda record: int(record.get("bounce_count") or 0),
+    )
     previous_count = int(previous.get("bounce_count") or 0)
     if previous.get("graph_hash") == graph_hash and previous_count > 0:
         return previous_count
@@ -615,6 +712,7 @@ def compile_planner_graph(
         )
         graph_hash = _graph_hash_for_bounce(task_graph)
         bounce_count = _bounce_count_for_failure(sprints, sid, graph_hash)
+        _record_status_bounce(sprints, sid, bounce_count, graph_hash)
         max_bounces = _max_planner_bounces(None)
         exhausted = bounce_count >= max_bounces
         terminal_status: Dict[str, Any] = {}
@@ -663,6 +761,7 @@ def compile_planner_graph(
 
     graph_hash = _graph_hash_for_bounce(candidate, contract_version)
     bounce_count = _bounce_count_for_failure(sprints, sid, graph_hash)
+    _record_status_bounce(sprints, sid, bounce_count, graph_hash)
     max_bounces = _max_planner_bounces(contract)
     exhausted = bounce_count >= max_bounces
     terminal_status = {}
