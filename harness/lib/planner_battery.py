@@ -20,7 +20,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import plan_validator as pv
 import workflow_contract as wc
 
-SCORECARD_SCHEMA = "solar.planner_battery.scorecard.v2"
+SCORECARD_SCHEMA = "solar.planner_battery.scorecard.v3"
 TASK_GRAPH_SUFFIX = ".task_graph.json"
 DEFAULT_OUTPUT_NAME = "battery-scorecard.json"
 
@@ -33,16 +33,27 @@ DEFAULT_OUTPUT_NAME = "battery-scorecard.json"
 PRE_PLANNER_TEMPLATE_MARKERS = ("dag_variant", "required_gates")
 GRAPH_KIND_PLANNER = "planner"
 GRAPH_KIND_PRE_PLANNER_TEMPLATE = "pre_planner_template"
+GRAPH_KIND_UNSTAMPED = "unstamped"
 
 
 def graph_kind(graph: Dict[str, Any]) -> str:
-    """Classify a captured graph. Raw planner output may legitimately lack
-    workflow_contract_id (the compile seam stamps it), but only the
-    requirement-compiler template carries the legacy marker keys."""
+    """Classify a captured graph.
+
+    Raw planner output may legitimately lack workflow_contract_id (the
+    compile seam stamps it) — and G3 run 4 (p5-g3-live-rung-20260709T201817Z)
+    showed the planner may keep the compiler template's legacy marker keys by
+    editing the graph file in place, so the markers alone over-classify. The
+    compiler template's own signature is that EVERY node is gateless; a
+    marker-carrying graph with evaluator gates is planner-shaped but
+    unstamped — authorship cannot be proven, so it is validated and reported
+    separately instead of joining compile_rate in either direction."""
     if str(graph.get("workflow_contract_id") or "").strip():
         return GRAPH_KIND_PLANNER
     if any(marker in graph for marker in PRE_PLANNER_TEMPLATE_MARKERS):
-        return GRAPH_KIND_PRE_PLANNER_TEMPLATE
+        nodes = [n for n in graph.get("nodes") or [] if isinstance(n, dict)]
+        if nodes and all(not (n.get("evaluator_gate") or {}) for n in nodes):
+            return GRAPH_KIND_PRE_PLANNER_TEMPLATE
+        return GRAPH_KIND_UNSTAMPED
     return GRAPH_KIND_PLANNER
 
 
@@ -113,6 +124,7 @@ def score_directory(
                         "template); excluded from compile_rate",
             }
             continue
+
         errors = pv.validate_plan(
             graph,
             capsule_registry,
@@ -120,20 +132,33 @@ def score_directory(
             contract=contract,
         )
         counts = _code_counts(errors)
-        total_reject_codes.update(counts)
-        cases[case_id] = {
+        if kind == GRAPH_KIND_PLANNER:
+            total_reject_codes.update(counts)
+        row: Dict[str, Any] = {
             "graph_file": graph_path.name,
             "graph_kind": kind,
-            "compiled": not errors,
+            "compiled": (not errors) if kind == GRAPH_KIND_PLANNER else None,
             "error_count": len(errors),
             "error_codes": sorted(counts),
             "code_counts": dict(sorted(counts.items())),
         }
+        if kind == GRAPH_KIND_UNSTAMPED:
+            row["note"] = (
+                "graph carries legacy markers and no workflow_contract_id but "
+                "has evaluator gates — planner-shaped yet never stamped; "
+                "validated for information, excluded from compile_rate"
+            )
+        cases[case_id] = row
 
     case_count = len(cases)
     scored_rows = [row for row in cases.values() if row["graph_kind"] == GRAPH_KIND_PLANNER]
     scored_count = len(scored_rows)
-    template_count = case_count - scored_count
+    template_count = sum(
+        1 for row in cases.values() if row["graph_kind"] == GRAPH_KIND_PRE_PLANNER_TEMPLATE
+    )
+    unstamped_count = sum(
+        1 for row in cases.values() if row["graph_kind"] == GRAPH_KIND_UNSTAMPED
+    )
     compiled = sum(1 for row in scored_rows if row["compiled"])
     rejected = scored_count - compiled
     compile_rate = compiled / scored_count if scored_count else 0.0
@@ -151,6 +176,7 @@ def score_directory(
             "case_count": case_count,
             "scored_count": scored_count,
             "pre_planner_templates": template_count,
+            "unstamped": unstamped_count,
             "compiled": compiled,
             "rejected": rejected,
             "compile_rate": compile_rate,
@@ -192,11 +218,11 @@ def main(argv=None) -> int:
         return 2
 
     print(f"battery scorecard: {out_path}")
-    # 3 = planner rejects; 4 = capture incomplete (pre-planner template
-    # snapshots present, so the battery under-measures the planner).
+    # 3 = planner rejects; 4 = capture incomplete (pre-planner template or
+    # unstamped snapshots present, so the battery under-measures the planner).
     if scorecard["totals"]["rejected"]:
         return 3
-    if scorecard["totals"]["pre_planner_templates"]:
+    if scorecard["totals"]["pre_planner_templates"] or scorecard["totals"]["unstamped"]:
         return 4
     return 0
 

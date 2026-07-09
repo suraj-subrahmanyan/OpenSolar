@@ -323,6 +323,48 @@ def test_launch_node_mismatch_terminalizes_sprint(tmp_path, monkeypatch, copy_na
     assert status.get("phase") == "plan_certificate_invalid", status
 
 
+# --- Run-4 findings: plain-sprint acceptance seam + PRD gate demotion --------
+#
+# G3 run 4 (p5-g3-live-rung-20260709T201817Z): the planner completed a valid
+# 3-node graph, but (a) NO seam compiled/stamped it on the plain-sprint live
+# path — the coordinator's only compile call sites are the drafting flow and
+# a backfill gated on guard_role=builder, which is circular because the
+# route only says builder AFTER the certificate exists; (b) the legacy PRD
+# schema gate then demoted planning_complete back to drafting/spec/pm
+# (gate_blocked invalid_prd, the F-040 class) and the sprint wedged for
+# 600s. Coordinator doctrine already says "PM quality belongs before planner
+# completion" — these pins hold the active-state flow to it.
+
+
+def _coordinator_active_case() -> str:
+    text = (_HARNESS / "coordinator.sh").read_text(encoding="utf-8")
+    start = text.index('guard_violations="$(workflow_guard_violations "$sid")"')
+    end = text.index("planning_complete)", start)
+    return text[start:end]
+
+
+def test_coordinator_active_flow_compiles_before_legacy_gates():
+    """Fix A: with planner artifacts present and the route not yet builder,
+    the active-state flow must attempt compile-generic (the acceptance seam)
+    BEFORE any legacy PRD gating can demote the sprint."""
+    region = _coordinator_active_case()
+    assert "compile_generic_plan_graph" in region, (
+        "active-state flow never compiles the planner graph (acceptance seam missing)"
+    )
+    assert region.index("compile_generic_plan_graph") < region.index("gate_prd_schema")
+
+
+def test_coordinator_prd_gate_does_not_demote_after_planner_completion():
+    """Fix B: the PRD schema demotion must be skipped once planner artifacts
+    (design+plan+task_graph) exist."""
+    region = _coordinator_active_case()
+    demotion = region.index("gate_prd_schema")
+    guard = region.rfind("planner_artifacts_present", 0, demotion)
+    assert guard != -1, (
+        "PRD schema demotion is not gated on planner artifacts being absent"
+    )
+
+
 def test_record_helper_only_fires_on_hash_mismatch(tmp_path, monkeypatch):
     """Unit seam: PLAN_CERTIFICATE_MISSING must not transition anything."""
     monkeypatch.setenv("SOLAR_PLAN_VALIDATOR", "1")

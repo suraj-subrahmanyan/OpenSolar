@@ -2702,6 +2702,15 @@ planner_artifacts_ready() {
   python3 "$HARNESS_DIR/lib/workflow_guard.py" route "$sid" --field route_role 2>/dev/null | grep -Eq '^(builder|builder_main)$'
 }
 
+planner_artifacts_present() {
+  # File-level presence (design+plan+task_graph non-empty) — deliberately NOT
+  # the workflow_guard route: with SOLAR_PLAN_VALIDATOR=1 the route stays pm
+  # until the graph is certified, and the acceptance seam below needs a
+  # certificate-independent "the planner already ran" signal (G3 run-4 fix).
+  local sid="$1"
+  [[ -s "$SPRINTS_DIR/${sid}.design.md" && -s "$SPRINTS_DIR/${sid}.plan.md" && -s "$SPRINTS_DIR/${sid}.task_graph.json" ]]
+}
+
 workflow_guard_route_role() {
   local sid="$1"
   python3 "$HARNESS_DIR/lib/workflow_guard.py" route "$sid" --field route_role 2>/dev/null || echo pm
@@ -2801,6 +2810,25 @@ gate_check() {
 	      local guard_role guard_violations
 	      guard_role="$(workflow_guard_route_role "$sid")"
 	      guard_violations="$(workflow_guard_violations "$sid")"
+	      # G3 run-4 fix (p5-g3-live-rung-20260709T201817Z): the acceptance
+	      # seam for plain-sprint planner output. With the validator on, a
+	      # completed planner graph is uncertified until compile-generic
+	      # stamps it, so workflow_guard reports plan_certificate_required and
+	      # guard_role stays pm — the [backfill] compile below never fires (it
+	      # is gated on guard=builder: circular), and the legacy PRD schema
+	      # gate then demoted planning_complete back to drafting/spec, wedging
+	      # the sprint for 600s. Compile FIRST when the planner artifacts
+	      # exist, then re-read the route; the CLI is env-gated (flag off =
+	      # no-op exit 0), idempotent on stamped graphs, and skips
+	      # epic/fixed-contract graphs itself. A bounce (rc 3) leaves the
+	      # route on planner and the flow below re-dispatches the planner
+	      # with the compile errors.
+	      if [[ "$guard_role" != "builder_main" && "$guard_role" != "builder" ]] && planner_artifacts_present "$sid"; then
+	        if compile_generic_plan_graph "$sid"; then
+	          guard_role="$(workflow_guard_route_role "$sid")"
+	          guard_violations="$(workflow_guard_violations "$sid")"
+	        fi
+	      fi
 	      if [[ "$guard_role" == "builder_main" || "$guard_role" == "builder" ]]; then
 	        # Once workflow_guard says planner artifacts + task_graph are ready,
 	        # coordinator must not roll the sprint back to PM because of legacy
@@ -2816,7 +2844,11 @@ gate_check() {
         runtime_status_transition "$sid" "drafting" "active_blocked_missing_prd" "coordinator" '{"status_fields":{"phase":"spec","handoff_to":"pm","target_role":"pm"}}' || true
         return 1
       fi
-      if [[ "$req_file" == "$sprint_dir/${sid}.prd.md" ]]; then
+      # G3 run-4 fix: PM quality belongs BEFORE planner completion (the
+      # doctrine above). Once design+plan+task_graph exist, a PRD schema
+      # miss must not demote the sprint back to PM — that rollback wedged
+      # run 4 in a drafting/spec loop the headless runtime can never exit.
+      if [[ "$req_file" == "$sprint_dir/${sid}.prd.md" ]] && ! planner_artifacts_present "$sid"; then
         local prd_err
         if prd_err=$(validate_doc "prd" "$req_file"); then :; else
           log "${R}门禁拦截: PRD 结构不完整${N}"
