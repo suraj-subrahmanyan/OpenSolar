@@ -34,7 +34,10 @@ def test_quarantine_manifest_count_is_explicit():
     conftest = _load_tests_conftest()
     manifest = conftest.COLLECTION_QUARANTINE_MANIFEST
     # Shrinking this exact count is the goal; any increase must be a reviewed quarantine decision.
-    assert len(manifest) == conftest.QUARANTINE_EXPECTED_COUNT == 41
+    # Wave-2 dup-basename renames un-quarantined 11 entries (41 -> 30): every
+    # remaining duplicate-basename entry either got a unique name or had its
+    # collision partner renamed, and each un-quarantined file passes standalone.
+    assert len(manifest) == conftest.QUARANTINE_EXPECTED_COUNT == 30
     assert list(manifest) == sorted(manifest)
     assert all(meta["class"] and meta["cause"] for meta in manifest.values())
 
