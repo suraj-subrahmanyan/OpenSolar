@@ -82,6 +82,10 @@ def _fixture_config(tmp_path: Path) -> tuple[Path, Path]:
                     "role": "builder",
                     "roles": ["builder"],
                     "provider": "anthropic",
+                    # capability vocabulary the fixture nodes may draw from
+                    # (G3 run-7 fix: declared capabilities must be
+                    # registry-satisfiable at compile time)
+                    "capabilities": ["baseline-capability", "code_impl"],
                 }
             },
         },

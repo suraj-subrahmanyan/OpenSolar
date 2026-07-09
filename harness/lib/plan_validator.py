@@ -158,6 +158,24 @@ OPERATOR_SELECTION_RUNTIME_FIELDS = (
 
 ERROR_PLAN_GATE_KIND_ILLEGAL = "PLAN_GATE_KIND_ILLEGAL"
 ERROR_PLAN_OPERATOR_SELECTION_FORBIDDEN = "PLAN_OPERATOR_SELECTION_FORBIDDEN"
+ERROR_PLAN_CAPABILITY_UNSATISFIABLE = "PLAN_CAPABILITY_UNSATISFIABLE"
+
+
+def _registry_capabilities(operator_registry: Dict[str, Dict[str, Any]]) -> set:
+    """Union of capability strings advertised by enabled, non-deprecated
+    operators — the only vocabulary a planner may draw
+    required_capabilities from (G3 run-7 fix)."""
+    available: set = set()
+    for record in (operator_registry or {}).values():
+        if not isinstance(record, dict):
+            continue
+        if record.get("enabled") is False or record.get("deprecated") is True:
+            continue
+        for cap in record.get("capabilities") or []:
+            text = str(cap or "").strip()
+            if text:
+                available.add(text)
+    return available
 ERROR_PLAN_GATE_COMMAND_NOT_ALLOWLISTED = "PLAN_GATE_COMMAND_NOT_ALLOWLISTED"
 ERROR_PLAN_GATE_OPTION_DENIED = "PLAN_GATE_OPTION_DENIED"
 ERROR_PLAN_GATE_PATH_DENIED = "PLAN_GATE_PATH_DENIED"
@@ -445,6 +463,28 @@ def validate_plan(
                     f"provider_policy.allowed_providers.",
                     resolved=[], declared=role,
                 ))
+            # R2(d) capability extension (G3 run 7,
+            # p5-g3-live-rung-20260709T225219Z): the planner invented
+            # required_capabilities no operator advertises and the CERTIFIED
+            # graph wedged forever at dispatch (worker_blocked /
+            # no_matching_worker) — "compiles" must imply "dispatchable".
+            declared_caps = [
+                str(cap) for cap in (node.get("required_capabilities") or [])
+                if str(cap or "").strip()
+            ]
+            if declared_caps:
+                available = _registry_capabilities(operator_registry)
+                missing = sorted(set(declared_caps) - available)
+                if missing:
+                    errors.append(wc.compile_error(
+                        ERROR_PLAN_CAPABILITY_UNSATISFIABLE, node_id,
+                        f"node {node_id}: required_capabilities {missing} are not "
+                        f"advertised by any enabled operator "
+                        f"(registry vocabulary: {sorted(available) or '[]'}). "
+                        f"Remediation: omit required_capabilities, or declare only "
+                        f"values from the registry vocabulary.",
+                        declared=missing, admitted=sorted(available),
+                    ))
 
     # F3: graph structure — depends_on existence + acyclicity on the planner
     # path (the schema path already had these for fixed contracts). A cyclic or
@@ -1104,7 +1144,12 @@ def planner_compile_policy_block(
         "   runtime-owned (quota fallback rewrites them) and fail",
         "   PLAN_OPERATOR_SELECTION_FORBIDDEN. Constrain operators only via",
         "   allowed_operators (role/providers).",
-        "8. graph shape — non-empty, acyclic, depends_on only references node",
+        "8. required_capabilities — OMIT this field unless strictly needed.",
+        "   If declared, every value must come from the registered operator",
+        "   capability vocabulary listed at the end; an invented capability",
+        "   fails PLAN_CAPABILITY_UNSATISFIABLE (no worker could ever match",
+        "   it and the node would never dispatch).",
+        "9. graph shape — non-empty, acyclic, depends_on only references node",
         f"   ids in this graph, at most {int(max_nodes)} nodes.",
         "",
         "Registered capsules (capability_capsule_id -> admitted task types):",
@@ -1121,6 +1166,18 @@ def planner_compile_policy_block(
     else:
         lines.append("- (capsule registry unavailable at prompt-render time; use")
         lines.append("  harness/config/capability-capsules/ ids verbatim)")
+
+    # G3 run-7 fix: the vocabulary rule 8 references, rendered live.
+    try:
+        operator_registry = wc.load_operator_registry(directory / "physical-operators.json")
+        vocabulary = sorted(_registry_capabilities(operator_registry))
+    except Exception:
+        vocabulary = []
+    lines.append("")
+    if vocabulary:
+        lines.append(f"Registered operator capabilities (required_capabilities vocabulary): {vocabulary}")
+    else:
+        lines.append("Registered operator capabilities: NONE — omit required_capabilities entirely.")
 
     if sprints_dir is not None and sid:
         previous = _read_errors_artifact(Path(sprints_dir), sid)

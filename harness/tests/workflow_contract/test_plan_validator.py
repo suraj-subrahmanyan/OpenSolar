@@ -75,14 +75,23 @@ def test_v7_rejection_is_exactly_the_proof_contract_defect(
     capsule_registry, operator_registry, shipped_contracts
 ):
     """v7's S1 passed admission live (implementation IS admitted by the
-    implementation capsule) and wrote workspace-prefixed paths — S1's ONLY
-    compile defect is the unsatisfiable proof contract. Scoped to the S1-isolated
+    implementation capsule) and wrote workspace-prefixed paths — S1's LIVE
+    defect was the unsatisfiable proof contract. Scoped to the S1-isolated
     graph: the full v7 record's skeletal downstream nodes (S2/S3/S4) carry no
     capsule binding and now (correctly) also trip CAPSULE_UNBOUND — see
-    test_v7_full_graph_flags_unbound_downstream_nodes (round-3 Finding A)."""
+    test_v7_full_graph_flags_unbound_downstream_nodes (round-3 Finding A).
+    Since the G3 run-7 fix, S1's invented required_capabilities
+    (local-file-read/artifact-write — never in any registry) also correctly
+    trip PLAN_CAPABILITY_UNSATISFIABLE: the class that wedged run 7 at
+    dispatch existed silently in the v7 record all along."""
+    import plan_validator as pv
+
     errors = _validate(_v7_s1_graph(), capsule_registry, operator_registry, shipped_contracts)
     codes = {e["code"] for e in errors}
-    assert codes == {wc.ERROR_OBLIGATION_UNSATISFIABLE}, errors
+    assert codes == {
+        wc.ERROR_OBLIGATION_UNSATISFIABLE,
+        pv.ERROR_PLAN_CAPABILITY_UNSATISFIABLE,
+    }, errors
 
 
 def test_v7_s1_derives_artifact_node_kind():

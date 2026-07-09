@@ -323,6 +323,70 @@ def test_launch_node_mismatch_terminalizes_sprint(tmp_path, monkeypatch, copy_na
     assert status.get("phase") == "plan_certificate_invalid", status
 
 
+# --- Run-7 finding: certified must imply dispatchable (capabilities) ---------
+#
+# G3 run 7 (p5-g3-live-rung-20260709T225219Z): the planner invented
+# required_capabilities ("repo.worktree", "shell.pytest") — plausible
+# strings that no operator advertises (the registry vocabulary is
+# browser/UI tags) — and NOTHING validated them at compile time, so a
+# CERTIFIED graph wedged forever at dispatch (worker_blocked /
+# no_matching_worker, coordinator looping with empty batches, non-terminal).
+# Compile-accepting what dispatch cannot serve breaks the certificate's
+# meaning. Route resolvability now covers capabilities, and the policy
+# block teaches the live vocabulary (the G2 lesson: never an untaught
+# error code).
+
+
+def test_unsatisfiable_required_capabilities_fail_compile():
+    """A node demanding a capability no enabled operator advertises must
+    bounce at birth, not wedge at dispatch."""
+    node = _valid_node(required_capabilities=["repo.worktree", "shell.pytest"])
+    graph = _graph("sprint-g3fix7", node=node)
+    registry = {
+        "test-builder": {
+            "enabled": True, "deprecated": False, "health_status": "ok",
+            "role": "builder", "roles": ["builder"], "provider": "anthropic",
+            "capabilities": ["code_impl"],
+        }
+    }
+
+    codes = [e["code"] for e in pv.validate_plan(graph, None, registry)]
+
+    assert pv.ERROR_PLAN_CAPABILITY_UNSATISFIABLE in codes, codes
+
+
+def test_satisfiable_and_absent_capabilities_still_compile():
+    """Both live-proven planner shapes stay legal: capabilities omitted
+    (run 5) and capabilities drawn from the registry vocabulary."""
+    registry = {
+        "test-builder": {
+            "enabled": True, "deprecated": False, "health_status": "ok",
+            "role": "builder", "roles": ["builder"], "provider": "anthropic",
+            "capabilities": ["code_impl"],
+        }
+    }
+    absent = _graph("sprint-g3fix7-absent")
+    satisfiable = _graph(
+        "sprint-g3fix7-ok", node=_valid_node(required_capabilities=["code_impl"])
+    )
+
+    for graph in (absent, satisfiable):
+        codes = [e["code"] for e in pv.validate_plan(graph, None, registry)]
+        assert pv.ERROR_PLAN_CAPABILITY_UNSATISFIABLE not in codes, codes
+
+
+def test_policy_block_teaches_the_capability_vocabulary(tmp_path, monkeypatch):
+    """The planner must be told the legal vocabulary (or to omit the field)
+    — never an untaught error code."""
+    monkeypatch.setenv("SOLAR_PLAN_VALIDATOR", "1")
+    config, workflows = _fixture_config(tmp_path)
+
+    block = pv.planner_compile_policy_block(config_dir=config, workflows_dir=workflows)
+
+    assert pv.ERROR_PLAN_CAPABILITY_UNSATISFIABLE in block
+    assert "required_capabilities" in block
+
+
 # --- Run-5 findings: gate cwd must be the builder's anchor -------------------
 #
 # G3 run 5 (p5-g3-live-rung-20260709T210652Z): the graph stamped and
