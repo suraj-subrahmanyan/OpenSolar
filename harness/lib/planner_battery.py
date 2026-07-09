@@ -20,9 +20,30 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import plan_validator as pv
 import workflow_contract as wc
 
-SCORECARD_SCHEMA = "solar.planner_battery.scorecard.v1"
+SCORECARD_SCHEMA = "solar.planner_battery.scorecard.v2"
 TASK_GRAPH_SUFFIX = ".task_graph.json"
 DEFAULT_OUTPUT_NAME = "battery-scorecard.json"
+
+# Legacy top-level keys the requirement compiler stamps on its pre-planner
+# template graph. A live capture that closes its window while the planner is
+# still in flight snapshots that template, and scoring it as planner output
+# misreads the battery both ways (G2b run 20260709T144445Z: E5's gateless
+# template produced a false PLAN_REPAIR_BUDGET_MISSING reject; E4's gated
+# template validated offline into a false compile).
+PRE_PLANNER_TEMPLATE_MARKERS = ("dag_variant", "required_gates")
+GRAPH_KIND_PLANNER = "planner"
+GRAPH_KIND_PRE_PLANNER_TEMPLATE = "pre_planner_template"
+
+
+def graph_kind(graph: Dict[str, Any]) -> str:
+    """Classify a captured graph. Raw planner output may legitimately lack
+    workflow_contract_id (the compile seam stamps it), but only the
+    requirement-compiler template carries the legacy marker keys."""
+    if str(graph.get("workflow_contract_id") or "").strip():
+        return GRAPH_KIND_PLANNER
+    if any(marker in graph for marker in PRE_PLANNER_TEMPLATE_MARKERS):
+        return GRAPH_KIND_PRE_PLANNER_TEMPLATE
+    return GRAPH_KIND_PLANNER
 
 
 def _case_id(path: Path) -> str:
@@ -74,6 +95,24 @@ def score_directory(
 
     for graph_path in discover_graphs(graphs_dir):
         graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        case_id = _case_id(graph_path)
+        kind = graph_kind(graph)
+        if kind == GRAPH_KIND_PRE_PLANNER_TEMPLATE:
+            # Not planner output: the capture window closed before the
+            # planner replaced the compiler template. Validation verdicts on
+            # the template are meaningless, so the case is recorded but
+            # excluded from compiled/rejected/compile_rate.
+            cases[case_id] = {
+                "graph_file": graph_path.name,
+                "graph_kind": kind,
+                "compiled": None,
+                "error_count": 0,
+                "error_codes": [],
+                "code_counts": {},
+                "note": "snapshot predates planner output (requirement-compiler "
+                        "template); excluded from compile_rate",
+            }
+            continue
         errors = pv.validate_plan(
             graph,
             capsule_registry,
@@ -82,9 +121,9 @@ def score_directory(
         )
         counts = _code_counts(errors)
         total_reject_codes.update(counts)
-        case_id = _case_id(graph_path)
         cases[case_id] = {
             "graph_file": graph_path.name,
+            "graph_kind": kind,
             "compiled": not errors,
             "error_count": len(errors),
             "error_codes": sorted(counts),
@@ -92,9 +131,12 @@ def score_directory(
         }
 
     case_count = len(cases)
-    compiled = sum(1 for row in cases.values() if row["compiled"])
-    rejected = case_count - compiled
-    compile_rate = compiled / case_count if case_count else 0.0
+    scored_rows = [row for row in cases.values() if row["graph_kind"] == GRAPH_KIND_PLANNER]
+    scored_count = len(scored_rows)
+    template_count = case_count - scored_count
+    compiled = sum(1 for row in scored_rows if row["compiled"])
+    rejected = scored_count - compiled
+    compile_rate = compiled / scored_count if scored_count else 0.0
     top_reject_codes = [
         {"code": code, "count": count}
         for code, count in sorted(total_reject_codes.items(), key=lambda item: (-item[1], item[0]))
@@ -107,6 +149,8 @@ def score_directory(
         "cases": cases,
         "totals": {
             "case_count": case_count,
+            "scored_count": scored_count,
+            "pre_planner_templates": template_count,
             "compiled": compiled,
             "rejected": rejected,
             "compile_rate": compile_rate,
@@ -148,7 +192,13 @@ def main(argv=None) -> int:
         return 2
 
     print(f"battery scorecard: {out_path}")
-    return 3 if scorecard["totals"]["rejected"] else 0
+    # 3 = planner rejects; 4 = capture incomplete (pre-planner template
+    # snapshots present, so the battery under-measures the planner).
+    if scorecard["totals"]["rejected"]:
+        return 3
+    if scorecard["totals"]["pre_planner_templates"]:
+        return 4
+    return 0
 
 
 if __name__ == "__main__":
