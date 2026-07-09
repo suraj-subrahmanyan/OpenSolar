@@ -3484,12 +3484,32 @@ print(json.dumps({
     _SS_PID="$HARNESS_DIR/run/status-server.pid"
     _SS_LOG="$HARNESS_DIR/run/status-server.log"
     _SS_PORT_FILE="$HARNESS_DIR/run/status-server.port"
-    _SS_TMUX_SESSION="solar-harness-status-server"
+    # G3 run-2 fix (p5-g3-live-rung-20260709T190808Z): the session name was a
+    # fixed global, so with parallel harnesses on one machine any harness's
+    # start saw another's session as "already running" and any stop killed
+    # it. The name is now scoped to THIS HARNESS_DIR; the legacy fixed name
+    # is only ever touched after an ownership check.
+    _SS_TMUX_LEGACY_SESSION="solar-harness-status-server"
+    _SS_TMUX_SESSION="solar-harness-status-server-$(printf '%s' "$HARNESS_DIR" | cksum | awk '{print $1}')"
     mkdir -p "$HARNESS_DIR/run"
     _status_server_live_pids() {
       ps ax -o pid= -o args= | awk -v script="$HARNESS_DIR/lib/symphony/status-server.py" '
         index($0, script) && $0 !~ /awk -v script/ { print $1 }
       '
+    }
+    _ss_pid_owned() {
+      # True when the pid's command line references THIS harness — the
+      # ownership test every kill below must pass (G3 run-2 fix: stop's
+      # port sweep killed every /healthz listener on the machine).
+      local _pid="$1"
+      [[ "$_pid" =~ ^[0-9]+$ ]] || return 1
+      ps -o args= -p "$_pid" 2>/dev/null | grep -qF -- "$HARNESS_DIR"
+    }
+    _ss_tmux_session_owned() {
+      local _session="$1" _pane_pid
+      _pane_pid=$(tmux list-panes -t "$_session" -F '#{pane_pid}' 2>/dev/null | head -1)
+      [[ -n "$_pane_pid" ]] || return 1
+      _ss_pid_owned "$_pane_pid"
     }
     _status_server_live_ports() {
       local _p
@@ -3516,14 +3536,19 @@ print(json.dumps({
     case "${2:-start}" in
       start)
         _live_pids="$(_status_server_live_pids || true)"
-        _live_ports="$(_status_server_live_ports || true)"
         if tmux has-session -t "$_SS_TMUX_SESSION" 2>/dev/null; then
           ok "Status server 已在运行 (tmux: $_SS_TMUX_SESSION, port: $(cat "$_SS_PORT_FILE" 2>/dev/null || echo '?'))"
+        elif tmux has-session -t "$_SS_TMUX_LEGACY_SESSION" 2>/dev/null && _ss_tmux_session_owned "$_SS_TMUX_LEGACY_SESSION"; then
+          ok "Status server 已在运行 (tmux: $_SS_TMUX_LEGACY_SESSION, port: $(cat "$_SS_PORT_FILE" 2>/dev/null || echo '?'))"
         elif [[ -f "$_SS_PID" ]] && kill -0 "$(cat "$_SS_PID")" 2>/dev/null; then
           ok "Status server 已在运行 (PID: $(cat "$_SS_PID"), port: $(cat "$_SS_PORT_FILE" 2>/dev/null || echo '?'))"
-        elif [[ -n "$_live_pids" || -n "$_live_ports" ]]; then
+        elif [[ -n "$_live_pids" ]]; then
+          # Heal only from path-scoped evidence: a foreign /healthz listener
+          # in the shared port range is NOT our server and must not be
+          # adopted (G3 run-2 fix).
+          _live_ports="$(_status_server_live_ports || true)"
           _port="$(printf '%s\n' "$_live_ports" | head -1)"
-          [[ -n "$_live_pids" ]] && printf '%s\n' "$(printf '%s\n' "$_live_pids" | head -1)" > "$_SS_PID"
+          printf '%s\n' "$(printf '%s\n' "$_live_pids" | head -1)" > "$_SS_PID"
           [[ -n "$_port" ]] && printf '%s\n' "$_port" > "$_SS_PORT_FILE"
           ok "Status server 已在运行 (healed from live runtime; pid: $(printf '%s\n' "$_live_pids" | head -1), port: ${_port:-?})"
         else
@@ -3551,6 +3576,12 @@ print(json.dumps({
         if tmux has-session -t "$_SS_TMUX_SESSION" 2>/dev/null; then
           tmux kill-session -t "$_SS_TMUX_SESSION" 2>/dev/null || true
           _stopped=1
+        elif tmux has-session -t "$_SS_TMUX_LEGACY_SESSION" 2>/dev/null && _ss_tmux_session_owned "$_SS_TMUX_LEGACY_SESSION"; then
+          # Pre-scoping servers of THIS harness live under the legacy fixed
+          # name; another harness's server under that name is not ours to
+          # kill (G3 run-2 fix).
+          tmux kill-session -t "$_SS_TMUX_LEGACY_SESSION" 2>/dev/null || true
+          _stopped=1
         elif [[ -f "$_SS_PID" ]]; then
           _pid_val=$(cat "$_SS_PID" 2>/dev/null || true)
           if [[ "$_pid_val" =~ ^[0-9]+$ ]]; then
@@ -3566,12 +3597,22 @@ print(json.dumps({
           _live_ports="$(printf '%s\n%s\n' "$_recorded_port" "$_live_ports" | awk 'NF && !seen[$0]++')"
         fi
         if [[ -n "$_live_ports" ]]; then
+          # G3 run-2 fix: this sweep used to lsof-kill EVERY /healthz
+          # listener on 8765-8775, machine-wide — with parallel harness
+          # sessions on one machine, any session's stop killed every other
+          # session's status server (run 2 died at the /intake seam this
+          # way). A port listener is only reaped when its command line
+          # proves it belongs to THIS harness.
           while IFS= read -r _port; do
             [[ -n "$_port" ]] || continue
             _listen_pids=$(lsof -tiTCP:"$_port" -sTCP:LISTEN 2>/dev/null || true)
-            [[ -n "$_listen_pids" ]] && kill $_listen_pids 2>/dev/null || true
+            for _listen_pid in $_listen_pids; do
+              if _ss_pid_owned "$_listen_pid"; then
+                kill "$_listen_pid" 2>/dev/null || true
+                _stopped=1
+              fi
+            done
           done <<< "$_live_ports"
-          _stopped=1
         fi
         rm -f "$_SS_PID" "$_SS_PORT_FILE"
         if [[ "$_stopped" == "1" ]]; then
@@ -3588,18 +3629,25 @@ print(json.dumps({
         ;;
       status)
         _live_pids="$(_status_server_live_pids || true)"
-        _live_ports="$(_status_server_live_ports || true)"
         if tmux has-session -t "$_SS_TMUX_SESSION" 2>/dev/null; then
           _port=$(cat "$_SS_PORT_FILE" 2>/dev/null || echo "8765")
           ok "运行中 (tmux: $_SS_TMUX_SESSION, port: $_port)"
+          curl -s "http://127.0.0.1:$_port/healthz" 2>/dev/null && echo || true
+        elif tmux has-session -t "$_SS_TMUX_LEGACY_SESSION" 2>/dev/null && _ss_tmux_session_owned "$_SS_TMUX_LEGACY_SESSION"; then
+          _port=$(cat "$_SS_PORT_FILE" 2>/dev/null || echo "8765")
+          ok "运行中 (tmux: $_SS_TMUX_LEGACY_SESSION, port: $_port)"
           curl -s "http://127.0.0.1:$_port/healthz" 2>/dev/null && echo || true
         elif [[ -f "$_SS_PID" ]] && [[ "$(cat "$_SS_PID" 2>/dev/null)" =~ ^[0-9]+$ ]] && kill -0 "$(cat "$_SS_PID")" 2>/dev/null; then
           _port=$(cat "$_SS_PORT_FILE" 2>/dev/null || echo "8765")
           ok "运行中 (PID: $(cat "$_SS_PID"), port: $_port)"
           curl -s "http://127.0.0.1:$_port/healthz" 2>/dev/null && echo || true
-        elif [[ -n "$_live_pids" || -n "$_live_ports" ]]; then
+        elif [[ -n "$_live_pids" ]]; then
+          # Path-scoped evidence only — a foreign /healthz listener in the
+          # shared port range must not be reported (or healed) as ours
+          # (G3 run-2 fix).
+          _live_ports="$(_status_server_live_ports || true)"
           _port=$(printf '%s\n' "$_live_ports" | head -1)
-          [[ -n "$_live_pids" ]] && printf '%s\n' "$(printf '%s\n' "$_live_pids" | head -1)" > "$_SS_PID"
+          printf '%s\n' "$(printf '%s\n' "$_live_pids" | head -1)" > "$_SS_PID"
           [[ -n "$_port" ]] && printf '%s\n' "$_port" > "$_SS_PORT_FILE"
           ok "运行中 (healed from live runtime, pid: $(printf '%s\n' "$_live_pids" | head -1), port: ${_port:-?})"
           curl -s "http://127.0.0.1:$_port/healthz" 2>/dev/null && echo || true
