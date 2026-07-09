@@ -693,6 +693,12 @@ case "${1:-help}" in
       rm -f "$WATCHDOG_PID_FILE"
     fi
     log "启动 Watchdog..."
+    # A stale terminal marker would make the freshly spawned daemon exit on
+    # its first tick and refuse its registration — clear it: starting the
+    # watchdog IS the new run's birth.
+    if [[ -f "$HARNESS_DIR/lib/run_process_registry.py" && -f "$HARNESS_DIR/run/process-registry/harness.terminal" ]]; then
+      python3 "$HARNESS_DIR/lib/run_process_registry.py" clear-terminal --run-id harness >/dev/null 2>&1 || true
+    fi
     if [[ "$(uname -s)" == "Darwin" && "${SOLAR_WATCHDOG_NO_LAUNCHD:-0}" != "1" ]] && command -v launchctl >/dev/null 2>&1; then
       if start_launchd_watchdog; then
         exit 0

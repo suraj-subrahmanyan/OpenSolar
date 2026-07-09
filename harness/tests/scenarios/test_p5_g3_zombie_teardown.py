@@ -93,6 +93,60 @@ def test_kill_writes_terminal_marker_even_without_tmux_session(tmp_path):
     )
 
 
+def test_clear_terminal_reopens_the_run(tmp_path):
+    """Review-prep finding (G3 fix-round amplification): kill now ALWAYS
+    writes the terminal marker, register() refuses terminal-marked runs
+    (silently — start uses `|| true`), and the watchdog exits on the marker.
+    Without a clear at start, one kill+start cycle leaves the harness
+    unsupervised with unregistered daemons. The registry needs a
+    clear-terminal verb and start must invoke it."""
+    harness = _tmp_harness(tmp_path)
+    reg = harness / "lib" / "run_process_registry.py"
+    env = _env(harness)
+
+    subprocess.run(
+        [sys.executable, str(reg), "mark-terminal", "--run-id", "harness"],
+        env=env, check=True, capture_output=True, timeout=60,
+    )
+    marker = harness / "run" / "process-registry" / "harness.terminal"
+    assert marker.exists()
+
+    result = subprocess.run(
+        [sys.executable, str(reg), "clear-terminal", "--run-id", "harness"],
+        env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists(), "clear-terminal did not remove the marker"
+
+    register = subprocess.run(
+        [sys.executable, str(reg), "register", "--run-id", "harness",
+         "--role", "coordinator", "--pid", str(os.getpid())],
+        env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert register.returncode == 0, (
+        f"register still refused after clear-terminal: {register.stderr}"
+    )
+
+
+def test_start_paths_clear_stale_terminal_marker():
+    """Both daemon-spawning start paths must clear a stale marker before
+    spawning: solar-harness.sh start_coordinator_sync and
+    coordinator-watchdog.sh start."""
+    sh = (_HARNESS / "solar-harness.sh").read_text(encoding="utf-8")
+    start = sh.index("start_coordinator_sync()")
+    spawn = sh.index("coordinator.sh", start)
+    assert "clear-terminal" in sh[start:spawn], (
+        "start_coordinator_sync does not clear a stale terminal marker"
+    )
+
+    wd = (_HARNESS / "coordinator-watchdog.sh").read_text(encoding="utf-8")
+    case_start = wd.index("  start)")
+    daemon_spawn = wd.index("run-daemon", case_start)
+    assert "clear-terminal" in wd[case_start:daemon_spawn], (
+        "watchdog start does not clear a stale terminal marker"
+    )
+
+
 def test_kill_reaps_registered_daemon_even_without_tmux_session(tmp_path):
     """The registry teardown (reap registered daemons watchdog-first) must
     run on every kill, not only when the tmux session still exists."""

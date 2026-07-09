@@ -247,6 +247,29 @@ def mark_terminal(
     return marker
 
 
+def clear_terminal(
+    run_id: str, reason: str = "new_run_start", harness_dir: Optional[Path | str] = None
+) -> bool:
+    """Idempotent. A terminal marker denotes the PREVIOUS run's end — a new
+    run birth must clear it, or register() refuses the new daemons (start
+    call sites swallow that refusal with `|| true`) and the watchdog exits
+    on its first tick: an unsupervised harness with unregistered daemons
+    after every kill+start cycle (G3 zombie-factory fix amplification,
+    found in review prep 2026-07-09). Returns True when a marker was
+    removed."""
+    marker = terminal_marker_path(run_id, harness_dir)
+    if not marker.exists():
+        return False
+    marker.unlink()
+    _append(
+        run_id,
+        {"event": "terminal_cleared", "run_id": run_id, "reason": reason,
+         "cleared_at": _now()},
+        harness_dir,
+    )
+    return True
+
+
 def register(
     run_id: str,
     role: str,
@@ -451,6 +474,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_is = sub.add_parser("is-terminal", help="exit 0 iff the run is terminal")
     p_is.add_argument("--run-id", required=True)
 
+    p_clear = sub.add_parser(
+        "clear-terminal",
+        help="clear the run-terminal marker (a new run birth reopens the lifecycle)",
+    )
+    p_clear.add_argument("--run-id", required=True)
+    p_clear.add_argument("--reason", default="new_run_start")
+
     p_teardown = sub.add_parser("teardown", help="kill registered processes, watchdog-first")
     p_teardown.add_argument("--run-id", required=True)
     p_teardown.add_argument("--grace", type=float, default=5.0)
@@ -471,6 +501,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
         if args.command == "is-terminal":
             return 0 if is_terminal(args.run_id) else 1
+        if args.command == "clear-terminal":
+            clear_terminal(args.run_id, reason=args.reason)
+            return 0
         if args.command == "teardown":
             result = teardown(args.run_id, grace_s=args.grace, kill_grace_s=args.kill_grace)
             print(json.dumps(result, ensure_ascii=False))

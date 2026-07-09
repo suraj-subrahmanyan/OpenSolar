@@ -905,6 +905,14 @@ start_coordinator_sync() {
     return 0
   fi
 
+  # A terminal marker denotes the PREVIOUS run's end; a new run birth must
+  # clear it, or register() silently refuses the new daemons (|| true below)
+  # and the watchdog exits on its first tick — an unsupervised harness with
+  # unregistered daemons after every kill+start cycle.
+  if [[ -f "$HARNESS_DIR/lib/run_process_registry.py" && -f "$HARNESS_DIR/run/process-registry/harness.terminal" ]]; then
+    python3 "$HARNESS_DIR/lib/run_process_registry.py" clear-terminal --run-id harness >/dev/null 2>&1 || true
+  fi
+
   # 启动 (setsid isolates from non-interactive launchers that reap process groups;
   # fallback keeps the installed/default behavior on platforms without setsid).
   if command -v setsid >/dev/null 2>&1; then
