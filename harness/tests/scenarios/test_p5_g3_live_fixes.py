@@ -323,6 +323,113 @@ def test_launch_node_mismatch_terminalizes_sprint(tmp_path, monkeypatch, copy_na
     assert status.get("phase") == "plan_certificate_invalid", status
 
 
+# --- Run-5 findings: gate cwd must be the builder's anchor -------------------
+#
+# G3 run 5 (p5-g3-live-rung-20260709T210652Z): the graph stamped and
+# dispatched live; S1 built real files and S2's builder wrote the test file —
+# all under sprints/<sid>/workdir/workspace/... (the operator work_dir). The
+# deterministic gate then ran `python3 -m pytest workspace/tests/...` from
+# HARNESS_DIR and exited 4 (file not found): the contract treats workspace/
+# and sprints/<sid>/workdir/ as ALIASES at validation time, but nothing
+# unified them at execution time (F-CLASS-16 live on the generic path). The
+# same run also showed pytest exit 4 recorded as a CONTENT fail, consuming
+# the repair budget on a mechanical miss (F-CLASS-10).
+
+
+def _run5_gate_fixture(tmp_path, *, with_test_file: bool) -> tuple:
+    import contract_gate_executor
+
+    harness = tmp_path / "harness"
+    sprints = tmp_path / "sprints"
+    (harness / "lib").mkdir(parents=True)
+    sid = "sprint-g3fix5-cwd"
+    _write_json(
+        sprints / f"{sid}.task_graph.json",
+        {
+            "sprint_id": sid,
+            "workflow_contract_id": "pm.generic.v1",
+            "workflow_contract_version": "1.0",
+            "nodes": [{"id": "S2", "status": "reviewing"}],
+        },
+    )
+    workspace_tests = sprints / sid / "workdir" / "workspace" / "tests"
+    workspace_tests.mkdir(parents=True)
+    if with_test_file:
+        (workspace_tests / "test_wordfreq.py").write_text(
+            "def test_ok():\n    assert True\n", encoding="utf-8"
+        )
+    return contract_gate_executor, harness, sprints, sid
+
+
+def test_generic_gate_resolves_paths_from_the_sprint_workdir(tmp_path, monkeypatch):
+    """The run-5 shape verbatim: builder artifacts live under
+    sprints/<sid>/workdir/workspace/, the gate command uses the canonical
+    workspace/ alias — the gate must find the files the builder wrote."""
+    monkeypatch.setenv("SOLAR_PLAN_VALIDATOR", "1")
+    cge, harness, sprints, sid = _run5_gate_fixture(tmp_path, with_test_file=True)
+
+    result = cge.execute_gate(
+        sprints, sid, {"id": "S2"},
+        {"kind": "deterministic_command",
+         "command": "python3 -m pytest workspace/tests/test_wordfreq.py -q"},
+        harness_dir=harness,
+    )
+
+    assert result.get("exit_code") == 0, result
+    assert result.get("verdict") == "PASS", result
+
+
+def test_generic_gate_missing_path_is_an_infrastructure_fail(tmp_path, monkeypatch):
+    """When the gate input genuinely does not exist, pytest exit 4 is a
+    mechanical miss, not a content judgment (F-CLASS-10) — it must not
+    consume the repair budget as a content FAIL."""
+    monkeypatch.setenv("SOLAR_PLAN_VALIDATOR", "1")
+    cge, harness, sprints, sid = _run5_gate_fixture(tmp_path, with_test_file=False)
+
+    result = cge.execute_gate(
+        sprints, sid, {"id": "S2"},
+        {"kind": "deterministic_command",
+         "command": "python3 -m pytest workspace/tests/test_wordfreq.py -q"},
+        harness_dir=harness,
+    )
+
+    assert result.get("verdict") == "FAIL", result
+    assert result.get("verdict_kind") == "infrastructure", result
+
+
+def test_fixed_contract_gate_keeps_harness_cwd(tmp_path, monkeypatch):
+    """Fixed contracts address artifacts as sprints/<sid>/workdir/... from
+    HARNESS_DIR (the P2/P3 proven convention) — their cwd must not move."""
+    import contract_gate_executor
+
+    monkeypatch.setenv("SOLAR_PLAN_VALIDATOR", "1")
+    harness = tmp_path / "harness"
+    sprints = harness / "sprints"
+    (harness / "lib").mkdir(parents=True)
+    sid = "sprint-g3fix5-fixed"
+    _write_json(
+        sprints / f"{sid}.task_graph.json",
+        {
+            "sprint_id": sid,
+            "workflow_contract_id": "code.cli_smoke",
+            "workflow_contract_version": "1.0",
+            "nodes": [{"id": "S2", "status": "reviewing"}],
+        },
+    )
+    tests_dir = sprints / sid / "workdir" / "tests"
+    tests_dir.mkdir(parents=True)
+    (tests_dir / "test_ok.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+
+    result = contract_gate_executor.execute_gate(
+        sprints, sid, {"id": "S2"},
+        {"kind": "deterministic_command",
+         "command": f"python3 -m pytest sprints/{sid}/workdir/tests -q"},
+        harness_dir=harness,
+    )
+
+    assert result.get("exit_code") == 0, result
+
+
 # --- Run-4 findings: plain-sprint acceptance seam + PRD gate demotion --------
 #
 # G3 run 4 (p5-g3-live-rung-20260709T201817Z): the planner completed a valid

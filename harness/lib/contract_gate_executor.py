@@ -173,8 +173,45 @@ def execute_gate(
             # directory would contribute import-time code and config to the
             # gate process. Gate suites must keep fixtures inside test files.
             argv = [*argv, "--noconftest"]
-        popen_args: Any = argv if argv is not None else ["bash", "-lc", command]
         harness = Path(harness_dir) if harness_dir else _harness_dir()
+        # G3 run-5 fix (p5-g3-live-rung-20260709T210652Z): builders execute
+        # with work_dir = sprints/<sid>/workdir and write canonical-alias
+        # paths (workspace/...) relative to it, but this gate ran from
+        # HARNESS_DIR — the contract's workspace/ ≡ sprints/<sid>/workdir/
+        # alias equivalence exists only at validation time, so the gate
+        # exited 4 on files the builder had genuinely written (F-CLASS-16
+        # live on the generic path). Certified-generic gates now run from
+        # the builder's anchor; fixed contracts keep HARNESS_DIR (their
+        # commands address sprints/<sid>/... forms — the P2/P3 convention).
+        gate_cwd = harness
+        if _sprint_is_certified_generic(sprints, sid):
+            workdir = sprints / sid / "workdir"
+            if workdir.is_dir():
+                gate_cwd = workdir
+                if argv is not None and argv[1:3] == ["-m", "pytest"]:
+                    # the contract's alias forms (sprints/<sid>/workdir/X,
+                    # workdir/X) are validation-legal spellings of the same
+                    # root — normalize them onto the new cwd
+                    aliases = (f"sprints/{sid}/workdir/", "workdir/")
+                    rewritten = list(argv[:3])
+                    for token in argv[3:]:
+                        if not token.startswith("-"):
+                            for alias in aliases:
+                                if token.startswith(alias):
+                                    token = token[len(alias):]
+                                    break
+                        rewritten.append(token)
+                    argv = rewritten
+                elif (
+                    argv is not None
+                    and len(argv) >= 2
+                    and not (gate_cwd / argv[1]).exists()
+                    and (harness / argv[1]).exists()
+                ):
+                    # allowlisted harness-shipped scripts (e.g. scripts/...)
+                    # still resolve against the harness when cwd moves
+                    argv = [argv[0], str(harness / argv[1]), *argv[2:]]
+        popen_args: Any = argv if argv is not None else ["bash", "-lc", command]
         env = dict(os.environ)
         if harden_pytest:
             # fix-round 2 finding 3: inherited PYTEST_ADDOPTS / PYTEST_PLUGINS
@@ -189,7 +226,7 @@ def execute_gate(
         try:
             proc = subprocess.run(
                 popen_args,
-                cwd=str(harness),
+                cwd=str(gate_cwd),
                 env=env,
                 capture_output=True,
                 text=True,
@@ -200,7 +237,10 @@ def execute_gate(
             if exit_code == 0:
                 verdict, verdict_kind = "PASS", "content"
                 summary = f"Deterministic gate passed: `{command}` exit 0."
-            elif exit_code == 2 or _looks_unrunnable(output_tail):
+            elif exit_code in (2, 4) or _looks_unrunnable(output_tail):
+                # pytest exit 4 = usage error (e.g. file or directory not
+                # found) — a mechanical miss, not a content judgment
+                # (F-CLASS-10; G3 run 5 burned S2's repair budget on one)
                 # argparse usage errors / missing interpreter targets are
                 # machinery failures, not content judgments
                 verdict, verdict_kind = "FAIL", "infrastructure"
@@ -271,5 +311,6 @@ def _looks_unrunnable(output_tail: str) -> bool:
         "No such file or directory",
         "ModuleNotFoundError",
         "command not found",
+        "file or directory not found",  # pytest usage-error phrasing (exit 4)
     )
     return any(marker in output_tail for marker in markers)
