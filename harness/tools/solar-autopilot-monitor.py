@@ -2591,10 +2591,22 @@ def instruction_for(status: dict, files: dict[str, bool]) -> str:
             "完成后把 status 更新为 phase=prd_ready handoff_to=planner target_role=planner。"
         )
     if handoff == "planner" and files["prd"] and planner_outputs_missing(files):
-        return (
+        instruction = (
             f"请接手 {sid}：读取 .prd.md 和 .contract.md，产出 {sid}.design.md、{sid}.plan.md 和 {sid}.task_graph.json。"
             "task_graph 必须通过 solar-harness graph-scheduler validate。不要问用户拍板；这是 P0 reliability 默认推进。"
         )
+        # P5 G2b: the legacy pane-wake path does not flow through pm_dispatch
+        # submit, so it appends the compile-policy block itself (env-gated
+        # inside the helper; "" when SOLAR_PLAN_VALIDATOR is off).
+        try:
+            import plan_validator  # type: ignore
+
+            policy_block = plan_validator.planner_compile_policy_block(SPRINTS, str(sid))
+        except Exception:
+            policy_block = ""
+        if policy_block:
+            instruction = f"{instruction}\n\n{policy_block}"
+        return instruction
     if (
         handoff in ("builder", "builder_main", "builder_parallel", "builder-lab")
         and files["plan"]

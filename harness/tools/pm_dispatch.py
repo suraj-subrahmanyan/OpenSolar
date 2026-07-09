@@ -1963,6 +1963,26 @@ def cmd_compile_request(args: argparse.Namespace) -> int:
 
 # ── 核心 submit 逻辑 ──────────────────────────────────────────────────────────
 
+def _with_planner_compile_policy(objective: str, sprint_id: str) -> str:
+    """P5 G2b: the submit choke point every role-pool planner dispatch flows
+    through. The G2b battery proved objective-builder-level injection misses
+    live paths (the autopilot role-handoff objective reached the planner with
+    no policy block); enriching HERE covers every caller. Env-gated inside
+    the helper ("" when SOLAR_PLAN_VALIDATOR is off); idempotent so an
+    already-enriched objective (intent_consumer) is not double-appended."""
+    if "## Plan compile policy" in objective:
+        return objective
+    try:
+        import plan_validator  # type: ignore
+
+        policy_block = plan_validator.planner_compile_policy_block(SPRINTS_DIR, sprint_id)
+    except Exception:
+        policy_block = ""
+    if policy_block:
+        return f"{objective}\n\n{policy_block}"
+    return objective
+
+
 def cmd_submit(args: argparse.Namespace) -> int:
     role = str(args.role or "builder")
     objective = str(args.objective or "").strip()
@@ -1994,6 +2014,8 @@ def cmd_submit(args: argparse.Namespace) -> int:
     task_type = str(args.task_type or "")
     dry_run: bool = bool(args.dry_run)
     context = str(args.context or "")
+    if normalize_role(role) == "planner":
+        objective = _with_planner_compile_policy(objective, sprint_id)
     task_graph_node = load_task_graph_node(sprint_id, node_id)
     capsule_submit = _capsule_submit_metadata(task_graph_node)
     logical_operator = str(capsule_submit.get("logical_operator") or (task_graph_node or {}).get("logical_operator") or "")
