@@ -128,7 +128,8 @@ def execute_gate(
         generation_mode = "deterministic_command"
         started = datetime.datetime.now(datetime.timezone.utc)
         argv = _gate_argv(command)
-        if argv is not None and argv[1:3] == ["-m", "pytest"]:
+        pytest_gate = argv is not None and argv[1:3] == ["-m", "pytest"]
+        if pytest_gate:
             # G2b review finding 3: pytest auto-imports conftest.py from every
             # positional path's directory chain, so a planner/builder-writable
             # directory would contribute import-time code and config to the
@@ -137,6 +138,12 @@ def execute_gate(
         popen_args: Any = argv if argv is not None else ["bash", "-lc", command]
         harness = Path(harness_dir) if harness_dir else _harness_dir()
         env = dict(os.environ)
+        if pytest_gate:
+            # fix-round 2 finding 3: inherited PYTEST_ADDOPTS / PYTEST_PLUGINS
+            # load caller-named plugins inside the gate process, overriding
+            # the isolation --noconftest establishes.
+            env.pop("PYTEST_ADDOPTS", None)
+            env.pop("PYTEST_PLUGINS", None)
         lib_dir = str(harness / "lib")
         env["PYTHONPATH"] = os.pathsep.join(
             [lib_dir, env.get("PYTHONPATH", "")]

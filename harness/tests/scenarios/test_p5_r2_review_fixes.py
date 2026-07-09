@@ -243,3 +243,66 @@ def test_launch_node_untouched_when_validator_off(tmp_path, monkeypatch, copy_na
 
     assert result.get("status") == "dry_run", result
     assert result.get("dispatch_file") and Path(result["dispatch_file"]).exists()
+
+
+# --- Finding 3: gate process must not load plugins from inherited env --------
+
+
+def _gate_harness(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A tmp harness with one passing test file plus an env-injectable plugin
+    that writes a marker on load (the review probe's shape)."""
+    harness = tmp_path / "harness"
+    sprints = tmp_path / "sprints"
+    plugin_dir = tmp_path / "plugins"
+    (harness / "tests").mkdir(parents=True)
+    (harness / "lib").mkdir()
+    plugin_dir.mkdir()
+    sprints.mkdir()
+    marker = tmp_path / "plugin-loaded.txt"
+    (harness / "tests" / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8"
+    )
+    (plugin_dir / "r2_extra_plugin.py").write_text(
+        "from pathlib import Path\n"
+        f"MARKER = Path({str(marker)!r})\n"
+        "def pytest_configure(config):\n"
+        "    MARKER.write_text('loaded\\n', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    return harness, sprints, marker
+
+
+def _run_env_plugin_gate(tmp_path, monkeypatch, env_var: str, env_value: str) -> tuple[dict, Path]:
+    import contract_gate_executor
+
+    harness, sprints, marker = _gate_harness(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "plugins"))
+    monkeypatch.setenv(env_var, env_value)
+    result = contract_gate_executor.execute_gate(
+        sprints,
+        "sprint-r2fix3",
+        {"id": "N1"},
+        {"kind": "deterministic_command", "command": "python3 -m pytest tests/test_ok.py -q"},
+        harness_dir=harness,
+    )
+    return result, marker
+
+
+def test_gate_ignores_inherited_pytest_addopts_when_validator_on(tmp_path, monkeypatch):
+    """The review probe: PYTEST_ADDOPTS=-p <module> in the parent environment
+    loaded a caller-named plugin inside the gate process, overriding the
+    isolation --noconftest establishes."""
+    monkeypatch.setenv("SOLAR_PLAN_VALIDATOR", "1")
+    result, marker = _run_env_plugin_gate(tmp_path, monkeypatch, "PYTEST_ADDOPTS", "-p r2_extra_plugin")
+
+    assert result.get("exit_code") == 0, result
+    assert not marker.exists(), "inherited PYTEST_ADDOPTS loaded a plugin in the gate process"
+
+
+def test_gate_ignores_inherited_pytest_plugins_when_validator_on(tmp_path, monkeypatch):
+    """PYTEST_PLUGINS is the same injection channel by another name."""
+    monkeypatch.setenv("SOLAR_PLAN_VALIDATOR", "1")
+    result, marker = _run_env_plugin_gate(tmp_path, monkeypatch, "PYTEST_PLUGINS", "r2_extra_plugin")
+
+    assert result.get("exit_code") == 0, result
+    assert not marker.exists(), "inherited PYTEST_PLUGINS loaded a plugin in the gate process"
