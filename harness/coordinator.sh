@@ -3270,6 +3270,15 @@ PY
 
 **不要写业务代码，不要重启 harness，不要触碰 live tmux pane。**"
 
+    # G2b review finding 5: this legacy planner dispatch never carried the
+    # compile policy. The helper is env-gated (SOLAR_PLAN_VALIDATOR): it
+    # prints nothing when off, keeping the dispatch file byte-identical.
+    local planner_compile_policy_block=""
+    planner_compile_policy_block=$(python3 "$HARNESS_DIR/lib/plan_validator.py" planner-policy-block "$sid" --sprints-dir "$SPRINTS_DIR" 2>/dev/null || true)
+    if [[ -n "$planner_compile_policy_block" ]]; then
+      append_dispatch "$sid" "$planner_compile_policy_block"
+    fi
+
     dispatch_to_planner "$sid" "planner_design_plan" "$SPRINTS_DIR/${sid}.dispatch.md"
     local rc=$?
     if (( rc == 2 )); then

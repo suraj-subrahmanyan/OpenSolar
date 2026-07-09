@@ -49,8 +49,10 @@ PLANNABLE_GATE_KINDS = {"llm_eval", "deterministic_command"}
 # Launch allowlist (owner decision 2): matched as a TOKEN prefix, not a
 # substring — "python3 -m pytest2" must not ride on "python3 -m pytest"
 # (vacuous/lookalike-gate hazard, P3 run-2 D2).
+GATE_PYTEST_PREFIX = ("python3", "-m", "pytest")
+
 GATE_COMMAND_ALLOWLIST = (
-    ("python3", "-m", "pytest"),
+    GATE_PYTEST_PREFIX,
     ("python3", "scripts/validate_rsi_demo_report.py"),
 )
 
@@ -85,6 +87,50 @@ def _gate_command_denied_option(tokens: List[str]) -> Optional[str]:
                 return token
     return None
 
+
+# Selection options that consume the NEXT token; their value must not be
+# mistaken for a positional path. Attached forms (-kexpr, --deselect=x) need
+# no entry here.
+GATE_COMMAND_VALUE_OPTIONS = (
+    "-k", "-m", "-W", "--deselect", "--ignore", "--ignore-glob", "--maxfail", "--tb",
+)
+
+# The repo test tree is a legal pytest gate target alongside the contract's
+# artifact roots (workspace/, sprints/<sid>/workdir/, workdir/ — where the
+# builder writes the tests the gate runs).
+GATE_PYTEST_TESTS_ROOT = {"canonical": "tests/"}
+
+
+def _gate_pytest_denied_path(tokens: List[str], artifact_roots: Dict[str, Any]) -> Optional[str]:
+    """Path-hygiene check for a pytest gate suffix (G2b review finding 3).
+
+    pytest treats every non-option token as a collection path and imports
+    conftest.py along it, and a PATHLESS pytest collects the whole gate cwd
+    (the harness dir). So positional paths are required, and each must
+    normalize-then-check into the repo test root or a declared artifact root —
+    the same containment rule as write_scope. Returns the offending token,
+    "" when no positional path was given, or None when the suffix is clean.
+    """
+    positional: List[str] = []
+    skip_next = False
+    for token in tokens:
+        if skip_next:
+            skip_next = False
+            continue
+        if token.startswith("-"):
+            if token in GATE_COMMAND_VALUE_OPTIONS:
+                skip_next = True
+            continue
+        positional.append(token)
+    if not positional:
+        return ""
+    for token in positional:
+        path_part = token.split("::", 1)[0]
+        if wc.resolve_scope_path(path_part, artifact_roots) is None and \
+                wc.resolve_scope_path(path_part, GATE_PYTEST_TESTS_ROOT) is None:
+            return token
+    return None
+
 # R2(f): the repair-budget ceiling. instantiate stamps 0/1 from on_fail; 2 is
 # headroom for future policies. Anything beyond is an unbounded repair loop.
 MAX_REPAIR_ATTEMPTS_CEILING = 2
@@ -99,6 +145,7 @@ DEFAULT_MAX_NODES = 12
 ERROR_PLAN_GATE_KIND_ILLEGAL = "PLAN_GATE_KIND_ILLEGAL"
 ERROR_PLAN_GATE_COMMAND_NOT_ALLOWLISTED = "PLAN_GATE_COMMAND_NOT_ALLOWLISTED"
 ERROR_PLAN_GATE_OPTION_DENIED = "PLAN_GATE_OPTION_DENIED"
+ERROR_PLAN_GATE_PATH_DENIED = "PLAN_GATE_PATH_DENIED"
 ERROR_PLAN_REPAIR_BUDGET_MISSING = "PLAN_REPAIR_BUDGET_MISSING"
 ERROR_PLAN_GRAPH_EMPTY = "PLAN_GRAPH_EMPTY"
 ERROR_PLAN_GRAPH_TOO_LARGE = "PLAN_GRAPH_TOO_LARGE"
@@ -116,7 +163,9 @@ PLAN_CERTIFICATE_SCHEMA = "solar.plan_certificate.v1"
 # goal/description/acceptance are worker-visible execution text (the
 # dispatcher renders node.goal into the worker instruction), so they are
 # governed: editing them after a PASS must invalidate the certificate
-# (review G1+G1b finding 2).
+# (review G1+G1b finding 2). read_scope / required_skills /
+# required_capabilities are likewise rendered into worker dispatch text and
+# drive operator selection, so they are governed too (G2b review finding 2).
 CERTIFICATE_NODE_FIELDS = (
     "id",
     "depends_on",
@@ -127,12 +176,15 @@ CERTIFICATE_NODE_FIELDS = (
     "allowed_operators",
     "evaluator_gate",
     "write_scope",
+    "read_scope",
     "proof_obligations",
     "max_repair_attempts",
     "on_human_review",
     "goal",
     "description",
     "acceptance",
+    "required_skills",
+    "required_capabilities",
 )
 
 
@@ -299,7 +351,8 @@ def validate_plan(
                     declared=str(gate.get("command") or ""),
                 ))
             else:
-                denied = _gate_command_denied_option(command_tokens[len(matched_prefix):])
+                suffix_tokens = command_tokens[len(matched_prefix):]
+                denied = _gate_command_denied_option(suffix_tokens)
                 if denied is not None:
                     errors.append(wc.compile_error(
                         ERROR_PLAN_GATE_OPTION_DENIED, node_id,
@@ -309,6 +362,28 @@ def validate_plan(
                         f"pass test paths and selection/reporting flags only",
                         declared=denied,
                     ))
+                if matched_prefix == GATE_PYTEST_PREFIX:
+                    denied_path = _gate_pytest_denied_path(suffix_tokens, artifact_roots)
+                    if denied_path == "":
+                        errors.append(wc.compile_error(
+                            ERROR_PLAN_GATE_PATH_DENIED, node_id,
+                            f"node {node_id}: deterministic_command {gate.get('command')!r} names "
+                            f"no test path — a pathless pytest collects the whole gate cwd; pass "
+                            f"explicit paths under {GATE_PYTEST_TESTS_ROOT['canonical']!r} or a "
+                            f"declared artifact root",
+                            declared=str(gate.get("command") or ""),
+                        ))
+                    elif denied_path is not None:
+                        errors.append(wc.compile_error(
+                            ERROR_PLAN_GATE_PATH_DENIED, node_id,
+                            f"node {node_id}: pytest gate path {denied_path!r} resolves to no "
+                            f"trusted root — paths must normalize into "
+                            f"{GATE_PYTEST_TESTS_ROOT['canonical']!r} or a declared artifact root "
+                            f"(canonical: {artifact_roots.get('canonical')!r}, aliases: "
+                            f"{[str(a) for a in artifact_roots.get('aliases') or []]}); absolute "
+                            f"paths and '..' traversal never resolve",
+                            declared=denied_path,
+                        ))
 
         # R2(f): the repair budget is stamped at birth (contract-determined on
         # the fixed path; planner-declared here), never a runtime default.
@@ -583,19 +658,23 @@ def _record_status_bounce(sprints_dir: Path, sid: str, bounce_count: int, graph_
     4: the errors artifact was the ONLY store, and deleting it reset the retry
     budget so a graph never terminalized). Metadata merge only — status/phase
     are untouched, and transition_status preserves unknown keys, so the record
-    survives later transitions."""
+    survives later transitions.
+
+    G2b review finding 4: the merge goes through the locked
+    runtime_status.merge_status_fields — a stale full-object write here could
+    revert a status transition that landed between read and write."""
     status_path = sprints_dir / f"{sid}.status.json"
     if not status_path.exists():
         return
     try:
-        data = json.loads(status_path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return
-        data[STATUS_BOUNCE_KEY] = {
-            "bounce_count": int(bounce_count),
-            "graph_hash": str(graph_hash),
-        }
-        _atomic_write_json(status_path, data)
+        from runtime_status import merge_status_fields  # noqa: WPS433
+
+        merge_status_fields(status_path, {
+            STATUS_BOUNCE_KEY: {
+                "bounce_count": int(bounce_count),
+                "graph_hash": str(graph_hash),
+            },
+        })
     except Exception:
         pass
 
@@ -895,7 +974,11 @@ def planner_compile_policy_block(
         "   (PLAN_GATE_KIND_ILLEGAL). \"deterministic_command\" only with a",
         f"   command from the allowlist: {allowlist}; import/config-control",
         f"   options ({', '.join(GATE_COMMAND_OPTION_DENYLIST)}) are denied",
-        "   (PLAN_GATE_OPTION_DENIED).",
+        "   (PLAN_GATE_OPTION_DENIED). A pytest gate must name explicit test",
+        f"   paths under {GATE_PYTEST_TESTS_ROOT['canonical']!r} or a declared",
+        "   artifact root — pathless, absolute, or traversing paths fail",
+        "   PLAN_GATE_PATH_DENIED. The gate runs pytest with --noconftest, so",
+        "   keep fixtures inside the test files.",
         f"4. max_repair_attempts — integer 0..{MAX_REPAIR_ATTEMPTS_CEILING}, or",
         "   derivable from evaluator_gate.on_fail; a node with neither fails",
         "   PLAN_REPAIR_BUDGET_MISSING.",
@@ -1000,6 +1083,33 @@ def _main_check_generic_dispatch(argv: List[str]) -> int:
     return 0 if verdict.get("ok") else 3
 
 
+def _main_planner_policy_block(argv: List[str]) -> int:
+    """Print the planner compile-policy block for shell dispatch surfaces
+    (solar-harness.sh wake, coordinator.sh drafting flow — G2b review finding
+    5: those legacy planner dispatches never carried the policy). Env-gated
+    like the library call: prints nothing and exits 0 when
+    SOLAR_PLAN_VALIDATOR is off, so legacy dispatch text stays byte-identical."""
+    parser = argparse.ArgumentParser(prog="plan_validator planner-policy-block")
+    parser.add_argument("sid")
+    parser.add_argument("--sprints-dir", required=True)
+    parser.add_argument("--config-dir", default=None)
+    parser.add_argument("--workflows-dir", default=None)
+    args = parser.parse_args(argv)
+    try:
+        block = planner_compile_policy_block(
+            args.sprints_dir,
+            args.sid,
+            config_dir=args.config_dir,
+            workflows_dir=args.workflows_dir,
+        )
+    except Exception as exc:
+        print(f"plan_validator: {exc}", file=sys.stderr)
+        return 2
+    if block:
+        print(block)
+    return 0
+
+
 def _main_validate_file(argv: List[str]) -> int:
     parser = argparse.ArgumentParser(prog="plan_validator", description=__doc__)
     parser.add_argument("task_graph", help="path to a <sid>.task_graph.json")
@@ -1025,6 +1135,8 @@ def main(argv=None) -> int:
         return _main_compile_generic(raw[1:])
     if raw and raw[0] == "check-generic-dispatch":
         return _main_check_generic_dispatch(raw[1:])
+    if raw and raw[0] == "planner-policy-block":
+        return _main_planner_policy_block(raw[1:])
     return _main_validate_file(raw)
 
 

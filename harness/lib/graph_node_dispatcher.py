@@ -7390,6 +7390,28 @@ def dispatch_queue_item(item: dict[str, Any], dry_run: bool = False, ttl: int = 
     human_handoff = _prepare_human_search_handoff(sid, graph_path, node, dry_run=dry_run)
     if human_handoff is not None:
         return human_handoff
+    # P5 G2b review finding 1: drain_queue dispatches items through here
+    # without re-checking the certificate — an item enqueued before a
+    # post-PASS graph edit (or a direct dispatch_queue_item call) wrote an
+    # instruction file for an uncertified graph. Same guard as dispatch_ready;
+    # an unreadable graph falls back to {} (non-generic → guard skips), which
+    # preserves the legacy no-graph-file behavior.
+    if _plan_validator_enabled():
+        try:
+            guard_graph = load_graph(graph_path)
+        except Exception:
+            guard_graph = {}
+        validator_refusal = _plan_validator_dispatch_guard(guard_graph)
+        if validator_refusal is not None:
+            _append_event(sid, {
+                "event": "plan_validator_dispatch_refused",
+                "by": "graph-dispatch",
+                "severity": "error",
+                "data": {"graph": str(graph_path), "node": node_id, **validator_refusal},
+            })
+            if not dry_run:
+                _mark_graph_node(graph_path, node_id, "pending", clear_assignment=True)
+            return {**validator_refusal, "node": node_id, "dispatch_id": dispatch_id, "requeued": False}
     use_operator_pool = (
         current_status in {"assigned", "pending", "queued"}
         and (not current_dispatch_id or current_dispatch_id == dispatch_id)

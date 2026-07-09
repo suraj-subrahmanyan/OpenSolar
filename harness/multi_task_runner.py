@@ -1505,6 +1505,35 @@ def schedule_once(args: argparse.Namespace) -> dict[str, Any]:
         try:
             graph = load_graph(graph_path)
             summaries.append(status_summary_for_graph(graph_path))
+            # P5 G2b review finding 1: this root entrypoint launched uncertified
+            # generic graphs — the validator dispatch guard only covered the
+            # graph_node_dispatcher paths. Same guard as lib/multi_task_runner.
+            try:
+                import plan_validator  # type: ignore
+
+                plan_guard = plan_validator.check_planner_graph_dispatchable(graph)
+            except Exception as guard_exc:
+                if str(os.environ.get("SOLAR_PLAN_VALIDATOR") or "").strip().lower() in {"1", "true", "yes", "on"}:
+                    skipped.append({
+                        "graph": str(graph_path),
+                        "reason": "plan_validator_dispatch_refused",
+                        "errors": [f"PLAN_VALIDATOR_UNCHECKABLE:{type(guard_exc).__name__}"],
+                    })
+                    continue
+                plan_guard = {"ok": True}
+            if not plan_guard.get("ok"):
+                errors = []
+                for error in plan_guard.get("errors") or []:
+                    if isinstance(error, dict):
+                        errors.append(f"{error.get('code')}:{error.get('node_id', '?')}")
+                    else:
+                        errors.append(str(error))
+                skipped.append({
+                    "graph": str(graph_path),
+                    "reason": "plan_validator_dispatch_refused",
+                    "errors": errors,
+                })
+                continue
             candidates = ready_nodes(graph)
         except Exception as exc:
             skipped.append({"graph": str(graph_path), "reason": "graph_error", "error": str(exc)})

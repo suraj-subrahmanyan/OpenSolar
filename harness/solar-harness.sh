@@ -2196,6 +2196,18 @@ else:
 ${target_task}
 DISPATCH_EOF
 
+  # G2b review finding 5: a planner woken through this dispatch file (or the
+  # fixed-pane send-keys fallback below) never saw the compile policy. The
+  # helper is env-gated: with SOLAR_PLAN_VALIDATOR off it prints nothing and
+  # the dispatch file stays byte-identical.
+  if [[ "$dispatch_role" == "planner" ]]; then
+    local planner_compile_policy_block=""
+    planner_compile_policy_block=$(python3 "$HARNESS_DIR/lib/plan_validator.py" planner-policy-block "$sid" --sprints-dir "$SPRINTS_DIR" 2>/dev/null || true)
+    if [[ -n "$planner_compile_policy_block" ]]; then
+      printf '\n%s\n' "$planner_compile_policy_block" >> "$SPRINTS_DIR/${sid}.dispatch.md"
+    fi
+  fi
+
   if [[ "${SOLAR_NO_DISPATCH:-0}" == "1" || -f "$HARNESS_DIR/run/no-dispatch.flag" ]]; then
     warn "no-dispatch flag active; wake wrote dispatch file but did not send: ${dispatch_role:+operator-pool:${dispatch_role}}${dispatch_role:+ / }${target_pane}"
     return 4
