@@ -258,6 +258,15 @@ cleanup() {
     kill "$status_pid" >/dev/null 2>&1 || true
     wait "$status_pid" >/dev/null 2>&1 || true
   fi
+  # G3 zombie-factory fix: mark the sandbox run terminal and reap its
+  # registered daemons (watchdog-first) BEFORE killing sessions. Killing
+  # only the tmux sessions left coordinator/watchdog daemons alive and
+  # marker-less — they respawned harness startup for 30+ hours and their
+  # status-server sweeps killed later live runs' servers.
+  if [[ -n "$sandbox" && -f "$sandbox/home/.solar/harness/lib/run_process_registry.py" ]]; then
+    python3 "$sandbox/home/.solar/harness/lib/run_process_registry.py" \
+      teardown --run-id harness --grace 5 >/dev/null 2>&1 || true
+  fi
   if command -v tmux >/dev/null 2>&1; then
     tmux kill-session -t "$tmux_session" >/dev/null 2>&1 || true
     tmux kill-session -t "$tmux_lab_session" >/dev/null 2>&1 || true

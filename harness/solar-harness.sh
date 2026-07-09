@@ -1218,6 +1218,14 @@ show_status() {
 kill_harness() {
   cleanup_legacy_sessions
   local killed=0
+  # G3 zombie-factory fix: the registry teardown (write the run-terminal
+  # marker, reap registered daemons watchdog-first) must run on EVERY kill,
+  # not only when the tmux session still exists — e2e cleanups kill sessions
+  # directly, and completed sandboxes whose kill skipped this left
+  # marker-less watchdogs respawning harness startup for 30+ hours.
+  if [[ -f "$HARNESS_DIR/lib/run_process_registry.py" ]]; then
+    python3 "$HARNESS_DIR/lib/run_process_registry.py" teardown --run-id harness --grace 5 >/dev/null 2>&1 || true
+  fi
   if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     log "关闭..."
     # Mark active sprints as interrupted
@@ -1235,13 +1243,9 @@ if data.get("status") in ("active", "reviewing"):
     )
 PY
     done
-    # Lane 0 PR-3 (F4 / AC-R7.4): registry teardown BEFORE killing sessions —
-    # marks the harness run terminal (suppressing watchdog respawn, d5858918)
-    # then reaps registered daemons watchdog-first. Module-guarded, inert
-    # until Lane 0.5 merges.
-    if [[ -f "$HARNESS_DIR/lib/run_process_registry.py" ]]; then
-      python3 "$HARNESS_DIR/lib/run_process_registry.py" teardown --run-id harness --grace 5 >/dev/null 2>&1 || true
-    fi
+    # Registry teardown already ran unconditionally above (Lane 0 PR-3 /
+    # F4 / AC-R7.4 semantics preserved: marker + watchdog-first reap happen
+    # BEFORE the session dies).
     tmux kill-session -t "$SESSION_NAME"
     killed=1
   fi

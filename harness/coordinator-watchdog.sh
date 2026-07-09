@@ -353,6 +353,11 @@ _load_layout_panes
 ensure_tmux_sessions() {
   local missing=0
 
+  # G3 zombie-factory fix: never rebuild sessions for a terminal run.
+  if [[ -f "$HARNESS_DIR/run/process-registry/harness.terminal" ]]; then
+    return 0
+  fi
+
   if ! tmux has-session -t "$SESSION_NAME" &>/dev/null; then
     warn "tmux session missing: ${SESSION_NAME}; rebuilding Product Delivery"
     TERM=dumb "$HARNESS_DIR/solar-harness.sh" --skip-doctor "$HOME" >> "$HARNESS_DIR/.watchdog-launchd.log" 2>&1 || true
@@ -641,6 +646,18 @@ run_watchdog() {
   local pane_ticks=0
 
   while true; do
+    # G3 zombie-factory fix: a run-terminal marker means this run is OVER —
+    # the watchdog itself exits instead of merely suppressing coordinator
+    # respawn (F-043 covered respawn only; 18 marker-less watchdogs from
+    # completed e2e sandboxes kept rebuilding sessions and re-running
+    # harness startup for up to 30h, and their stale-code status-server
+    # sweeps killed live runs' servers).
+    if [[ -f "$HARNESS_DIR/run/process-registry/harness.terminal" ]]; then
+      log "run-terminal marker present — watchdog exiting"
+      rm -f "$WATCHDOG_PID_FILE"
+      break
+    fi
+
     # Coordinator 检查 (每 CHECK_INTERVAL)
     if (( coord_ticks >= CHECK_INTERVAL )); then
       do_check || {
@@ -826,6 +843,16 @@ case "${1:-help}" in
     daemon_loop_count=0
 
     while true; do
+      # G3 zombie-factory fix: a run-terminal marker means this run is OVER —
+      # the watchdog exits instead of merely suppressing coordinator respawn
+      # (F-043 covered respawn only; marker-less/suppression-only watchdogs
+      # from completed e2e sandboxes kept rebuilding sessions for 30+ hours
+      # and their stale-code status-server sweeps killed live runs' servers).
+      if [[ -f "$HARNESS_DIR/run/process-registry/harness.terminal" ]]; then
+        log "run-terminal marker present — watchdog exiting"
+        rm -f "$WATCHDOG_PID_FILE"
+        exit 0
+      fi
       if (( coord_ticks >= CHECK_INTERVAL )); then
         do_check || {
           err "Watchdog daemon 因熔断退出"
