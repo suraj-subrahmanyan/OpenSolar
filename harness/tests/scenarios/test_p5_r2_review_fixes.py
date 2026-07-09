@@ -306,3 +306,92 @@ def test_gate_ignores_inherited_pytest_plugins_when_validator_on(tmp_path, monke
 
     assert result.get("exit_code") == 0, result
     assert not marker.exists(), "inherited PYTEST_PLUGINS loaded a plugin in the gate process"
+
+
+# --- Finding 6: validator-off pytest gates keep legacy behavior --------------
+
+
+def _fixed_contract_suite(tmp_path: Path) -> tuple[Path, Path, str]:
+    """The review probe's fixed-contract shape: a workdir suite whose fixture
+    lives in a local conftest.py (code.cli_smoke's validator command runs
+    `python3 -m pytest sprints/<sid>/workdir/tests -q`)."""
+    sid = "sprint-r2fix6"
+    harness = tmp_path / "harness"
+    sprints = harness / "sprints"
+    test_dir = sprints / sid / "workdir" / "tests"
+    test_dir.mkdir(parents=True)
+    (harness / "lib").mkdir(parents=True)
+    (test_dir / "conftest.py").write_text(
+        "import pytest\n\n\n@pytest.fixture\ndef answer():\n    return 42\n",
+        encoding="utf-8",
+    )
+    (test_dir / "test_uses_fixture.py").write_text(
+        "def test_answer(answer):\n    assert answer == 42\n", encoding="utf-8"
+    )
+    return harness, sprints, sid
+
+
+def test_gate_preserves_conftest_for_fixed_contract_suites_when_validator_off(tmp_path):
+    """The review probe: with the validator off, an unconditional --noconftest
+    broke a legacy fixed-contract suite that keeps fixtures in conftest.py —
+    the flag-off path must stay byte-identical to pre-P5 behavior."""
+    import contract_gate_executor
+
+    harness, sprints, sid = _fixed_contract_suite(tmp_path)
+    result = contract_gate_executor.execute_gate(
+        sprints,
+        sid,
+        {"id": "N1"},
+        {
+            "kind": "deterministic_command",
+            "command": f"python3 -m pytest sprints/{sid}/workdir/tests -q",
+        },
+        harness_dir=harness,
+    )
+
+    assert result.get("ok") is True, result
+    assert result.get("exit_code") == 0, result
+
+
+def test_gate_env_passthrough_preserved_when_validator_off(tmp_path, monkeypatch):
+    """Flag-off inertness for finding 3's sanitization: with the validator
+    off, the gate environment passes through unchanged (PYTEST_ADDOPTS
+    included), exactly as before the fix-round."""
+    result, marker = _run_env_plugin_gate(tmp_path, monkeypatch, "PYTEST_ADDOPTS", "-p r2_extra_plugin")
+
+    assert result.get("exit_code") == 0, result
+    assert marker.exists(), "flag-off gate env must pass through unchanged"
+
+
+def test_gate_still_pins_noconftest_when_validator_on(tmp_path, monkeypatch):
+    """Scoping must not weaken the validator-on hardening: a conftest.py
+    inside the (legal) artifact-root gate path still must not run import-time
+    code in the gate process."""
+    import contract_gate_executor
+
+    monkeypatch.setenv("SOLAR_PLAN_VALIDATOR", "1")
+    harness, sprints, sid = _fixed_contract_suite(tmp_path)
+    marker = tmp_path / "conftest-imported.txt"
+    conftest = sprints / sid / "workdir" / "tests" / "conftest.py"
+    conftest.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('loaded', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    (sprints / sid / "workdir" / "tests" / "test_uses_fixture.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8"
+    )
+
+    result = contract_gate_executor.execute_gate(
+        sprints,
+        sid,
+        {"id": "N1"},
+        {
+            "kind": "deterministic_command",
+            "command": f"python3 -m pytest sprints/{sid}/workdir/tests -q",
+        },
+        harness_dir=harness,
+    )
+
+    assert result.get("exit_code") == 0, result
+    assert not marker.exists(), "conftest.py was imported by a validator-on gate process"

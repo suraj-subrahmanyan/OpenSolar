@@ -448,11 +448,15 @@ def test_policy_block_teaches_the_path_rule(monkeypatch):
     assert "PLAN_GATE_PATH_DENIED" in block
 
 
-def test_execute_gate_does_not_import_conftest_from_gate_paths(tmp_path):
+def test_execute_gate_does_not_import_conftest_from_gate_paths(tmp_path, monkeypatch):
     """The review probe, executor side: a conftest.py inside the (legal)
     artifact-root gate path must not run import-time code in the gate
-    process — the executor pins --noconftest."""
+    process — the executor pins --noconftest for validator-governed gates
+    (fix-round 2 finding 6 scoped the hardening to SOLAR_PLAN_VALIDATOR;
+    the flag-off legacy path is covered by test_p5_r2_review_fixes.py)."""
     import contract_gate_executor
+
+    monkeypatch.setenv("SOLAR_PLAN_VALIDATOR", "1")
 
     harness = tmp_path / "harness"
     sprints = tmp_path / "sprints"

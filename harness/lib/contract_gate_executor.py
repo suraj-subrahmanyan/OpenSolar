@@ -67,6 +67,12 @@ def _timeout_seconds() -> float:
         return 300.0
 
 
+def _plan_validator_enabled() -> bool:
+    return str(os.environ.get("SOLAR_PLAN_VALIDATOR", "") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 def _gate_argv(command: str) -> list[str] | None:
     """Map a contract gate command string to argv; None means bash -lc."""
     try:
@@ -128,8 +134,15 @@ def execute_gate(
         generation_mode = "deterministic_command"
         started = datetime.datetime.now(datetime.timezone.utc)
         argv = _gate_argv(command)
-        pytest_gate = argv is not None and argv[1:3] == ["-m", "pytest"]
-        if pytest_gate:
+        # Pytest hardening is scoped to the plan-validator flag (fix-round 2
+        # finding 6): validator-governed planner gates must not import
+        # conftest.py or env-named plugins, but a validator-OFF fixed-contract
+        # gate (e.g. code.cli_smoke's sprints/<sid>/workdir/tests suite, whose
+        # fixtures live in a local conftest.py) keeps legacy pytest behavior.
+        harden_pytest = (
+            argv is not None and argv[1:3] == ["-m", "pytest"] and _plan_validator_enabled()
+        )
+        if harden_pytest:
             # G2b review finding 3: pytest auto-imports conftest.py from every
             # positional path's directory chain, so a planner/builder-writable
             # directory would contribute import-time code and config to the
@@ -138,7 +151,7 @@ def execute_gate(
         popen_args: Any = argv if argv is not None else ["bash", "-lc", command]
         harness = Path(harness_dir) if harness_dir else _harness_dir()
         env = dict(os.environ)
-        if pytest_gate:
+        if harden_pytest:
             # fix-round 2 finding 3: inherited PYTEST_ADDOPTS / PYTEST_PLUGINS
             # load caller-named plugins inside the gate process, overriding
             # the isolation --noconftest establishes.
