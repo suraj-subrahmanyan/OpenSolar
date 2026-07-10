@@ -347,9 +347,11 @@ export SOLAR_MULTI_TASK_DEFAULT_PROVIDERS=openai
 # generated env is authoritative for every sandbox process and the flags were
 # left to shell inheritance — the operatord lineage never saw them). Explicit,
 # never inherited.
-# G4 default-on: SOLAR_GATE_LEDGER / SOLAR_PLAN_VALIDATOR resolve ON at the
-# parser level — deliberately NOT exported so e2e runs prove the runtime
-# default a fresh machine gets (probe: plan_validator.py env-status).
+# G4 default-on: the governed-spine flags (plan validator, gate ledger)
+# resolve ON at the parser level — deliberately NOT set here so e2e runs
+# prove the runtime default a fresh machine gets (probe: env-status).
+# Their names must never appear in this generated file: the rung gate is
+# a bare substring grep expecting zero matches.
 export SOLAR_PRODUCT_MODE=1
 export SOLAR_WORKFLOW_ROUTER=1
 export SOLAR_INTAKE_WORKSPACE_ROOT=$(printf '%q' "$workspace")
