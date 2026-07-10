@@ -1,0 +1,152 @@
+name: OpenJiuwen Fast System Tests
+
+on:
+  push:
+    branches:
+      - openJiuwen-Solar
+      - ci/openjiuwen-fast-system-tests
+  pull_request:
+    branches:
+      - openJiuwen-Solar
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openjiuwen-fast-system-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deterministic-system-tests:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: orchestration-state
+            name: Orchestration state and dispatch
+            command: >-
+              python -m pytest -q
+              harness/tests/graph/test_pm_inbox_closeout_reconcile.py
+              harness/tests/graph/test_graph_status_sync.py
+              harness/tests/graph/test_parent_ready_closeout.py
+              harness/tests/graph/test_task_graph_state_io.py
+              harness/tests/graph/test_graph_dispatch_lease_busy.py
+              harness/tests/graph/test_graph_dispatch_submit.py
+              harness/tests/graph/test_worker_assignment_reasons.py
+              harness/tests/test_eval_verdict_evidence_gate_wiring.py
+              harness/tests/test_pm_dispatch.py
+              --junitxml="$EVIDENCE_DIR/junit.xml"
+          - id: broker-e2e
+            name: Broker and activation proof end to end
+            command: >-
+              python -m pytest -q
+              harness/tests/integration/test_end_to_end.py
+              --junitxml="$EVIDENCE_DIR/junit.xml"
+          - id: research-pipeline
+            name: Research SQLite pipeline end to end
+            command: >-
+              python -m pytest -q
+              harness/tests/research/integration/test_pipeline.py
+              --junitxml="$EVIDENCE_DIR/junit.xml"
+          - id: livework-api
+            name: Live-work API workflows
+            command: >-
+              python -m pytest -q
+              harness/tests/livework/test_e2e_user_flow.py
+              harness/tests/livework/test_integration_s04.py
+              --junitxml="$EVIDENCE_DIR/junit.xml"
+          - id: frontdoor-ingress
+            name: Front-door ingestion end to end
+            command: >-
+              python -m pytest -q
+              harness/tests/test_frontdoor_ingress_e2e.py
+              --junitxml="$EVIDENCE_DIR/junit.xml"
+          - id: autosci-local
+            name: AutoSci local lifecycle
+            command: >-
+              python -m pytest -q
+              harness/tests/integration/test_autosci_ingest_demo.py
+              harness/tests/integration/test_autosci_review_demo.py
+              harness/tests/integration/test_autosci_research_scheduler_demo.py
+              --junitxml="$EVIDENCE_DIR/junit.xml"
+          - id: installed-status-server
+            name: Installed status server process
+            command: bash scripts/smoke-status-server-e2e.sh
+
+    steps:
+      - name: Checkout pinned revision
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            pytest==9.0.3 \
+            Flask==3.1.2 \
+            jsonschema==4.25.1 \
+            PyYAML==6.0.3 \
+            requests==2.34.2 \
+            beautifulsoup4==4.14.3
+          python -m pip check
+
+      - name: Run ${{ matrix.name }}
+        shell: bash
+        env:
+          AUTOSCI_DISABLE_NETWORK_FETCH: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+          PYTHONHASHSEED: "0"
+          PYTHONPATH: harness
+          SOLAR_GRAPH_BUILDER_OPERATOR_POOL: "0"
+          TEST_COMMAND: ${{ matrix.command }}
+          TEST_ID: ${{ matrix.id }}
+          TZ: UTC
+        run: |
+          set -o pipefail
+          export HOME="$RUNNER_TEMP/solar-home"
+          export EVIDENCE_DIR="$GITHUB_WORKSPACE/artifacts/$TEST_ID"
+          mkdir -p "$HOME" "$EVIDENCE_DIR"
+
+          {
+            echo "test_id=$TEST_ID"
+            echo "repository=$GITHUB_REPOSITORY"
+            echo "sha=$GITHUB_SHA"
+            echo "ref=$GITHUB_REF"
+            echo "runner_os=$RUNNER_OS"
+            echo "runner_arch=$RUNNER_ARCH"
+            echo "image_os=${ImageOS:-unknown}"
+            echo "image_version=${ImageVersion:-unknown}"
+            echo "python=$(python --version 2>&1)"
+            echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "command=$TEST_COMMAND"
+          } > "$EVIDENCE_DIR/environment.txt"
+
+          set +e
+          timeout --signal=TERM --kill-after=15s 8m \
+            bash -lc "$TEST_COMMAND" 2>&1 | tee "$EVIDENCE_DIR/output.log"
+          status=${PIPESTATUS[0]}
+          set -e
+
+          {
+            echo "finished_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "exit_code=$status"
+          } >> "$EVIDENCE_DIR/environment.txt"
+          sha256sum "$EVIDENCE_DIR"/* > "$EVIDENCE_DIR/sha256sums.txt"
+          exit "$status"
+
+      - name: Upload system-test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openjiuwen-fast-system-${{ matrix.id }}-${{ github.run_attempt }}
+          path: artifacts/${{ matrix.id }}/
+          if-no-files-found: error
+          retention-days: 30
