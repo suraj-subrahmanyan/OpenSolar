@@ -131,8 +131,9 @@ def _write_sprint(sprints: Path, sid: str, graph: dict) -> Path:
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    monkeypatch.delenv("SOLAR_PLAN_VALIDATOR", raising=False)
-    monkeypatch.delenv("SOLAR_GATE_LEDGER", raising=False)
+    # G4 default-on: unset now means ON — model the OFF baseline explicitly.
+    monkeypatch.setenv("SOLAR_PLAN_VALIDATOR", "0")
+    monkeypatch.setenv("SOLAR_GATE_LEDGER", "0")
     monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
     monkeypatch.delenv("PYTEST_PLUGINS", raising=False)
 

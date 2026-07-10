@@ -102,7 +102,7 @@ def _plan_certificate_ready(path: Path) -> tuple[bool, str]:
     try:
         import plan_validator
     except Exception as exc:
-        if str(os.environ.get("SOLAR_PLAN_VALIDATOR", "") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        if str(os.environ.get("SOLAR_PLAN_VALIDATOR", "") or "").strip().lower() not in {"0", "false", "no", "off"}:
             return False, f"plan_certificate_uncheckable:{type(exc).__name__}"
         return True, "not_applicable"
     verdict = plan_validator.check_planner_graph_dispatchable(graph)

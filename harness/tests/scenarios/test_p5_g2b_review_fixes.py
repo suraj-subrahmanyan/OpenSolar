@@ -139,8 +139,9 @@ def _write_sprint(sprints: Path, sid: str, graph: dict) -> Path:
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    monkeypatch.delenv("SOLAR_PLAN_VALIDATOR", raising=False)
-    monkeypatch.delenv("SOLAR_GATE_LEDGER", raising=False)
+    # G4 default-on: unset now means ON — model the OFF baseline explicitly.
+    monkeypatch.setenv("SOLAR_PLAN_VALIDATOR", "0")
+    monkeypatch.setenv("SOLAR_GATE_LEDGER", "0")
 
 
 # --- Finding 1a: dispatch_queue_item (drain_queue) must honor the guard ------
@@ -651,7 +652,8 @@ def test_plan_validator_cli_policy_block_empty_when_flag_off(tmp_path):
     sprints = tmp_path / "sprints"
     sprints.mkdir(parents=True)
     env = dict(os.environ)
-    env.pop("SOLAR_PLAN_VALIDATOR", None)
+    # G4 default-on: unset now means ON — model the OFF state explicitly.
+    env["SOLAR_PLAN_VALIDATOR"] = "0"
     proc = subprocess.run(
         [
             sys.executable,

@@ -2687,7 +2687,8 @@ def _profile_dispatch_mode(profile: dict[str, Any]) -> str:
 
 
 def _plan_validator_env_on() -> bool:
-    return str(os.environ.get("SOLAR_PLAN_VALIDATOR") or "").strip().lower() in {"1", "true", "yes", "on"}
+    # G4 default-on: the validator is the runtime default; explicit 0 kills it.
+    return str(os.environ.get("SOLAR_PLAN_VALIDATOR") or "").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _plan_validator_launch_refusal(graph: dict[str, Any]) -> dict[str, Any] | None:

@@ -1616,7 +1616,7 @@ def _builder_ready_nodes_for_sprint(sprint_id: str) -> tuple[list[dict[str, Any]
 
             plan_guard = plan_validator.check_planner_graph_dispatchable(graph)
         except Exception as guard_exc:
-            if str(os.environ.get("SOLAR_PLAN_VALIDATOR") or "").strip().lower() in {"1", "true", "yes", "on"}:
+            if str(os.environ.get("SOLAR_PLAN_VALIDATOR") or "").strip().lower() not in {"0", "false", "no", "off"}:
                 return [], {
                     "ok": False,
                     "reason": "plan_validator_dispatch_refused",

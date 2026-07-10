@@ -116,8 +116,9 @@ def _errors_payload(sprints: Path, sid: str) -> dict:
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    monkeypatch.delenv("SOLAR_PLAN_VALIDATOR", raising=False)
-    monkeypatch.delenv("SOLAR_GATE_LEDGER", raising=False)
+    # G4 default-on: unset now means ON — model the OFF baseline explicitly.
+    monkeypatch.setenv("SOLAR_PLAN_VALIDATOR", "0")
+    monkeypatch.setenv("SOLAR_GATE_LEDGER", "0")
 
 
 def test_env_off_compile_helper_leaves_graph_and_status_byte_identical(tmp_path):

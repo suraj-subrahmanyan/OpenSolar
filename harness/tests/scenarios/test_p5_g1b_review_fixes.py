@@ -142,7 +142,9 @@ def _write_sprint(sprints: Path, sid: str, graph: dict, status: dict | None = No
 
 def _dispatcher_env(harness: Path, sprints: Path, *, validator: bool) -> dict:
     env = dict(os.environ)
-    env.pop("SOLAR_GATE_LEDGER", None)
+    # G4 default-on: these dispatch tests pin the VALIDATOR guard channel;
+    # the ledger guard is explicitly killed so refusal reasons stay stable.
+    env["SOLAR_GATE_LEDGER"] = "0"
     env.update(
         {
             "HARNESS_DIR": str(harness),
@@ -151,10 +153,7 @@ def _dispatcher_env(harness: Path, sprints: Path, *, validator: bool) -> dict:
             "PYTHONPATH": str(_HARNESS / "lib"),
         }
     )
-    if validator:
-        env["SOLAR_PLAN_VALIDATOR"] = "1"
-    else:
-        env.pop("SOLAR_PLAN_VALIDATOR", None)
+    env["SOLAR_PLAN_VALIDATOR"] = "1" if validator else "0"
     return env
 
 
@@ -183,8 +182,9 @@ def _enqueued(payload: dict) -> list:
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    monkeypatch.delenv("SOLAR_PLAN_VALIDATOR", raising=False)
-    monkeypatch.delenv("SOLAR_GATE_LEDGER", raising=False)
+    # G4 default-on: unset now means ON — model the OFF baseline explicitly.
+    monkeypatch.setenv("SOLAR_PLAN_VALIDATOR", "0")
+    monkeypatch.setenv("SOLAR_GATE_LEDGER", "0")
 
 
 # --- Finding 1: uncertified generic graphs must not reach the launch path ----
@@ -529,7 +529,9 @@ def test_workflow_guard_failed_review_still_routes_builder_for_repair(tmp_path, 
     _write_sprint(
         sprints,
         sid,
-        _graph(sid),
+        # a LEGACY repair sprint (grandfathered): governed-but-uncertified
+        # sprints route planner first by design under default-on
+        _graph(sid, plan_compile_required=False),
         status={
             "id": sid,
             "sprint_id": sid,

@@ -663,11 +663,9 @@ def write_errors_artifact(
 
 
 def _env_gate_enabled() -> bool:
-    return str(os.environ.get("SOLAR_PLAN_VALIDATOR", "") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
+    # G4 default-on: the validator is the runtime default; explicit 0 kills it.
+    return str(os.environ.get("SOLAR_PLAN_VALIDATOR", "") or "").strip().lower() not in {
+        "0", "false", "no", "off",
     }
 
 

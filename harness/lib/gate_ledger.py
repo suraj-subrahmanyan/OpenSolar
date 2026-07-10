@@ -74,7 +74,8 @@ def _utc_now() -> str:
 
 def enabled() -> bool:
     """The SOLAR_GATE_LEDGER flag (design §3; default off = legacy behavior)."""
-    return str(os.environ.get("SOLAR_GATE_LEDGER", "") or "").strip().lower() in {"1", "true", "yes", "on"}
+    # G4 default-on: the gate ledger is the runtime default; explicit 0 kills it.
+    return str(os.environ.get("SOLAR_GATE_LEDGER", "") or "").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def contracted(graph: Any) -> bool:

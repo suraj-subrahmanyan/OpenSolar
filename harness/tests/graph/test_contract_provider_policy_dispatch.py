@@ -92,7 +92,8 @@ def test_contracted_dispatch_provider_filter_is_flag_gated(tmp_path: Path, monke
         _worker("openai", "zzz-openai-builder", 1),
     ]
 
-    monkeypatch.delenv("SOLAR_GATE_LEDGER", raising=False)
+    # G4 default-on: unset now means ON — model the ledger-OFF state explicitly.
+    monkeypatch.setenv("SOLAR_GATE_LEDGER", "0")
     monkeypatch.delenv("SOLAR_PRODUCT_MODE", raising=False)
     monkeypatch.setenv("SOLAR_PM_DEFAULT_PROVIDERS", "anthropic")
     monkeypatch.setenv("SOLAR_MULTI_TASK_DEFAULT_PROVIDERS", "anthropic")

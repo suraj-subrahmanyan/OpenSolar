@@ -36,7 +36,8 @@ def _write_json(path: Path, payload: dict) -> None:
 
 @pytest.fixture(autouse=True)
 def _anchor_env(monkeypatch):
-    monkeypatch.delenv("SOLAR_PLAN_VALIDATOR", raising=False)
+    # G4 default-on: unset now means ON — model the OFF baseline explicitly.
+    monkeypatch.setenv("SOLAR_PLAN_VALIDATOR", "0")
     # Anchor registry/contract lookups to the repo harness, not ~/.solar.
     monkeypatch.setenv("HARNESS_DIR", str(_HARNESS))
 

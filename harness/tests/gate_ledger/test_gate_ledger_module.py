@@ -309,8 +309,10 @@ def test_route_record_requires_route_payload(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_enabled_reads_env(monkeypatch):
+    # G4 default-on (owner decision 2026-07-10): unset means ON;
+    # only the explicit kill switch disables the ledger.
     monkeypatch.delenv("SOLAR_GATE_LEDGER", raising=False)
-    assert gl.enabled() is False
+    assert gl.enabled() is True
     monkeypatch.setenv("SOLAR_GATE_LEDGER", "1")
     assert gl.enabled() is True
     monkeypatch.setenv("SOLAR_GATE_LEDGER", "0")
