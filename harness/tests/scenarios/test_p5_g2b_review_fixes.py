@@ -112,7 +112,9 @@ def _valid_node(**overrides) -> dict:
 
 
 def _graph(sid: str, *, node: dict | None = None, **top) -> dict:
-    graph = {"sprint_id": sid, "nodes": [node or _valid_node()]}
+    # Intake-born sprints carry the birth marker from the requirement
+    # compiler (G4 blocker 2); these fixtures model that population.
+    graph = {"sprint_id": sid, "plan_compile_required": True, "nodes": [node or _valid_node()]}
     graph.update(top)
     return graph
 

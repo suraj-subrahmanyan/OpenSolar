@@ -684,12 +684,25 @@ def _is_epic_graph(task_graph: Dict[str, Any]) -> bool:
 
 
 def _generic_graph_kind(task_graph: Dict[str, Any]) -> str:
+    """Governed-vs-grandfathered classification (G4 blocker 2, owner decision
+    2026-07-10: default-on with grandfathering).
+
+    "generic" (governed — certificate demanded) iff the graph CLAIMS
+    pm.generic.v1 (claiming the contract is never a free pass) OR carries
+    the intake birth marker `plan_compile_required` (stamped by the
+    requirement compiler on every template skeleton; the planner edits that
+    file in place, so the marker persists through planning). An uncontracted
+    graph WITHOUT the marker is "legacy_uncontracted" — hand-authored
+    graphs, direct multi-task CLI usage, old chain flows — and every guard
+    skips it, keeping legacy behavior byte-identical under default-on."""
     contract_id = str(task_graph.get("workflow_contract_id") or "").strip()
     if _is_epic_graph(task_graph):
         return "epic_graph"
     if contract_id and contract_id != GENERIC_CONTRACT_ID:
         return "non_generic_contract"
-    return "generic"
+    if contract_id == GENERIC_CONTRACT_ID or task_graph.get("plan_compile_required"):
+        return "generic"
+    return "legacy_uncontracted"
 
 
 def _error(code: str, node_id: str, message: str, **extra: Any) -> Dict[str, Any]:

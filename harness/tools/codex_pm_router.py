@@ -1304,14 +1304,24 @@ def _apply_default_gate_assignments(graph: dict[str, Any]) -> dict[str, Any]:
 
 def build_task_graph_skeleton(request_type: str, lane_hint: str, request_text: str = "") -> dict[str, Any]:
     if request_type == SHORT_IMPL:
-        return _apply_default_gate_assignments(_short_task_graph())
-    if request_type == RESEARCH:
-        return _apply_default_gate_assignments(_research_task_graph())
-    if _is_parallel_spec_request(request_type, request_text):
-        return _apply_default_gate_assignments(_parallel_spec_task_graph())
-    if _is_parallel_delivery_request(request_type, request_text):
-        return _apply_default_gate_assignments(_parallel_delivery_task_graph())
-    return _apply_default_gate_assignments(_standard_task_graph(strategy_lane=lane_hint == "strategy"))
+        graph = _apply_default_gate_assignments(_short_task_graph())
+    elif request_type == RESEARCH:
+        graph = _apply_default_gate_assignments(_research_task_graph())
+    elif _is_parallel_spec_request(request_type, request_text):
+        graph = _apply_default_gate_assignments(_parallel_spec_task_graph())
+    elif _is_parallel_delivery_request(request_type, request_text):
+        graph = _apply_default_gate_assignments(_parallel_delivery_task_graph())
+    else:
+        graph = _apply_default_gate_assignments(_standard_task_graph(strategy_lane=lane_hint == "strategy"))
+    # Intake birth marker (G4 blocker 2): sprints born through the requirement
+    # compiler are the GOVERNED population — plan_validator classifies an
+    # uncontracted graph as generic (certificate demanded) only when this
+    # marker is present, so hand-authored/legacy graphs stay grandfathered
+    # under default-on. The planner edits this file in place, so the marker
+    # persists through planning; it sits outside the certificate's governed
+    # subset, so stamping is unaffected.
+    graph["plan_compile_required"] = True
+    return graph
 
 
 def build_pm_intake(
