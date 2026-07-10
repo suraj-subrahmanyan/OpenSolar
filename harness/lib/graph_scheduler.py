@@ -2419,6 +2419,26 @@ def _gate_verdicts_ok(graph: dict[str, Any], gate_node_ids: list[str]) -> tuple[
     return True, "", "verdict_ok"
 
 
+def _sprint_status_terminal(graph: dict[str, Any]) -> bool:
+    """True when the sprint's status.json shows a TERMINAL pair
+    (failed/failed or passed/completed|done) — the frozen states G3 runs
+    11/12 established as truthful terminals."""
+    sid = str(graph.get("sprint_id") or "").strip()
+    if not sid:
+        return False
+    try:
+        payload = json.loads((SPRINTS_DIR / f"{sid}.status.json").read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    status = str(payload.get("status") or "").strip().lower()
+    phase = str(payload.get("phase") or payload.get("stage") or "").strip().lower()
+    return (status == "failed" and phase == "failed") or (
+        status == "passed" and phase in {"completed", "done"}
+    )
+
+
 def mark_node_result(graph: dict[str, Any], node_id: str, status: str,
                      gate_status: str | None = None, note: str | None = None) -> dict[str, Any]:
     _ensure_required_gate_node_mapping(graph)
@@ -2442,6 +2462,24 @@ def mark_node_result(graph: dict[str, Any], node_id: str, status: str,
     }:
         refused = parent_ready_check(graph)
         refused["refused_progress_regression"] = {
+            "node": node_id,
+            "kept_status": _ledger_previous_status,
+            "refused_status": status,
+            "note": note or "",
+        }
+        return refused
+    # G4-lite run 2 (drift evidence, p5-g4-lite-live-rung-20260710T133158Z):
+    # the sprint terminalized failed/failed at 13:40:18Z; the surviving repair
+    # builder ran its closing `graph-scheduler mark --status reviewing` at
+    # 13:42:48Z and the projection refresh propagated the reopen onto the
+    # TERMINAL sprint. A terminal sprint is frozen: late progress marks from
+    # any straggler writer are refused (terminal verdict flips stay with the
+    # generation-fenced verdict paths; this guards only progress statuses).
+    if str(status or "").lower() in {
+        "reviewing", "pending", "queued", "assigned", "dispatched", "in_progress", "running",
+    } and _sprint_status_terminal(graph):
+        refused = parent_ready_check(graph)
+        refused["refused_terminal_sprint_write"] = {
             "node": node_id,
             "kept_status": _ledger_previous_status,
             "refused_status": status,

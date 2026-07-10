@@ -46,6 +46,9 @@ RECORD_KINDS = {
     "gate_check",
     "status_transition",
     "route_record",
+    # G4-lite run 2: deterministic relocation of builder output written under
+    # the stray sprints/<sid>.workdir spelling (the P2 recovery-net class).
+    "artifact_recovery",
 }
 
 VERDICT_KINDS = {"content", "mechanical", "infrastructure"}

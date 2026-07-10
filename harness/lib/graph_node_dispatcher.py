@@ -1693,6 +1693,29 @@ def _canonical_output_paths_block(node: dict[str, Any]) -> str:
     )
 
 
+def _generic_workdir_block(sid: str, graph: dict[str, Any]) -> str:
+    """Certified-generic builder teaching: STATE the workdir, name the trap.
+
+    G4-lite run 2 (codex-cli-output.log:1938): with cwd correctly set to
+    sprints/<sid>/workdir and the workdir never stated in the dispatch text,
+    the builder agent absolutized its output paths by analogy with the
+    sprint's dot-suffixed artifact files and invented sprints/<sid>.workdir.
+    The runtime now recovers that stray spelling, but the dispatch text must
+    stop inviting it."""
+    if not _graph_is_certified_generic(graph):
+        return ""
+    workdir = SPRINTS_DIR / sid / "workdir"
+    return (
+        "## Sprint Workdir\n\n"
+        f"Your working directory is the sprint workdir: `{workdir}`\n"
+        "(a DIRECTORY under the sprint id — `" + sid + "/workdir`).\n"
+        "Write every declared output RELATIVE to it (e.g. `workspace/<file>`), or use\n"
+        "the absolute form above. NEVER construct a `sprints/" + sid + ".workdir`\n"
+        "path: sprint FILES use dot-suffixed names (`" + sid + ".plan.md`),\n"
+        "but the workdir is the `" + sid + "/workdir` directory."
+    )
+
+
 def _write_scope_preflight_block(sid: str, node: dict[str, Any]) -> str:
     """Warn builders when write-scope artifacts already exist from another sprint.
 
@@ -4196,6 +4219,22 @@ def _run_node_proof_seam(
     had the mirror image, a reconcile pass overwriting a recorded
     proof_obligations_failed block (divided mark authority)."""
     node_id = str(node.get("id") or "")
+    # G4-lite run 2: recover builder output written under the stray
+    # sprints/<sid>.workdir spelling BEFORE sidecar emission (the patch
+    # emitter scans write-scope targets) and manifest resolution.
+    if _graph_is_certified_generic(graph):
+        try:
+            import contract_gate_executor as _cge_recovery
+
+            recovered = _cge_recovery.recover_stray_workdir(SPRINTS_DIR, sid)
+            if recovered.get("recovered"):
+                _ledger_record(
+                    sid, node_id=node_id, kind="artifact_recovery",
+                    author={"type": "policy"},
+                    note="recovered_stray_workdir:" + ",".join(recovered["recovered"][:10]),
+                )
+        except Exception:
+            pass
     _emit_node_proof_sidecars(sid, node)
     if (
         _artifact_manifest is not None
@@ -4633,6 +4672,7 @@ def build_dispatch_text(payload: dict[str, Any], pane: str) -> str:
     )
     write_scope_preflight = _write_scope_preflight_block(str(sid), node)
     canonical_output_paths = _canonical_output_paths_block(node)
+    generic_workdir_block = _generic_workdir_block(str(sid), graph_for_policy)
     repair_context_block = _node_repair_context_block(node)
 
     return f"""{STATE_READ_PREFLIGHT}
@@ -4681,6 +4721,8 @@ Graph: `{graph_path}`
 {_scope_lines(node.get("write_scope"))}
 
 {canonical_output_paths}
+
+{generic_workdir_block}
 
 {write_scope_preflight}
 
@@ -8875,6 +8917,31 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
          if isinstance(item, dict) and str(item.get("pm_task_id") or "").strip()),
         None,
     )
+    # AC-R4.4 generation fence on the LIVE verdict path (G4-lite run 2): a
+    # repair had just archived the gen-0 sidecars and dispatched the repair
+    # builder when the ORIGINAL FAIL arrived here — this function stamps
+    # eval_generation from the node's CURRENT repair_attempts, so the stale
+    # verdict masqueraded as the repair generation, burned the just-granted
+    # budget, and terminalized the node while its repair builder was still
+    # running. The reconcile path already ran this fence; the evaluator-CLI
+    # path must too. Archived non-consumable, never applied.
+    _fence_payload = _read_json_file_safe(eval_json or _eval_json_file(sid, node_id))
+    _stale_reason = _eval_payload_stale_for_current_repair(node, _fence_payload)
+    if _stale_reason:
+        _ledger_record(sid, node_id=node_id, kind="eval_verdict",
+                       author={"type": "evaluator"},
+                       verdict="PASS" if status == "passed" else "FAIL",
+                       eval_generation=_eval_payload_generation(_fence_payload),
+                       repair_attempt=_eval_generation,
+                       gate_consumable=False, archived=True,
+                       stale_reason=_stale_reason, note=reason or None)
+        return {
+            "ok": False,
+            "reason": "stale_eval_generation",
+            "node": node_id,
+            "status": str(node.get("status") or ""),
+            "stale_reason": _stale_reason,
+        }
     if (
         status == "failed"
         and effective_verdict_kind in {"mechanical", "infrastructure"}

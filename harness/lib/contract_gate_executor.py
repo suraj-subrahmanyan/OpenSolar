@@ -93,6 +93,60 @@ def _sprint_is_certified_generic(sprints_dir: Path, sid: str) -> bool:
         return False
 
 
+def recover_stray_workdir(sprints_dir: Any, sid: str) -> Dict[str, Any]:
+    """Relocate sprints/<sid>.workdir content into the canonical sprint workdir.
+
+    G4-lite run 2 (p5-g4-lite-live-rung-20260710T133158Z): the builder agent —
+    cwd correctly set to sprints/<sid>/workdir — constructed an ABSOLUTE path
+    by analogy with the sprint's dot-suffixed artifact files and wrote real
+    work under sprints/<sid>.workdir; the canonical workdir stayed empty and
+    the proof gate failed a functionally-passing node (patch emission:
+    no_write_scope_targets). Same recovery philosophy as the P2 closeout
+    exact-basename net: relocate real work onto the declared vocabulary,
+    never overwrite, record what moved. Certified-generic sprints only;
+    kill switch SOLAR_WORKDIR_STRAY_RECOVERY=0."""
+    result: Dict[str, Any] = {"recovered": [], "skipped_existing": []}
+    try:
+        if str(os.environ.get("SOLAR_WORKDIR_STRAY_RECOVERY", "") or "").strip().lower() in {
+            "0", "false", "no", "off",
+        }:
+            return result
+        sprints = Path(sprints_dir)
+        if not _sprint_is_certified_generic(sprints, sid):
+            return result
+        stray_root = sprints / f"{sid}.workdir"
+        if not stray_root.is_dir():
+            return result
+        canonical_root = sprints / sid / "workdir"
+        canonical_root.mkdir(parents=True, exist_ok=True)
+        for stray in sorted(stray_root.rglob("*")):
+            if not stray.is_file():
+                continue
+            rel = stray.relative_to(stray_root)
+            target = canonical_root / rel
+            if target.exists():
+                result["skipped_existing"].append(str(rel))
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(stray, target)
+            result["recovered"].append(str(rel))
+        # remove emptied stray directories so the split cannot re-confuse a
+        # later scan; anything non-empty (skipped collisions) stays in place
+        for leftover in sorted(stray_root.rglob("*"), reverse=True):
+            if leftover.is_dir():
+                try:
+                    leftover.rmdir()
+                except OSError:
+                    pass
+        try:
+            stray_root.rmdir()
+        except OSError:
+            pass
+        return result
+    except Exception:
+        return result
+
+
 def _gate_argv(command: str) -> list[str] | None:
     """Map a contract gate command string to argv; None means bash -lc."""
     try:
@@ -186,6 +240,10 @@ def execute_gate(
         # commands address sprints/<sid>/... forms — the P2/P3 convention).
         gate_cwd = harness
         if _sprint_is_certified_generic(sprints, sid):
+            # G4-lite run 2: builder output may sit under the stray
+            # sprints/<sid>.workdir spelling — relocate BEFORE cwd selection
+            # so the gate judges the real work.
+            recover_stray_workdir(sprints, sid)
             workdir = sprints / sid / "workdir"
             if workdir.is_dir():
                 gate_cwd = workdir
