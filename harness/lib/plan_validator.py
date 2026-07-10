@@ -1319,8 +1319,33 @@ def _main_validate_file(argv: List[str]) -> int:
     return 0
 
 
+def _main_env_status(argv: List[str]) -> int:
+    """G4 probe: print the RESOLVED governed-spine state and its source.
+
+    With default-on the flags may be absent from every environment, so
+    /proc-grep can no longer prove the spine — sandboxed runs capture this
+    instead ({"enabled": bool, "source": "default"|"env"} per flag)."""
+    argparse.ArgumentParser(prog="plan_validator env-status").parse_args(argv)
+    def resolve(name: str, enabled: bool) -> Dict[str, Any]:
+        return {"enabled": enabled, "source": "env" if os.environ.get(name) is not None else "default"}
+    gate_ledger_on = str(os.environ.get("SOLAR_GATE_LEDGER", "") or "").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+    json.dump(
+        {
+            "plan_validator": resolve("SOLAR_PLAN_VALIDATOR", _env_gate_enabled()),
+            "gate_ledger": resolve("SOLAR_GATE_LEDGER", gate_ledger_on),
+        },
+        sys.stdout,
+    )
+    print()
+    return 0
+
+
 def main(argv=None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
+    if raw and raw[0] == "env-status":
+        return _main_env_status(raw[1:])
     if raw and raw[0] == "compile-generic":
         return _main_compile_generic(raw[1:])
     if raw and raw[0] == "check-generic-dispatch":

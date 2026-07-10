@@ -347,8 +347,9 @@ export SOLAR_MULTI_TASK_DEFAULT_PROVIDERS=openai
 # generated env is authoritative for every sandbox process and the flags were
 # left to shell inheritance — the operatord lineage never saw them). Explicit,
 # never inherited.
-export SOLAR_GATE_LEDGER=1
-export SOLAR_PLAN_VALIDATOR=1
+# G4 default-on: SOLAR_GATE_LEDGER / SOLAR_PLAN_VALIDATOR resolve ON at the
+# parser level — deliberately NOT exported so e2e runs prove the runtime
+# default a fresh machine gets (probe: plan_validator.py env-status).
 export SOLAR_PRODUCT_MODE=1
 export SOLAR_WORKFLOW_ROUTER=1
 export SOLAR_INTAKE_WORKSPACE_ROOT=$(printf '%q' "$workspace")
@@ -618,8 +619,9 @@ export SOLAR_PANE_RUNTIME=codex
 export SOLAR_PM_DEFAULT_PROVIDERS=openai
 export SOLAR_MULTI_TASK_DEFAULT_PROVIDERS=openai
 # P2 product flags — keep in lockstep with the generated e2e.env block above.
-export SOLAR_GATE_LEDGER=1
-export SOLAR_PLAN_VALIDATOR=1
+# G4 default-on: SOLAR_GATE_LEDGER / SOLAR_PLAN_VALIDATOR resolve ON at the
+# parser level — deliberately NOT exported so e2e runs prove the runtime
+# default a fresh machine gets (probe: plan_validator.py env-status).
 export SOLAR_PRODUCT_MODE=1
 export SOLAR_WORKFLOW_ROUTER=1
 export SOLAR_INTAKE_WORKSPACE_ROOT="$workspace"

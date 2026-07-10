@@ -622,20 +622,21 @@ def test_record_helper_only_fires_on_hash_mismatch(tmp_path, monkeypatch):
 # --- Run-10 finding: the governed spine ships in the generated env -----------
 
 
-def test_sandbox_env_ships_the_validator_flag_exported():
-    """Run 10 (p5-g3-live-rung-20260710T003432Z): the operator appended
-    SOLAR_PLAN_VALIDATOR=1 WITHOUT export — the sourced shell saw it, every
-    child process didn't, the validator stayed off, and an ungoverned run
-    masqueraded as the rung. P2 hit this exact inheritance class and made
-    SOLAR_GATE_LEDGER explicit in the generated e2e.env ('Explicit, never
-    inherited'); the validator flag now ships the same way in BOTH isolated
-    runner scripts, at every env-generation site."""
+def test_sandbox_env_governed_spine_flags_stay_in_lockstep():
+    """Run 10 (p5-g3-live-rung-20260710T003432Z) history: an unexported
+    validator flag left children ungoverned while the shell looked governed.
+    The original pin required BOTH flags exported at every env-generation
+    site. G4 default-on SUPERSEDES that: the parser resolves ON with no env
+    at all, so the scripts now export NEITHER flag (the e2e rung must prove
+    the fresh-machine default; see test_p5_g4_env_probe.py). The residual
+    lockstep invariant: the two flags never diverge — either both exported
+    (pre-G4 world) or both absent (G4 world), never one without the other,
+    which is exactly the half-governed run-10 shape."""
     for script in ("scripts/live-codex-e2e-isolated.sh", "scripts/live-claude-e2e-isolated.sh"):
         text = (_HARNESS.parent / script).read_text(encoding="utf-8")
-        ledger = text.count("export SOLAR_GATE_LEDGER=1")
-        validator = text.count("export SOLAR_PLAN_VALIDATOR=1")
-        assert ledger > 0, script
+        ledger = text.count("export SOLAR_GATE_LEDGER=")
+        validator = text.count("export SOLAR_PLAN_VALIDATOR=")
         assert validator == ledger, (
-            f"{script}: SOLAR_PLAN_VALIDATOR must ship exported at every "
-            f"env-generation site (ledger sites: {ledger}, validator: {validator})"
+            f"{script}: governed-spine flags diverged "
+            f"(ledger exports: {ledger}, validator exports: {validator})"
         )
