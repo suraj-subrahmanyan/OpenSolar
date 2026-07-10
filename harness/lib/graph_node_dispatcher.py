@@ -2767,6 +2767,75 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
                     }
                 )
                 continue
+            # Divided-mark-authority fix (G3 runs 5 + 12): a reconcile PASS on the
+            # CONTRACTED path must run the same proof seam node_verdict runs —
+            # run 12's S2 (deterministic-gate node) was marked passed here with no
+            # manifest and its proof obligations never checked; run 5's S1 had a
+            # recorded proof_obligations_failed block overwritten by this mark.
+            # Proof failure never marks passed: bounded repair, then truthful
+            # terminal failed (never a silent re-block loop). Legacy uncontracted
+            # graphs keep the pre-fix reconcile behavior byte-identical.
+            if (
+                eval_verdict == "PASS"
+                and _ledger_enabled()
+                and _gate_ledger is not None
+                and _gate_ledger.contracted(graph)
+            ):
+                proof_gate = _run_node_proof_seam(sid, node, graph, eval_json_path, handoff_file)
+                if proof_gate.get("required") and not proof_gate.get("ok"):
+                    _ledger_record(sid, node_id=node_id, kind="gate_check", author={"type": "policy"},
+                                   verdict="block", note="proof_obligations_failed")
+                    missing = [
+                        f"{item.get('requirement')}:{item.get('field')}"
+                        for item in (proof_gate.get("missing") or [])
+                        if isinstance(item, dict)
+                    ]
+                    proof_fail_payload = {
+                        "verdict": "FAIL",
+                        "summary": "reconcile proof gate: proof_obligations_failed — "
+                                   + ", ".join(missing[:8]),
+                        "failed_conditions": missing[:20],
+                    }
+                    repair_context = _start_node_repair_from_eval_fail(
+                        graph, node, sid, node_id, handoff_file, eval_json_path, proof_fail_payload,
+                    )
+                    if repair_context is not None:
+                        repaired.append(
+                            {
+                                "node": node_id,
+                                "status": "failed_review",
+                                "reason": "reconcile_proof_gate_failed_repair_requested",
+                                "handoff": str(handoff_file),
+                                "eval_json": eval_json_path,
+                                "proof_gate": proof_gate,
+                                "repair_attempt": repair_context.get("attempt"),
+                                "max_repair_attempts": repair_context.get("max_attempts"),
+                            }
+                        )
+                        continue
+                    node.pop("assigned_to", None)
+                    node.pop("dispatch_id", None)
+                    mark_node_result(
+                        graph,
+                        node_id,
+                        "failed",
+                        gate_status="failed",
+                        note="reconcile_proof_gate_failed:proof_obligations_failed",
+                    )
+                    node["status"] = "failed"
+                    node["updated_at"] = _utc_now()
+                    node["eval_json"] = eval_json_path
+                    repaired.append(
+                        {
+                            "node": node_id,
+                            "status": "failed",
+                            "reason": "reconcile_proof_gate_failed_terminal",
+                            "handoff": str(handoff_file),
+                            "eval_json": eval_json_path,
+                            "proof_gate": proof_gate,
+                        }
+                    )
+                    continue
             node.pop("assigned_to", None)
             node.pop("dispatch_id", None)
             verdict_status = "passed" if eval_verdict == "PASS" else "failed"
@@ -3980,6 +4049,26 @@ def _proof_artifact_presence(sid: str, node: dict[str, Any], eval_json: str | Pa
     return presence
 
 
+def _proof_field_presence(presence: dict[str, Any], field: str) -> bool | None:
+    """Presence of a CONCRETE declared field: direct key, else the manifest's
+    output:-keyed rows matched by full relpath or basename suffix (the P2
+    smoke-4 rule). None = the presence map has no row for this field at all
+    (caller falls back to its coarse heuristic)."""
+    if not field:
+        return None
+    if field in presence:
+        return bool(presence[field])
+    matches = [
+        bool(value) for key, value in presence.items()
+        if key.startswith("output:")
+        and (key[len("output:"):] == field
+             or key[len("output:"):].endswith("/" + field))
+    ]
+    if matches:
+        return any(matches)
+    return None
+
+
 def _evaluate_proof_obligations(sid: str, node: dict[str, Any], eval_json: str | Path = "") -> dict[str, Any]:
     obligations = _node_proof_obligations(sid, node)
     if not obligations:
@@ -4031,27 +4120,26 @@ def _evaluate_proof_obligations(sid: str, node: dict[str, Any], eval_json: str |
                 reason = "patch_diff_missing" if not satisfied else ""
             elif "test" in requirement or field in {"test_log", "test_report"}:
                 satisfied = presence["test_log"]
+                if not satisfied:
+                    # G3 run-12 replay: capsule obligations name a CONCRETE
+                    # evidence file (test_evidence_present +
+                    # field=workspace/test-report.md) — the declared field
+                    # wins over the coarse test_log heuristic when the
+                    # manifest/presence map has a row for it.
+                    field_present = _proof_field_presence(presence, field)
+                    if field_present is not None:
+                        satisfied = field_present
                 reason = "test_log_missing" if not satisfied else ""
             elif "eval" in requirement or field == "eval_json":
                 satisfied = presence["eval_json"]
                 reason = "eval_json_missing" if not satisfied else ""
             elif requirement == "output_present" and field:
-                satisfied = presence.get(field, False)
-                if not satisfied:
-                    # Contract obligations name the bare output file (e.g.
-                    # '<tool>.py' -> 'uniqwords.py') while the manifest
-                    # presence map keys rows by the full declared relpath
-                    # (output:sprints/<sid>/workdir/uniqwords.py). Match the
-                    # node's own declared outputs by name (P2 smoke-4 S1:
-                    # proof_obligations_failed with every output present).
-                    matches = [
-                        bool(value) for key, value in presence.items()
-                        if key.startswith("output:")
-                        and (key[len("output:"):] == field
-                             or key[len("output:"):].endswith("/" + field))
-                    ]
-                    if matches:
-                        satisfied = any(matches)
+                # Contract obligations name the bare output file (e.g.
+                # '<tool>.py' -> 'uniqwords.py') while the manifest presence
+                # map keys rows by the full declared relpath — matched by
+                # _proof_field_presence (P2 smoke-4 S1: proof_obligations_
+                # failed with every output present).
+                satisfied = bool(_proof_field_presence(presence, field))
                 reason = f"{field}_missing" if not satisfied else ""
                 if not satisfied and field == "guard_decision":
                     _gf = _node_sidecar_file(sid, str(node.get("id") or ""), "guard_decision")
@@ -4086,6 +4174,53 @@ def _evaluate_proof_obligations(sid: str, node: dict[str, Any], eval_json: str |
         "missing": missing,
         "artifact_presence": presence,
     }
+
+
+def _run_node_proof_seam(
+    sid: str,
+    node: dict[str, Any],
+    graph: dict[str, Any],
+    eval_json: str | Path,
+    observed_handoff: Path | str | None,
+) -> dict[str, Any]:
+    """The single proof authority for a node claiming PASS: emit deterministic
+    support sidecars (guard/resource/adapter bridge from real node outputs),
+    write the build-complete artifact manifest on the contracted path (Lane 3
+    R6 — the proof gate discovers artifacts via the manifest, not filenames),
+    then evaluate the node's proof obligations.
+
+    Extracted from node_verdict so the sidecar-reconcile path runs the SAME
+    seam. G3 run 12: S2 was reconcile-marked passed with node_verdict never
+    running — no manifest written, proof obligations never checked; G3 run 5
+    had the mirror image, a reconcile pass overwriting a recorded
+    proof_obligations_failed block (divided mark authority)."""
+    node_id = str(node.get("id") or "")
+    _emit_node_proof_sidecars(sid, node)
+    if (
+        _artifact_manifest is not None
+        and _ledger_enabled()
+        and _gate_ledger is not None
+        and _gate_ledger.contracted(graph)
+    ):
+        try:
+            _mf_base, _mf_roots, _mf_scope = _manifest_anchor(sid, graph, node)
+            _artifact_manifest.write_manifest(
+                SPRINTS_DIR, sid, node,
+                generation=_node_repair_attempts(node),
+                base_dir=_mf_base,
+                roots=_mf_roots,
+                write_scope=_mf_scope,
+                sidecars={
+                    "handoff_md": str(observed_handoff or ""),
+                    "patch_diff": str(_existing_node_patch_diff(sid, node) or ""),
+                    "eval": [str(eval_json or "")],
+                    "guard_decision": str(_node_sidecar_file(sid, node_id, "guard_decision") or ""),
+                    "resource_binding": str(_node_sidecar_file(sid, node_id, "resource_binding") or ""),
+                },
+            )
+        except Exception:
+            pass
+    return _evaluate_proof_obligations(sid, node, eval_json=eval_json)
 
 
 def _proof_checks_template(obligations: list[dict[str, Any]]) -> dict[str, Any]:
@@ -8802,37 +8937,7 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
                 "eval_json": str(resolved_eval_json),
                 "handoff_md": str(observed_handoff),
             }
-        # Deterministic support sidecars before the proof gate. This emits
-        # guard/resource/adapter bridge artifacts from real node outputs, so the
-        # proof gate checks files rather than narrative claims.
-        _emit_node_proof_sidecars(sid, node)
-        # Lane 3 (R6): build-complete manifest write on the contracted path — the
-        # proof gate below then discovers artifacts via the manifest, not filenames.
-        if (
-            _artifact_manifest is not None
-            and _ledger_enabled()
-            and _gate_ledger is not None
-            and _gate_ledger.contracted(graph)
-        ):
-            try:
-                _mf_base, _mf_roots, _mf_scope = _manifest_anchor(sid, graph, node)
-                _artifact_manifest.write_manifest(
-                    SPRINTS_DIR, sid, node,
-                    generation=_node_repair_attempts(node),
-                    base_dir=_mf_base,
-                    roots=_mf_roots,
-                    write_scope=_mf_scope,
-                    sidecars={
-                        "handoff_md": str(observed_handoff or ""),
-                        "patch_diff": str(_existing_node_patch_diff(sid, node) or ""),
-                        "eval": [str(resolved_eval_json or "")],
-                        "guard_decision": str(_node_sidecar_file(sid, node_id, "guard_decision") or ""),
-                        "resource_binding": str(_node_sidecar_file(sid, node_id, "resource_binding") or ""),
-                    },
-                )
-            except Exception:
-                pass
-        proof_gate = _evaluate_proof_obligations(sid, node, eval_json=resolved_eval_json)
+        proof_gate = _run_node_proof_seam(sid, node, graph, resolved_eval_json, observed_handoff)
         if proof_gate.get("required") and not proof_gate.get("ok"):
             _ledger_record(sid, node_id=node_id, kind="gate_check", author={"type": "policy"},
                            verdict="block", note="proof_obligations_failed")
