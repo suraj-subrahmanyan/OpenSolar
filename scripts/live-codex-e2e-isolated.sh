@@ -34,6 +34,7 @@ USAGE
 
 default_task="Write a Python command-line tool uniqwords.py that reads a UTF-8 text file and prints the number of unique case-insensitive words. Include a small pytest test file and a short README note explaining usage."
 task="$default_task"
+task_explicit=0
 workflow_id="${SOLAR_LIVE_E2E_WORKFLOW_ID:-}"
 workflow_inputs=()
 timeout_seconds="${SOLAR_LIVE_E2E_TIMEOUT_SECONDS:-1800}"
@@ -49,7 +50,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --task)
       [[ -n "${2:-}" ]] || { echo "--task requires text" >&2; exit 2; }
-      task="$2"; shift 2 ;;
+      task="$2"; task_explicit=1; shift 2 ;;
     --workflow-id)
       [[ -n "${2:-}" ]] || { echo "--workflow-id requires an id" >&2; exit 2; }
       workflow_id="$2"; shift 2 ;;
@@ -366,7 +367,7 @@ export SOLAR_LIVE_E2E_RUN_ID=$(printf '%q' "$run_id")
 export PATH=$(printf '%q' "$bin_dir"):\$PATH
 ENV
 
-  python3 - "$manifest" "$branch_name" "$commit_sha" "$repo_dir" "$source_harness" "$sandbox" "$home_dir" "$iso_harness" "$workspace" "$evidence_dir" "$run_id" "$task" "$codex_home" "$codex_auth_source" <<'PY'
+  python3 - "$manifest" "$branch_name" "$commit_sha" "$repo_dir" "$source_harness" "$sandbox" "$home_dir" "$iso_harness" "$workspace" "$evidence_dir" "$run_id" "$task" "$task_explicit" "$codex_home" "$codex_auth_source" <<'PY'
 import json, sys, time
 (
     path,
@@ -381,9 +382,10 @@ import json, sys, time
     evidence_dir,
     run_id,
     task,
+    task_explicit,
     codex_home,
     codex_auth_source,
-) = sys.argv[1:15]
+) = sys.argv[1:16]
 payload = {
     "run_id": run_id,
     "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -400,7 +402,9 @@ payload = {
     "allowed_providers": ["openai"],
     "codex_home": codex_home,
     "codex_auth_source": codex_auth_source,
-    "task": task,
+    "task": task if task_explicit == "1" else "",
+    "task_provided": task_explicit == "1",
+    "task_note": "" if task_explicit == "1" else "no --task given; prompt (if any) is submitted separately via /intake",
     "live_execution_requires": "SOLAR_LIVE_E2E_ALLOW=1",
     "validity_rules": [
         "uses sandbox HOME and HARNESS_DIR only",

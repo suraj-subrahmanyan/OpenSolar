@@ -887,7 +887,7 @@ start_coordinator_sync() {
     if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
       ok "Coordinator 已在运行 (PID: $existing_pid)"
       # D7: doctor summary
-      bash "$HARNESS_DIR/doctor.sh" --summary 2>/dev/null || true
+      [[ "${SOLAR_SKIP_DOCTOR:-0}" == "1" ]] || bash "$HARNESS_DIR/doctor.sh" --summary 2>/dev/null || true
       return 0
     fi
     # 死进程 → 清锁
@@ -901,7 +901,7 @@ start_coordinator_sync() {
     real_pid=$(echo "$real_pids" | head -1)
     echo "$real_pid" > "$pidfile"
     ok "Coordinator 已在运行，pidfile 已自愈 (PID: $real_pid)"
-    bash "$HARNESS_DIR/doctor.sh" --summary 2>/dev/null || true
+    [[ "${SOLAR_SKIP_DOCTOR:-0}" == "1" ]] || bash "$HARNESS_DIR/doctor.sh" --summary 2>/dev/null || true
     return 0
   fi
 
@@ -936,7 +936,7 @@ start_coordinator_sync() {
       if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
         ok "Coordinator 启动成功 (PID: $pid)"
         # D7: doctor summary
-        bash "$HARNESS_DIR/doctor.sh" --summary 2>/dev/null || true
+        [[ "${SOLAR_SKIP_DOCTOR:-0}" == "1" ]] || bash "$HARNESS_DIR/doctor.sh" --summary 2>/dev/null || true
         return 0
       fi
     fi
@@ -993,6 +993,9 @@ start_harness() {
   local mode="${1:-3}"
   local work_dir="${2:-$(pwd)}"
   local skip_doctor="${3:-}"
+  # G4-lite run-3 deviation: --skip-doctor skipped the PRE-start doctor but the
+  # coordinator-start D7 summaries still ran doctor.sh — honor the skip there too.
+  [[ "$skip_doctor" == "--skip-doctor" ]] && export SOLAR_SKIP_DOCTOR=1
 
   # Lane 0 fix (round-3 Finding B, HIGH): clear stale run-terminal markers from a
   # previous stop BEFORE the watchdog launches — otherwise the d5858918 respawn
