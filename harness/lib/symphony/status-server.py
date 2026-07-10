@@ -13813,6 +13813,12 @@ class StatusHandler(BaseHTTPRequestHandler):
                 "port": bound_port,
                 "bind_host": BIND_HOST,
                 "python": sys.executable,
+                # G4-lite run 4 (STATUS_SERVER_OWNERSHIP_MISMATCH): a stale
+                # server on the shared port answered an alien sandbox's
+                # health checks while this server silently took a fallback
+                # port. Liveness proves nothing about ownership — clients
+                # verify THIS field against their own HARNESS_DIR.
+                "harness_dir": str(HARNESS_DIR),
             })
 
         elif path == "/status":
