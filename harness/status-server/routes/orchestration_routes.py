@@ -1955,6 +1955,7 @@ def build_projection_payload(sprint_id: str | None = None, mode: str = "full") -
             "phase": status.get("phase") or dashboard.get("phase") or "",
             "raw_status": status,
         },
+        "plan_governance": dashboard.get("plan_governance") or {},
         "requirements": requirements,
         "plan": plan,
         "task_graph": task_graph,
@@ -2029,6 +2030,7 @@ def build_dashboard_payload(sprint_id: str | None = None) -> tuple[dict, list[st
         "sprint_status": status.get("status", ""),
         "phase": status.get("phase", ""),
         "workflow_contract_id": str(tg.get("workflow_contract_id") or ""),
+        "plan_governance": _build_plan_governance(sid, status, tg),
         "generated_from": {
             "status_json": _display_path(SPRINTS_DIR / f"{sid}.status.json") if sid else "",
             "task_graph_json": _display_path(_existing_task_graph_path(sid)) if sid else "",
@@ -2066,6 +2068,73 @@ def build_dashboard_payload(sprint_id: str | None = None) -> tuple[dict, list[st
         "blocker_diagnostics": diagnostics,
         "stall": stall,
     }, degraded
+
+
+def _build_plan_governance(sid: str, status: dict, tg: dict) -> dict:
+    """G4 spec §3: the generic path's governance facts, surfaced truthfully.
+
+    Everything derives from files the runtime actually writes (status.json,
+    task_graph.json, <sid>.plan-compile-errors.json) — never heuristics
+    (failure class 14). States:
+      certified                -> stamped pm.generic.v1 + certificate PASS
+      compiling                -> intake-born graph, not yet stamped (NEUTRAL:
+                                  planner in flight / bounce loop teaching)
+      plan_compile_failed      -> truthful terminal (bounces exhausted)
+      plan_certificate_invalid -> truthful terminal (post-PASS mutation)
+      contracted               -> fixed workflow contract (its own gates)
+      epic                     -> epic decomposition graph
+      legacy                   -> unmarked uncontracted (grandfathered)
+    """
+    contract_id = str(tg.get("workflow_contract_id") or "").strip()
+    cert = tg.get("plan_certificate") if isinstance(tg.get("plan_certificate"), dict) else {}
+    birth_marker = bool(tg.get("plan_compile_required"))
+    schema = str(tg.get("schema_version") or "")
+    sprint_status = str(status.get("status") or "").strip().lower()
+    phase = str(status.get("phase") or "").strip().lower()
+    try:
+        bounces = int(status.get("plan_compile_bounces") or 0)
+    except (TypeError, ValueError):
+        bounces = 0
+    error_codes: list[str] = []
+    if sid:
+        try:
+            payload = json.loads(
+                (SPRINTS_DIR / f"{sid}.plan-compile-errors.json").read_text(encoding="utf-8")
+            )
+            for error in payload.get("errors") or []:
+                if isinstance(error, dict) and str(error.get("code") or "").strip():
+                    error_codes.append(str(error["code"]))
+        except (OSError, ValueError):
+            pass
+    certified = contract_id == "pm.generic.v1" and str(cert.get("verdict") or "").upper() == "PASS"
+    if sprint_status == "failed" and phase == "plan_compile_failed":
+        state = "plan_compile_failed"
+    elif sprint_status == "failed" and phase == "plan_certificate_invalid":
+        state = "plan_certificate_invalid"
+    elif schema.startswith("solar.epic."):
+        state = "epic"
+    elif contract_id and contract_id != "pm.generic.v1":
+        state = "contracted"
+    elif certified:
+        state = "certified"
+    elif contract_id == "pm.generic.v1" or birth_marker:
+        state = "compiling"
+    else:
+        state = "legacy"
+    return {
+        "state": state,
+        "certified": certified,
+        "certificate": {
+            "present": bool(cert),
+            "verdict": str(cert.get("verdict") or ""),
+            "validated_at": str(cert.get("validated_at") or ""),
+            "graph_hash": str(cert.get("graph_hash") or "")[:12],
+        },
+        "plan_compile_bounces": bounces,
+        "compile_error_codes": error_codes[:6],
+        "birth_marker": birth_marker,
+        "workflow_contract_id": contract_id,
+    }
 
 
 def build_sprint_index_payload(limit: int = 80) -> tuple[dict, list[str]]:

@@ -94,9 +94,25 @@ export type ProjectionResponse = {
   data: ProjectionData;
 };
 
+export type PlanGovernance = {
+  state?: string;
+  certified?: boolean;
+  certificate?: {
+    present?: boolean;
+    verdict?: string;
+    validated_at?: string;
+    graph_hash?: string;
+  };
+  plan_compile_bounces?: number;
+  compile_error_codes?: string[];
+  birth_marker?: boolean;
+  workflow_contract_id?: string;
+};
+
 export type ProjectionData = {
   projection_schema?: string;
   projection_mode?: string;
+  plan_governance?: PlanGovernance;
   lazy_slices?: {
     events?: string;
     deliverables?: string;
@@ -249,6 +265,7 @@ export type ActionResponse = {
 
 export type DashboardData = {
   focus_sprint_id?: string;
+  plan_governance?: PlanGovernance;
   sprint?: SprintStatus;
   phase?: string;
   progress?: {

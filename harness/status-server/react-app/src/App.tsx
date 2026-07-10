@@ -108,6 +108,7 @@ import type {
   EventRecord,
   HumanGate,
   NarrativeStep,
+  PlanGovernance,
   ProjectionAction,
   ProjectionData,
   ProjectionResponse,
@@ -1278,11 +1279,25 @@ function RunOverview({
     deliverables.find((item) => item.primary);
   const terminal = isTerminalRun(status, phase);
   const stages = pipelineStages(phase, status, isBlocked, terminal, actionType);
+  const governance = (data?.plan_governance || {}) as PlanGovernance;
+  const governanceState = asString(governance.state);
+  const bounces = Number(governance.plan_compile_bounces || 0);
+  const bounceCodes = (governance.compile_error_codes || []).join(", ");
 
   let kicker = "In progress";
   let line = activeNode ? `Working on ${activeNode}` : "Agents are working…";
   let tone: "working" | "blocked" | "complete" | "decision" = "working";
-  if (gate) {
+  if (governanceState === "plan_compile_failed") {
+    // Truthful terminal (G4 §3): bounces exhausted, plan never compiled.
+    kicker = "Plan failed to compile";
+    line = `The plan failed to compile after ${bounces || "several"} attempt${bounces === 1 ? "" : "s"}${bounceCodes ? ` (${bounceCodes})` : ""}.`;
+    tone = "blocked";
+  } else if (governanceState === "plan_certificate_invalid") {
+    // Truthful terminal (G4 §3): certified plan was modified after validation.
+    kicker = "Plan integrity failure";
+    line = "The certified plan was modified after validation.";
+    tone = "blocked";
+  } else if (gate) {
     kicker = "Your decision";
     line = asString(humanAction.title) || gate.title;
     tone = "decision";
@@ -1305,6 +1320,21 @@ function RunOverview({
           {gate && humanAction.detail && (
             <span className="run-state-detail">
               {asString(humanAction.detail)}
+            </span>
+          )}
+          {governanceState === "certified" && (
+            <span className="plan-badge plan-badge-certified" data-testid="plan-badge-certified" title={`Plan certificate PASS${governance.certificate?.validated_at ? ` · ${governance.certificate.validated_at}` : ""}`}>
+              ✓ Certified plan
+            </span>
+          )}
+          {governanceState === "compiling" && (
+            <span className="plan-badge plan-badge-compiling" data-testid="plan-badge-compiling">
+              Plan compiling…
+            </span>
+          )}
+          {bounces > 0 && governanceState !== "plan_compile_failed" && (
+            <span className="plan-badge plan-badge-bounce" data-testid="plan-badge-bounce" title={bounceCodes || undefined}>
+              {bounces} compile bounce{bounces === 1 ? "" : "s"}
             </span>
           )}
         </div>
