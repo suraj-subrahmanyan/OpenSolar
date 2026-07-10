@@ -425,11 +425,14 @@ def test_gate_rejects_pytest_paths_outside_trusted_roots(command):
 @pytest.mark.parametrize(
     "command",
     [
-        "python3 -m pytest tests/scenarios -q",
-        "python3 -m pytest tests/gate_ledger/test_x.py::test_y -q",
-        "python3 -m pytest --co -q tests/gate_ledger",
-        "python3 -m pytest -k pattern tests/scenarios",
-        "python3 -m pytest -m marker tests/scenarios -q",
+        # G3 run-9 class fix: gate paths live under the ARTIFACT ROOTS only
+        # (the bare repo-tests root was a second legal spelling the planner
+        # sampled nondeterministically — see test_p5_g3_live_fixes.py)
+        "python3 -m pytest workspace/tests/scenarios -q",
+        "python3 -m pytest workspace/tests/test_x.py::test_y -q",
+        "python3 -m pytest --co -q workspace/tests",
+        "python3 -m pytest -k pattern workspace/tests",
+        "python3 -m pytest -m marker workspace/tests -q",
         # the generic-path design: the gate runs builder-written tests under
         # the contract's artifact roots (battery E1 / certificate fixtures)
         "python3 -m pytest workspace/tests -q",

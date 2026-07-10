@@ -323,6 +323,63 @@ def test_launch_node_mismatch_terminalizes_sprint(tmp_path, monkeypatch, copy_na
     assert status.get("phase") == "plan_certificate_invalid", status
 
 
+# --- Run-9 finding: ONE path vocabulary — the class fix, not the instance ----
+#
+# Run 5 failed on workspace/-vs-HARNESS_DIR; run 9 failed on
+# tests/-vs-workspace/tests — the SAME class (F-CLASS-16): the planner may
+# legally spell paths several ways, the builder anchors one way, and
+# planner nondeterminism samples a new unaligned combination each run.
+# The class dies by removing the freedom: generic pytest gate paths must
+# resolve into the DECLARED ARTIFACT ROOTS only (canonical workspace/,
+# whose aliases all normalize onto the gate cwd). The bare repo-tests root
+# is no longer a legal generic gate target — under the workdir-cwd
+# execution convention it never pointed at the repo anyway.
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 -m pytest tests/test_wordfreq.py -q",  # run 9 verbatim
+        "python3 -m pytest tests/scenarios -q",
+        "python3 -m pytest tests/gate_ledger/test_x.py::test_y -q",
+    ],
+)
+def test_bare_tests_root_is_not_a_generic_gate_target(command):
+    node = _valid_node(evaluator_gate={
+        "kind": "deterministic_command", "command": command, "on_fail": "fail",
+    }, max_repair_attempts=0)
+    graph = _graph("sprint-g3fix9", node=node)
+
+    codes = [e["code"] for e in pv.validate_plan(graph, None, None)]
+
+    assert "PLAN_GATE_PATH_DENIED" in codes, (command, codes)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 -m pytest workspace/tests/test_wordfreq.py -q",
+        "python3 -m pytest workspace/tests -q",
+        "python3 -m pytest sprints/<sid>/workdir/tests -q",
+    ],
+)
+def test_artifact_root_gate_targets_stay_legal(command):
+    node = _valid_node(evaluator_gate={
+        "kind": "deterministic_command", "command": command, "on_fail": "fail",
+    }, max_repair_attempts=0)
+    graph = _graph("sprint-g3fix9-ok", node=node)
+
+    codes = [e["code"] for e in pv.validate_plan(graph, None, None)]
+
+    assert "PLAN_GATE_PATH_DENIED" not in codes, (command, codes)
+
+
+def test_policy_block_teaches_the_canonical_test_location(monkeypatch):
+    monkeypatch.setenv("SOLAR_PLAN_VALIDATOR", "1")
+    block = pv.planner_compile_policy_block()
+    assert "workspace/tests" in block
+
+
 # --- Run-7 finding: certified must imply dispatchable (capabilities) ---------
 #
 # G3 run 7 (p5-g3-live-rung-20260709T225219Z): the planner invented

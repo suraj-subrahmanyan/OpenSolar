@@ -95,10 +95,15 @@ GATE_COMMAND_VALUE_OPTIONS = (
     "-k", "-m", "-W", "--deselect", "--ignore", "--ignore-glob", "--maxfail", "--tb",
 )
 
-# The repo test tree is a legal pytest gate target alongside the contract's
-# artifact roots (workspace/, sprints/<sid>/workdir/, workdir/ — where the
-# builder writes the tests the gate runs).
-GATE_PYTEST_TESTS_ROOT = {"canonical": "tests/"}
+# G3 run-9 fix (F-CLASS-16 class closure): the bare repo-tests root is NOT a
+# legal generic gate target anymore. Run 5 failed on workspace/-vs-cwd, run 9
+# on tests/-vs-workspace/tests — the same class: multiple legal path
+# spellings that the planner samples nondeterministically while the builder
+# anchors under the artifact root. Generic gate paths must resolve into the
+# DECLARED ARTIFACT ROOTS only (canonical workspace/; the workdir aliases
+# normalize onto the gate cwd at execution). Under the workdir-cwd execution
+# convention a bare tests/ path never pointed at the repo tree anyway.
+GATE_PYTEST_TESTS_ROOT = {"canonical": "tests/"}  # retained for reference; no longer consulted
 
 
 def _gate_pytest_denied_path(tokens: List[str], artifact_roots: Dict[str, Any]) -> Optional[str]:
@@ -126,8 +131,7 @@ def _gate_pytest_denied_path(tokens: List[str], artifact_roots: Dict[str, Any]) 
         return ""
     for token in positional:
         path_part = token.split("::", 1)[0]
-        if wc.resolve_scope_path(path_part, artifact_roots) is None and \
-                wc.resolve_scope_path(path_part, GATE_PYTEST_TESTS_ROOT) is None:
+        if wc.resolve_scope_path(path_part, artifact_roots) is None:
             return token
     return None
 
@@ -1126,10 +1130,12 @@ def planner_compile_policy_block(
         f"   command from the allowlist: {allowlist}; import/config-control",
         f"   options ({', '.join(GATE_COMMAND_OPTION_DENYLIST)}) are denied",
         "   (PLAN_GATE_OPTION_DENIED). A pytest gate must name explicit test",
-        f"   paths under {GATE_PYTEST_TESTS_ROOT['canonical']!r} or a declared",
-        "   artifact root — pathless, absolute, or traversing paths fail",
-        "   PLAN_GATE_PATH_DENIED. The gate runs pytest with --noconftest, so",
-        "   keep fixtures inside the test files.",
+        "   paths inside a DECLARED ARTIFACT ROOT — put suite files under",
+        f"   {canonical_root!r} (e.g. {canonical_root}tests/test_x.py) and use",
+        "   exactly that spelling in the gate command; bare tests/, pathless,",
+        "   absolute, or traversing paths fail PLAN_GATE_PATH_DENIED. The gate",
+        "   executes FROM the sprint workdir with --noconftest, so keep",
+        "   fixtures inside the test files.",
         f"4. max_repair_attempts — integer 0..{MAX_REPAIR_ATTEMPTS_CEILING}, or",
         "   derivable from evaluator_gate.on_fail; a node with neither fails",
         "   PLAN_REPAIR_BUDGET_MISSING.",
