@@ -495,6 +495,7 @@ export SOLAR_MULTI_TASK_DEFAULT_PROVIDERS=anthropic
 # generated env is authoritative for every sandbox process and the flags were
 # left to shell inheritance). Explicit, never inherited.
 export SOLAR_GATE_LEDGER=1
+export SOLAR_PLAN_VALIDATOR=1
 export SOLAR_PRODUCT_MODE=1
 export SOLAR_WORKFLOW_ROUTER=1
 export SOLAR_INTAKE_WORKSPACE_ROOT=$(printf '%q' "$workspace")
@@ -771,6 +772,7 @@ export SOLAR_PM_DEFAULT_PROVIDERS=anthropic
 export SOLAR_MULTI_TASK_DEFAULT_PROVIDERS=anthropic
 # P2 product flags - keep in lockstep with the generated e2e.env block above.
 export SOLAR_GATE_LEDGER=1
+export SOLAR_PLAN_VALIDATOR=1
 export SOLAR_PRODUCT_MODE=1
 export SOLAR_WORKFLOW_ROUTER=1
 export SOLAR_INTAKE_WORKSPACE_ROOT="$workspace"
