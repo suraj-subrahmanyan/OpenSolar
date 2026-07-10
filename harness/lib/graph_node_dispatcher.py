@@ -254,6 +254,54 @@ def _manifest_presence(sid: str, node_id: str) -> dict[str, Any]:
         return _artifact_manifest.presence_map(manifest)
     except Exception:
         return {}
+
+
+_GENERIC_WORKFLOW_CONTRACT_ID = "pm.generic.v1"
+
+
+def _graph_is_certified_generic(graph: dict[str, Any]) -> bool:
+    """Graph-kind check, mirroring contract_gate_executor._sprint_is_certified_generic:
+    keyed on the GRAPH KIND (workflow_contract_id), never on the validator flag, so
+    fixed-contract and legacy uncontracted graphs keep byte-identical behavior."""
+    return str((graph or {}).get("workflow_contract_id") or "").strip() == _GENERIC_WORKFLOW_CONTRACT_ID
+
+
+def _manifest_anchor(
+    sid: str, graph: dict[str, Any], node: dict[str, Any]
+) -> tuple[Path, dict[str, Any], list[str] | None]:
+    """(base_dir, roots, write_scope) for the node artifact manifest.
+
+    G3 run 11 (F-CLASS-16 in the proof layer): certified-generic builders execute
+    with work_dir = sprints/<sid>/workdir and declare canonical-root outputs
+    (workspace/...) relative to it, but the manifest was written with
+    base_dir=HARNESS_DIR and roots={} (the planner graph carries no artifact_roots
+    map), so every declared output resolved to a nonexistent HARNESS_DIR path and
+    the proof gate failed real work on S1/S2/S3. Same principle as the run-5
+    gate-cwd fix (contract_gate_executor): certified-generic anchors at the sprint
+    workdir with the contract's canonical root, and the contract's alias
+    spellings (sprints/<sid>/workdir/X, workdir/X) normalize onto it. Fixed
+    contracts keep the HARNESS_DIR anchor and graph-carried roots (P2/P3 proven).
+    A returned write_scope of None means "use the node's own write_scope"."""
+    graph_roots = graph.get("artifact_roots") if isinstance(graph.get("artifact_roots"), dict) else {}
+    if not _graph_is_certified_generic(graph):
+        return HARNESS_DIR, graph_roots, None
+    workdir = SPRINTS_DIR / sid / "workdir"
+    if not workdir.is_dir():
+        return HARNESS_DIR, graph_roots, None
+    aliases = (f"sprints/{sid}/workdir/", "workdir/")
+    scope: list[str] = []
+    for declared in node.get("write_scope") or []:
+        text = str(declared or "").strip()
+        if not text:
+            continue
+        for alias in aliases:
+            if text.startswith(alias):
+                text = text[len(alias):]
+                break
+        scope.append(text)
+    return workdir, {"canonical": "workspace/"}, scope
+
+
 MULTI_TASK_RUN_DIR = HARNESS_DIR / "run" / "multi-task"
 SESSION = os.environ.get("SOLAR_HARNESS_SESSION", "solar-harness")
 NO_DISPATCH_FLAG = HARNESS_DIR / "run" / "no-dispatch.flag"
@@ -8767,11 +8815,13 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
             and _gate_ledger.contracted(graph)
         ):
             try:
+                _mf_base, _mf_roots, _mf_scope = _manifest_anchor(sid, graph, node)
                 _artifact_manifest.write_manifest(
                     SPRINTS_DIR, sid, node,
                     generation=_node_repair_attempts(node),
-                    base_dir=HARNESS_DIR,
-                    roots=graph.get("artifact_roots") if isinstance(graph.get("artifact_roots"), dict) else {},
+                    base_dir=_mf_base,
+                    roots=_mf_roots,
+                    write_scope=_mf_scope,
                     sidecars={
                         "handoff_md": str(observed_handoff or ""),
                         "patch_diff": str(_existing_node_patch_diff(sid, node) or ""),
