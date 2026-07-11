@@ -1650,13 +1650,23 @@ function PlanFlow({
   const done = nodes.filter(
     (node) => statusTone(asString(node.status)) === "complete",
   ).length;
+  // G4 UI-rung run 5: this meta fell through to "in progress" at TERMINAL —
+  // the main card said DONE while this panel said in progress on the same
+  // screen. Terminal truth wins over the fallthrough.
+  const runStatus = asString(data?.status || data?.sprint?.status);
+  const runPhase = asString(data?.phase || data?.sprint?.phase);
+  const terminal = isTerminalRun(runStatus, runPhase);
   const headMeta = isBlocked
     ? "blocked at a capability gate"
-    : activeId
-      ? `active: ${activeId}`
-      : total
-        ? "in progress"
-        : "";
+    : terminal
+      ? runStatus === "passed" || done === total
+        ? "done"
+        : `ended: ${runStatus || "failed"}`
+      : activeId
+        ? `active: ${activeId}`
+        : total
+          ? "in progress"
+          : "";
 
   return (
     <section className="plan-flow" aria-label="Plan" data-testid="plan-flow">
@@ -3534,7 +3544,9 @@ function TopBar({
             </span>
           )}
           <span className="provenance-chip">{eventCount} events</span>
-          {cache && <span className="provenance-chip">status: {cache}</span>}
+          {cache && (
+            <span className="provenance-chip">status cache: {cache}</span>
+          )}
           {updatedAt && (
             <span className="provenance-chip">
               refreshed {formatDateTime(updatedAt)}
