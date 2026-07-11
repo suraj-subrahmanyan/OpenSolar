@@ -353,6 +353,14 @@ MECHANICAL_EVAL_REASONS = {
 # capacity-class failures, the node is escalated to a durable needs_human_review with a reason +
 # next_action instead of retrying silently. 0 = unlimited (legacy infinite-retry behavior).
 GRAPH_NODE_EVAL_MAX_DISPATCH_FAILURES = int(os.environ.get("SOLAR_GRAPH_NODE_EVAL_MAX_DISPATCH_FAILURES", "8"))
+# G4 UI-rung run 3 (p5-g4-ui-rung-20260710T204856Z): the BUILDER-dispatch sibling of
+# the eval cap. S2 ping-ponged assigned->pending (stale_submit_ack_without_live_lease)
+# 122 ledger rows / 632s with zero progress while the only builder operator sat in its
+# 900s contract-closeout cooldown — the dispatcher re-assigned every tick, the
+# reconcile reset every tick, and nobody counted. Consecutive dispatch-failure resets
+# past this cap escalate the node to a durable needs_human_review (never auto-pass /
+# auto-fail); real progress clears the streak. 0 = unlimited (legacy).
+GRAPH_NODE_DISPATCH_MAX_FAILURES = int(os.environ.get("SOLAR_GRAPH_NODE_DISPATCH_MAX_FAILURES", "8"))
 # Eval-dispatch skip reasons that mean "the node cannot be evaluated right now for a capacity reason"
 # (as opposed to a transient within-batch lease collision). Only these accrue toward escalation.
 _EVAL_STUCK_REASONS = frozenset({
@@ -3337,7 +3345,85 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
             event="graph_dependency_blocked_projection",
         )
         repaired.append({"reason": "parent_projection_after_dependency_block", "projection": parent_projection})
+    _account_dispatch_retry_failures(graph, sid, repaired)
     return repaired
+
+
+def _account_dispatch_retry_failures(
+    graph: dict[str, Any],
+    sid: str,
+    repaired: list[dict[str, Any]],
+) -> None:
+    """Builder-dispatch mirror of _account_eval_dispatch_failures (G4 UI-rung
+    run 3). Post-processes this reconcile pass: every node the pass RESET to
+    pending (a dispatch that did not stick — stale ack, idle lease, operator
+    closeout failure, pane unavailable, ...) increments its
+    dispatch_failure_streak; past GRAPH_NODE_DISPATCH_MAX_FAILURES the node
+    escalates to a durable needs_human_review with the reason and a
+    next_action, instead of feeding the assign/reset ping-pong forever.
+    Nodes observed making real progress (dispatched/reviewing/passed) get
+    their streak cleared, so slow-but-alive dispatch is never punished."""
+    max_fail = GRAPH_NODE_DISPATCH_MAX_FAILURES
+    node_index = {str(n.get("id") or ""): n for n in graph.get("nodes", [])}
+    escalations: list[dict[str, Any]] = []
+    for item in repaired:
+        node_id = str(item.get("node") or "")
+        node = node_index.get(node_id)
+        if node is None:
+            continue
+        if str(item.get("status") or "") != "pending" or not str(item.get("reason") or ""):
+            continue
+        if str(node_status(graph, node_id) or "").strip().lower() != "pending":
+            continue
+        reason = str(item.get("reason"))
+        failures = int(node.get("dispatch_failure_streak") or 0) + 1
+        node["dispatch_failure_streak"] = failures
+        node["last_dispatch_failure_reason"] = reason
+        node["last_dispatch_failure_at"] = _utc_now()
+        if max_fail <= 0 or failures < max_fail:
+            continue
+        now = _utc_now()
+        blocked_reason = f"dispatch_starvation:{reason}:{failures}_consecutive_failures"
+        next_action = "connect_builder_operator_or_clear_cooldown_then_requeue_dispatch"
+        _ledger_transition(sid, node_id, "pending", "needs_human_review",
+                           "_account_dispatch_retry_failures", note=blocked_reason)
+        node["status"] = "needs_human_review"
+        node["dispatch_blocked_reason"] = blocked_reason
+        node["next_action"] = next_action
+        node["updated_at"] = now
+        graph.setdefault("node_results", {})[node_id] = {
+            "status": "needs_human_review",
+            "updated_at": now,
+            "note": blocked_reason,
+            "next_action": next_action,
+        }
+        _append_event(sid, {
+            "event": "graph_dispatch_escalated_to_human",
+            "node": node_id,
+            "reason": blocked_reason,
+            "next_action": next_action,
+        })
+        _record_node_runstate(sid, node_id, {
+            "dispatch_failure_streak": failures,
+            "last_dispatch_failure_reason": reason,
+            "next_action": next_action,
+            "status": "needs_human_review",
+        })
+        escalations.append({
+            "node": node_id,
+            "status": "needs_human_review",
+            "reason": blocked_reason,
+        })
+    # Progress clears the streak — checked by CURRENT status so both
+    # set-dispatched sites (with and without a repaired entry) are covered.
+    for node_id, node in node_index.items():
+        if not int(node.get("dispatch_failure_streak") or 0):
+            continue
+        current = str(node_status(graph, node_id) or "").strip().lower()
+        if current in {"dispatched", "reviewing", "passed"}:
+            node.pop("dispatch_failure_streak", None)
+            node.pop("last_dispatch_failure_reason", None)
+    repaired.extend(escalations)
 
 
 def _eval_dispatch_file(sid: str, node_id: str) -> Path:

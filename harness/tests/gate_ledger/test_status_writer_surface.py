@@ -60,6 +60,11 @@ AUDITED_WRITERS: dict[str, dict[str, str]] = {
         "_mark_graph_node": "ledger",
         "dispatch_node_evals": "ledger",
         "_account_eval_dispatch_failures": "ledger",
+        # G4 UI-rung run 3: builder-dispatch starvation escalation — the
+        # direct write mirrors _account_eval_dispatch_failures (ledger
+        # transition recorded immediately before; set_node_status would
+        # refuse pending -> needs_human_review by rank).
+        "_account_dispatch_retry_failures": "ledger",
         "node_verdict": (
             "recorded via mark_node_result: the inline write repeats the "
             "same-status force-write mark_node_result just recorded"
