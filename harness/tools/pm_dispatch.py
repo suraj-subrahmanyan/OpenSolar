@@ -1732,6 +1732,41 @@ def _pm_recover_missing_artifact(expected: Path, sprint_id: str) -> dict[str, st
     return {"artifact": str(expected), "recovered_from": str(matches[0])}
 
 
+def _pm_repair_archived_artifact(expected: Path, record: dict[str, Any]) -> dict[str, str] | None:
+    """G4 UI-rung run 3 trigger (also G3 run 12's failed_contract_closeout):
+    the worker DID deliver the artifact — the gate consumed it and the repair
+    flow ARCHIVED it to <stem>.repair*.<ts><suffix> seconds before this
+    closeout check ran — and the closeout jailed the only builder for 900s
+    (completed_without_required_artifacts), starving the pool. A non-empty
+    repair-archived copy, no older than this task's submission, IS proof of
+    delivery. It is acknowledged, never copied back: the repair flow archived
+    it deliberately, and resurrecting the canonical file would confuse the
+    repair-generation machinery. Shares the SOLAR_PM_CLOSEOUT_RECOVERY kill
+    switch with the nested-write net above."""
+    flag = str(os.environ.get("SOLAR_PM_CLOSEOUT_RECOVERY", "1")).strip().lower()
+    if flag in {"0", "false", "no", "off"}:
+        return None
+    try:
+        candidates = sorted(expected.parent.glob(f"{expected.stem}.repair*{expected.suffix}"))
+    except Exception:
+        return None
+    submitted = _parse_utc(str(record.get("submitted_at") or ""))
+    for candidate in reversed(candidates):
+        try:
+            if not candidate.is_file() or candidate.stat().st_size <= 0:
+                continue
+            if submitted is not None:
+                mtime = datetime.datetime.fromtimestamp(
+                    candidate.stat().st_mtime, tz=datetime.timezone.utc
+                )
+                if mtime < submitted:
+                    continue
+            return {"artifact": str(expected), "archived_by_repair": str(candidate)}
+        except Exception:
+            continue
+    return None
+
+
 def _pm_closeout_status(record: dict[str, Any]) -> dict[str, Any]:
     expected = _pm_expected_artifacts(record)
     sprint_id = str(record.get("sprint_id") or "").strip()
@@ -1743,6 +1778,10 @@ def _pm_closeout_status(record: dict[str, Any]) -> dict[str, Any]:
         recovery = _pm_recover_missing_artifact(path, sprint_id)
         if recovery:
             recovered.append(recovery)
+            continue
+        archived = _pm_repair_archived_artifact(path, record)
+        if archived:
+            recovered.append(archived)
             continue
         missing.append(str(path))
     closeout: dict[str, Any] = {
