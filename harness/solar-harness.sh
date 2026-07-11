@@ -3275,10 +3275,36 @@ do_models_command() {
 
 # ---- Main ----
 
+# G4 UI-rung run 4: `start --skip-doctor` (no workdir) parsed the FLAG as the
+# working directory — doctor ran and the cockpit aimed at a directory named
+# '--skip-doctor'. Start args are order-independent now: flags are recognized
+# anywhere, the first non-flag argument is the workdir, and unknown --flags
+# never become a workdir.
+normalize_start_args() {
+  START_WORKDIR=""
+  START_SKIP_DOCTOR=""
+  START_CLEAN=""
+  local _arg
+  for _arg in "$@"; do
+    case "$_arg" in
+      --skip-doctor) START_SKIP_DOCTOR="--skip-doctor" ;;
+      --clean)       START_CLEAN="--clean" ;;
+      --*)           ;;
+      "")            ;;
+      *)             [[ -z "$START_WORKDIR" ]] && START_WORKDIR="$_arg" ;;
+    esac
+  done
+  [[ -z "$START_WORKDIR" ]] && START_WORKDIR="$(pwd)"
+  # the && above returns 1 when the workdir was provided; never leak that
+  # non-zero status to set -e
+  return 0
+}
+
 case "${1:-help}" in
-  start)     start_harness 3 "${2:-$(pwd)}" "${3:-}" ;;
-  2)         start_harness 2 "${2:-$(pwd)}" "${3:-}" ;;
-  3)         start_harness 3 "${2:-$(pwd)}" "${3:-}" ;;
+  start)     shift || true; normalize_start_args "$@"; start_harness 3 "$START_WORKDIR" "$START_SKIP_DOCTOR" $START_CLEAN ;;
+  2)         shift || true; normalize_start_args "$@"; start_harness 2 "$START_WORKDIR" "$START_SKIP_DOCTOR" $START_CLEAN ;;
+  3)         shift || true; normalize_start_args "$@"; start_harness 3 "$START_WORKDIR" "$START_SKIP_DOCTOR" $START_CLEAN ;;
+  debug-start-args) shift || true; normalize_start_args "$@"; echo "workdir=$START_WORKDIR skip=$START_SKIP_DOCTOR clean=$START_CLEAN"; exit 0 ;;
   status)    show_status ;;
   main-status) do_main_status ;;
   lab-status) do_lab_status "${2:-}" ;;
@@ -3304,7 +3330,7 @@ case "${1:-help}" in
     done
     exit "$_cap_fail"
     ;;
-  --skip-doctor) start_harness 3 "${2:-$(pwd)}" "--skip-doctor" ;;
+  --skip-doctor) normalize_start_args "$@"; start_harness 3 "$START_WORKDIR" "--skip-doctor" $START_CLEAN ;;
   coord-status)
     # Sprint 20260420-082442 D2: 协调器状态诊断
     pidfile="$HARNESS_DIR/.coordinator.pid"
