@@ -166,3 +166,36 @@ class TestPlanGovernanceStates:
         projection, _deg = mod.build_projection_payload(SID, mode="fast")
         gov = projection.get("plan_governance")
         assert isinstance(gov, dict) and gov.get("state") == "certified", projection.keys()
+
+
+class TestNoFalseDecisionCardOnGovernedPath:
+    """G4 UI-rung run 6: six 'YOUR DECISION — Review the plan' sightings
+    during 'Plan compiling…' with ZERO plan verdicts in the ledger — the P4
+    class-14 bug resurfacing on the GENERIC path. P4's guard keyed on
+    workflow_contract_id, which the pre-planner template does not carry yet;
+    the governed generic path (birth marker -> plan_governance states) never
+    waits on a human plan review — autopilot advances pm->planner->builder
+    and the certificate is the plan gate. Legacy uncontracted sprints keep
+    the human plan-review card (pinned)."""
+
+    def _stage(self, tmp_path, *, governed: bool):
+        graph_top = {"plan_compile_required": True} if governed else {}
+        _write_fixture(tmp_path, graph_top=graph_top,
+                       status_extra={"status": "active", "phase": "planning_complete"})
+        sprints = tmp_path / "sprints"
+        (sprints / f"{SID}.design.md").write_text("# design\n", encoding="utf-8")
+        (sprints / f"{SID}.plan.md").write_text("# plan\n", encoding="utf-8")
+
+    def test_governed_compiling_never_advertises_plan_review(self, tmp_path):
+        self._stage(tmp_path, governed=True)
+        mod = _load_routes(tmp_path)
+        projection, _deg = mod.build_projection_payload(SID, mode="fast")
+        action = projection.get("human_action_required") or {}
+        assert action.get("type") != "plan_review", action
+
+    def test_legacy_uncontracted_keeps_the_plan_review_card(self, tmp_path):
+        self._stage(tmp_path, governed=False)
+        mod = _load_routes(tmp_path)
+        projection, _deg = mod.build_projection_payload(SID, mode="fast")
+        action = projection.get("human_action_required") or {}
+        assert action.get("type") == "plan_review", action

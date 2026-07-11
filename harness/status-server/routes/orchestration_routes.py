@@ -1293,13 +1293,22 @@ def _human_action_required(status: dict, dashboard: dict, artifacts: list[dict],
     # guards the artifact heuristic below kept the card up for entire
     # contracted runs (P4 finding: 39 sightings, zero plan verdicts).
     contracted = bool(dashboard.get("workflow_contract_id"))
+    # G4 UI-rung run 6: the card resurfaced on the GENERIC path during "Plan
+    # compiling…" (6 sightings, zero plan verdicts in the ledger) — the
+    # pre-planner template carries no workflow_contract_id yet. The governed
+    # generic path never waits on a human plan review: autopilot advances
+    # pm->planner->builder and the CERTIFICATE is the plan gate.
+    governance = dashboard.get("plan_governance") if isinstance(dashboard.get("plan_governance"), dict) else {}
+    governed_generic = str(governance.get("state") or "") in {
+        "compiling", "certified", "plan_compile_failed", "plan_certificate_invalid",
+    }
     dag = dashboard.get("dag") if isinstance(dashboard.get("dag"), dict) else {}
     build_started = any(
         _normalize_status(str(node.get("status") or "")) != "pending"
         for node in (dag.get("nodes") or [])
         if isinstance(node, dict)
     )
-    if plan_ready and not contracted and not build_started and (sprint_status in {"active", "planning"} or phase in {"planning", "planning_complete"}):
+    if plan_ready and not contracted and not governed_generic and not build_started and (sprint_status in {"active", "planning"} or phase in {"planning", "planning_complete"}):
         return {
             "type": "plan_review",
             "severity": "decision",

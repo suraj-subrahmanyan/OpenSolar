@@ -903,9 +903,27 @@ function useSessionData(
     "connecting" | "live" | "retrying" | "off"
   >("connecting");
   const selectedSprintRef = useRef(sprintId);
+  // G4 UI-rung run 6: a late poll response landed AFTER a fresher SSE delta
+  // and regressed a node from active back to pending on screen for ~45s
+  // (truthful-states UI_STALE). Projections apply MONOTONICALLY by
+  // generated_at — a stale response is dropped, whatever path it came by.
+  const lastProjectionAtRef = useRef("");
+  const applyProjection = useCallback(
+    (response: ProjectionResponse): boolean => {
+      const at = asString(response.generated_at);
+      if (at && lastProjectionAtRef.current && at < lastProjectionAtRef.current) {
+        return false;
+      }
+      if (at) lastProjectionAtRef.current = at;
+      setProjection(response);
+      return true;
+    },
+    [],
+  );
 
   useEffect(() => {
     selectedSprintRef.current = sprintId;
+    lastProjectionAtRef.current = "";
   }, [sprintId]);
 
   const refresh = useCallback(async () => {
@@ -940,7 +958,7 @@ function useSessionData(
     const results = await Promise.allSettled([
       fetchProjection(sprintId, "fast").then((projectionResponse) => {
         if (!isCurrent()) return;
-        setProjection(projectionResponse);
+        if (!applyProjection(projectionResponse)) return; // stale vs SSE
         cachePatch({ projection: projectionResponse });
         patchProvenance({
           lastProjectionAt:
@@ -1015,6 +1033,7 @@ function useSessionData(
     const cached = sessionDataCache.get(sprintId);
     if (cached) {
       setStatus(cached.status);
+      lastProjectionAtRef.current = asString(cached.projection?.generated_at);
       setProjection(cached.projection);
       setEvents(cached.events);
       setUsage(cached.usage);
@@ -1085,7 +1104,7 @@ function useSessionData(
           generated_at: msg.generated_at,
           schema_version: msg.data?.projection_schema,
         };
-        setProjection(projectionResponse);
+        if (!applyProjection(projectionResponse)) return; // stale frame
         setProvenance((prev) => ({
           ...prev,
           sprintId,
