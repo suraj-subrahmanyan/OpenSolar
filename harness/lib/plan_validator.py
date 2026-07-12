@@ -1169,6 +1169,26 @@ def planner_compile_policy_block(
         "9. graph shape — non-empty, acyclic, depends_on only references node",
         f"   ids in this graph, at most {int(max_nodes)} nodes.",
         "",
+        # P7 §3c rule of evidence: teaching, never a compile rule. Research
+        # grounding is enforced on OUTCOMES by the artifact-triggered quality
+        # gate, so the planner keeps full graph freedom here by design.
+        "## Rule of evidence (research prompts)",
+        "",
+        "Teaching, not a compile rule — no error code enforces a graph shape:",
+        "- A node that will produce claims (claims.jsonl, or a final report",
+        "  with [cite:ev_*] markers) should CONSUME a source pack produced by",
+        "  a retrieval-capable node (cap.research-retrieval): sources.jsonl +",
+        "  evidence.jsonl + extracts/ under a declared artifact root.",
+        "- Declare what you retrieve and what you claim: list those files in",
+        "  the node's write_scope/artifacts. The research quality gate keys",
+        "  off DECLARED artifacts and judges the OUTCOME — claims must cite",
+        "  evidence that resolves and verifies; fabricated or dangling",
+        "  citations block.",
+        "- Any graph shape is fine: one self-retrieving report node, or",
+        "  retrieve -> synthesize -> cross-check, or anything else. If the",
+        "  plan grounds badly, the gate bounces the outcome and the bounce",
+        "  error teaches the repair round.",
+        "",
         "Registered capsules (capability_capsule_id -> admitted task types):",
     ]
     try:
