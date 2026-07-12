@@ -206,7 +206,7 @@ check_gitleaks_history() {
 
 check_release_coherence() {
     work="$1"
-    log "check 4: release coherence (channel/version/modes/references — P6 PKG-001..004)"
+    log "check 3b: release coherence (channel/version/modes/references — P6 PKG-001..004)"
     if (cd "$work" && bash scripts/check-release-coherence.sh); then
         return 0
     fi
