@@ -251,7 +251,14 @@ def presence_map(manifest: Dict[str, Any]) -> Dict[str, bool]:
         presence["eval_json" if kind == "eval" else kind] = exists
     for row in manifest.get("rows") or []:
         if isinstance(row, dict) and str(row.get("declared") or ""):
-            presence[f"output:{row['declared']}"] = bool(row.get("exists"))
+            present = bool(row.get("exists"))
+            if not present:
+                # Rows are hashed as files (exists=false for directories so
+                # publish_canonical never copy2()s a dir), but for the proof
+                # gate an existing DIRECTORY satisfies a declared scope.
+                declared_path = str(row.get("path") or "")
+                present = bool(declared_path) and Path(declared_path).is_dir()
+            presence[f"output:{row['declared']}"] = present
     presence["all_outputs_present"] = bool(manifest.get("all_outputs_present"))
     presence["artifact_root_violation"] = bool(manifest.get("violations"))
     return presence

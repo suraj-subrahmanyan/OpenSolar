@@ -4181,12 +4181,16 @@ def _proof_field_presence(presence: dict[str, Any], field: str) -> bool | None:
 
 def _evaluate_proof_obligations(sid: str, node: dict[str, Any], eval_json: str | Path = "") -> dict[str, Any]:
     obligations = _node_proof_obligations(sid, node)
-    if not obligations:
+    presence = _proof_artifact_presence(sid, node, eval_json=eval_json)
+    # "all_outputs_present" reaches the presence map only from a written
+    # manifest, i.e. only on the contracted path — its presence is the signal
+    # that manifest-completeness gating applies (legacy uncontracted pinned).
+    manifest_gated = "all_outputs_present" in presence
+    if not obligations and not manifest_gated:
         return {"required": False, "ok": True, "checked": [], "missing": []}
 
     eval_data = _read_json_file_safe(eval_json or _eval_json_file(sid, str(node.get("id") or "")))
     proof_checks = eval_data.get("proof_checks") if isinstance(eval_data.get("proof_checks"), dict) else {}
-    presence = _proof_artifact_presence(sid, node, eval_json=eval_json)
     checked: list[dict[str, Any]] = []
     missing: list[dict[str, Any]] = []
     if presence.get("artifact_root_violation"):
@@ -4200,6 +4204,30 @@ def _evaluate_proof_obligations(sid: str, node: dict[str, Any], eval_json: str |
         }
         checked.append({**entry, "satisfied": False})
         missing.append(entry)
+    if manifest_gated:
+        # Battery run-1 B12: the node's only proof obligations were
+        # capsule-injected (guard/resource), so a builder that never produced
+        # two of its DECLARED write-scope outputs still passed — the manifest
+        # recorded exists=false rows that no obligation named. A declared
+        # output is a claim; like AC-R6.3 this blocks regardless of which
+        # obligations the node declares, and the normal repair path gives the
+        # builder a bounded round to produce (or stop declaring) the files.
+        # The output: keys (not the writer's all_outputs_present) are the
+        # trigger — presence_map treats an existing directory as present.
+        missing_rows = sorted(
+            key[len("output:"):]
+            for key, value in presence.items()
+            if key.startswith("output:") and not value
+        )
+        if missing_rows:
+            entry = {
+                "kind": "artifact_manifest",
+                "requirement": "declared_outputs_exist",
+                "field": ",".join(missing_rows),
+                "reason": "MISSING_DECLARED_OUTPUT",
+            }
+            checked.append({**entry, "satisfied": False})
+            missing.append(entry)
 
     for obligation in obligations:
         kind = str(obligation.get("kind") or "")
