@@ -86,6 +86,11 @@ VALIDATED_SOURCE_TYPES = {"paper", "code", "official_doc", "benchmark"}
 HIGH_AUTHORITY_THRESHOLD = 0.75
 CITE_EVIDENCE_RE = re.compile(r"\[cite:(ev_[A-Za-z0-9_-]+)\]")
 
+# P7 §6a grounding label bands (PROVISIONAL — R6 battery calibrates before
+# freezing). Ratio = grounded citations / citations that resolve to evidence.
+GROUNDING_LABEL_GROUNDED_MIN = 0.90
+GROUNDING_LABEL_PARTIAL_MIN = 0.60
+
 
 def _normalize_policy_profile(profile: dict[str, Any]) -> dict[str, Any]:
     out = dict(profile)
@@ -472,9 +477,19 @@ def _citation_grounding_metrics(final_text: str, output_dir: Path) -> tuple[dict
         for item in checks
         if not item.get("ok")
     ]
-    if grounding_failures:
+    # P7 §6a remap (owner decision 2026-07-12): a paraphrase miss on the
+    # token-overlap heuristic (citation_context_not_grounded) is a LABEL,
+    # never an error — demanding 1.0 overlap failed honest reports and
+    # taught agents to quote instead of synthesize. Integrity failures
+    # (extract-less evidence rows, unlocatable citation context) stay hard:
+    # those are the UNTRUTHFUL class, zero tolerance.
+    integrity_failures = [
+        item for item in grounding_failures
+        if item.get("reason") != "citation_context_not_grounded"
+    ]
+    if integrity_failures:
         failing_ids = sorted(
-            {str(item.get("evidence_id") or "") for item in grounding_failures if item.get("evidence_id")}
+            {str(item.get("evidence_id") or "") for item in integrity_failures if item.get("evidence_id")}
         )
         errors.append("final_md_ungrounded_evidence_citations:" + ",".join(failing_ids[:10]))
     grounded = sum(
@@ -482,12 +497,24 @@ def _citation_grounding_metrics(final_text: str, output_dir: Path) -> tuple[dict
         for evidence_id in cited_ids
         if any(item.get("ok") and item.get("evidence_id") == evidence_id for item in checks)
     )
+    resolved_citations = len(cited_ids) - len(missing_ids)
+    grounding_ratio = (grounded / resolved_citations) if resolved_citations else 0.0
+    if grounding_ratio >= GROUNDING_LABEL_GROUNDED_MIN:
+        grounding_label = "grounded"
+    elif grounding_ratio >= GROUNDING_LABEL_PARTIAL_MIN:
+        grounding_label = "partially_grounded"
+    else:
+        grounding_label = "weakly_grounded"
+    if len(integrity_failures) < len(grounding_failures):
+        warnings.append(f"final_md_grounding_label:{grounding_label}:ratio={grounding_ratio:.4f}")
     metrics = {
         "final_md_citation_count": len(cited_ids),
         "final_md_grounded_citation_count": grounded,
         "final_md_missing_cited_evidence_count": len(missing_ids),
         "final_md_ungrounded_citation_count": len(grounding_failures),
         "final_md_grounding_failures": grounding_failures[:20],
+        "final_md_grounding_ratio": round(grounding_ratio, 4),
+        "final_md_grounding_label": grounding_label,
     }
     return metrics, errors, warnings
 
