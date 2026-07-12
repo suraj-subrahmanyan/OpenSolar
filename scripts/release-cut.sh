@@ -204,6 +204,16 @@ check_gitleaks_history() {
     return 1
 }
 
+check_release_coherence() {
+    work="$1"
+    log "check 4: release coherence (channel/version/modes/references — P6 PKG-001..004)"
+    if (cd "$work" && bash scripts/check-release-coherence.sh); then
+        return 0
+    fi
+    printf '  FAIL: release-coherence gate failed in the cut tree\n' >&2
+    return 1
+}
+
 run_verification() {
     work="$1"; rc=0
     rule
@@ -212,6 +222,8 @@ run_verification() {
     check_working_files "$work"        || rc=1
     rule
     check_personal_tokens "$work"      || rc=1
+    rule
+    check_release_coherence "$work"    || rc=1
     rule
     report_architectural_tokens "$work" || true
     rule
