@@ -16,8 +16,11 @@ set -eu
 # also bundled into desktop artifacts as a network fallback. rc.8 artifacts
 # install from their bundled Resources/harness first; until v1.0.0-rc.8 is
 # tagged, the fallback channel stays on the latest published release.
+# Kept in lockstep with VERSION by scripts/check-release-coherence.sh (a
+# release-cut gate) — rc.8 shipped with this still on rc.6 and update
+# silently DOWNGRADED fresh installs (P6 corpus PKG-001).
 SOLAR_REPO="${SOLAR_REPO:-https://github.com/suraj-subrahmanyan/OpenSolar.git}"
-SOLAR_CHANNEL="${SOLAR_CHANNEL:-v1.0.0-rc.6}"
+SOLAR_CHANNEL="${SOLAR_CHANNEL:-v1.0.0-rc.8}"
 SOLAR_SRC="${SOLAR_SRC:-$HOME/.solar-src/OpenSolar}"
 
 log() { printf '[get-solar] %s\n' "$*" >&2; }

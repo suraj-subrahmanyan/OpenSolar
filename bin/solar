@@ -460,6 +460,23 @@ fetch_channel() {
     git clone --depth 1 --branch "$_channel" "$_repo" "$_dest" >/dev/null 2>&1
 }
 
+# Compare two release versions (e.g. 1.0.0-rc.6 vs 1.0.0). Prints lt|eq|gt,
+# or "unknown" when either side is missing/unparseable. Pre-releases order
+# BEFORE their final release: the "-rc." suffix is normalized to Debian's
+# tilde, which GNU sort -V ranks below end-of-string (1.0.0~rc.8 < 1.0.0).
+version_compare() {
+    a="${1:-}"; b="${2:-}"
+    if [ -z "$a" ] || [ -z "$b" ] || [ "$a" = "unknown" ] || [ "$b" = "unknown" ]; then
+        echo unknown; return 0
+    fi
+    an="$(printf '%s' "$a" | sed 's/^v//; s/-/~/')"
+    bn="$(printf '%s' "$b" | sed 's/^v//; s/-/~/')"
+    if [ "$an" = "$bn" ]; then echo eq; return 0; fi
+    first="$(printf '%s\n%s\n' "$an" "$bn" | sort -V | head -n1)"
+    if [ "$first" = "$an" ]; then echo lt; else echo gt; fi
+    return 0
+}
+
 # Real update: fetch the recorded channel, compare against the installed sha,
 # and either report up-to-date or reinstall from the fetched source (which runs
 # db_init + migrations + rewrites the receipt), then gate on doctor.
@@ -516,6 +533,21 @@ do_update() {
                 return 0
                 ;;
         esac
+    fi
+
+    # A receipt's channel can lag the installed tree (rc.8 installs recorded
+    # rc.6 — P6 corpus PKG-001), so fetching the recorded channel must never
+    # silently move an install BACKWARDS. Refuse a downgrade unless forced.
+    cur_version="$(receipt_field version)"
+    [ -n "$cur_version" ] || cur_version="$(cat "$fetch_dir/VERSION" 2>/dev/null || echo unknown)"
+    new_version="$(cat "$tmp_fetch/VERSION" 2>/dev/null || echo unknown)"
+    if [ "${SOLAR_UPDATE_ALLOW_DOWNGRADE:-0}" != "1" ] \
+        && [ "$(version_compare "$new_version" "$cur_version")" = "lt" ]; then
+        rm -rf "$tmp_fetch"
+        echo "update refused: channel '$channel' serves version $new_version, OLDER than installed $cur_version" >&2
+        echo "  the recorded update channel is stale; reinstall from the current release to fix it," >&2
+        echo "  or rerun with SOLAR_UPDATE_ALLOW_DOWNGRADE=1 to downgrade deliberately." >&2
+        exit 1
     fi
 
     echo "updating $cur_sha -> $new_sha (channel: $channel, components: $comps)" >&2
@@ -1261,6 +1293,7 @@ case "$cmd" in
     status) shift; do_status "$@" ;;
     doctor) shift; doctor "$@" ;;
     update) shift; do_update "$@" ;;
+    version-compare) shift; version_compare "${1:-}" "${2:-}" ;;
     repair) shift; do_repair "$@" ;;
     backup) shift; do_backup "$@" ;;
     restore) shift; do_restore "$@" ;;
