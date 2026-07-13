@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -110,6 +111,77 @@ def _iter_operator_results(harness_dir: Path, sid: str) -> list[tuple[Path, dict
     return rows
 
 
+def _node_id_from_model_call(sid: str, payload: dict[str, Any]) -> str:
+    instruction = Path(str(payload.get("instruction_file") or "")).name
+    prefix = f"{sid}."
+    if instruction.startswith(prefix):
+        remainder = instruction[len(prefix) :]
+        if "-eval-dispatch" in remainder:
+            return remainder.split("-eval-dispatch", 1)[0]
+        if remainder.endswith("-dispatch.md"):
+            return remainder[: -len("-dispatch.md")]
+
+    dispatch_id = str(payload.get("dispatch_id") or "").strip()
+    for dispatch_prefix in (f"graph-eval-{sid}-", f"graph-{sid}-"):
+        if not dispatch_id.startswith(dispatch_prefix):
+            continue
+        remainder = dispatch_id[len(dispatch_prefix) :]
+        return re.sub(r"-\d{8}T\d{6}Z(?:-q\d+)?$", "", remainder)
+    return ""
+
+
+def _iter_succeeded_model_calls(harness_dir: Path, sid: str) -> list[tuple[Path, dict[str, Any]]]:
+    path = harness_dir / "sessions" / sid / "events.jsonl"
+    rows: list[tuple[Path, dict[str, Any]]] = []
+    if not path.is_file():
+        return rows
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return rows
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("type") or "") != "model_call_succeeded":
+            continue
+        if str(event.get("source") or "") != "model_call_runtime":
+            continue
+        event_sid = str(event.get("sprint_id") or event.get("session_id") or "")
+        if event_sid != sid:
+            continue
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        model = payload.get("model") if isinstance(payload.get("model"), dict) else {}
+        dispatch_id = str(payload.get("dispatch_id") or event.get("activity_id") or "").strip()
+        if not dispatch_id:
+            continue
+        role = str(model.get("persona") or "").strip().lower()
+        rows.append(
+            (
+                path,
+                {
+                    "task_id": dispatch_id,
+                    "sprint_id": sid,
+                    "node_id": _node_id_from_model_call(sid, payload),
+                    "requested_role": role,
+                    "runtime_mode": str(model.get("pane_runtime") or "").strip().lower(),
+                    "status": str(payload.get("status") or "runtime_accepted"),
+                    "provider": model.get("provider"),
+                    "model": model.get("model"),
+                    "pane": payload.get("pane"),
+                    "dispatch_mode": "direct_pane_eval" if role == "evaluator" else "direct_pane",
+                    "runtime_evidence": "model_call_succeeded",
+                    "runtime_metadata_source": model.get("metadata_source"),
+                    "event_id": event.get("event_id"),
+                },
+            )
+        )
+    return rows
+
+
 def _artifact_path(harness_dir: Path, value: Any) -> Path | None:
     raw = str(value or "").strip()
     if not raw:
@@ -183,6 +255,11 @@ def _merge_stage(stage: dict[str, Any], data: dict[str, Any], *, source_path: Pa
     if str(data.get("provider_policy") or "").strip() and not stage.get("provider_policy"):
         stage["provider_policy"] = str(data["provider_policy"]).strip()
 
+    for key in ("pane", "dispatch_mode", "runtime_evidence", "runtime_metadata_source", "event_id"):
+        value = str(data.get(key) or "").strip()
+        if value and not stage.get(key):
+            stage[key] = value
+
     status = str(data.get("status") or "").strip()
     if status:
         stage["status"] = status
@@ -215,7 +292,7 @@ def build_route_proof(
     *,
     selected_runtime: str | None = None,
 ) -> dict[str, Any]:
-    """Build a sprint route proof from PM records and operator result artifacts."""
+    """Build route proof from PM/results plus verified direct-pane model calls."""
     harness = Path(harness_dir)
     sid = str(sid or "").strip()
     operators = _load_operator_registry(harness)
@@ -236,6 +313,14 @@ def build_route_proof(
         key = _stage_key(data, path)
         stage = stages.setdefault(key, {})
         _merge_stage(stage, data, source_path=path, source="operator_result")
+
+    for path, data in _iter_succeeded_model_calls(harness, sid):
+        key = _stage_key(data, path)
+        stage = stages.setdefault(key, {})
+        _merge_stage(stage, data, source_path=path, source="model_call_succeeded")
+        runtime = str(data.get("runtime_mode") or "").strip().lower()
+        if runtime:
+            runtime_values.add(runtime)
 
     for stage in stages.values():
         op_id = str(stage.get("operator_id") or "").strip()
@@ -263,7 +348,11 @@ def build_route_proof(
         provider = _normalize_provider(stage.get("provider"))
         status = str(stage.get("status") or "").strip().lower()
         has_result = bool(stage.get("result_json"))
-        should_check = enforce and (has_result or status in TERMINAL_TASK_STATUSES)
+        should_check = enforce and (
+            has_result
+            or status in TERMINAL_TASK_STATUSES
+            or stage.get("runtime_evidence") == "model_call_succeeded"
+        )
         if not should_check:
             continue
         if not provider:

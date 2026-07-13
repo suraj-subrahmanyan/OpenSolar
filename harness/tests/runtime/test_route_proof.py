@@ -93,6 +93,44 @@ def _seed_result(
     )
 
 
+def _seed_direct_model_call(
+    harness: Path,
+    sid: str,
+    *,
+    node_id: str,
+    dispatch_id: str,
+    pane: str,
+    provider: str,
+    model: str,
+    role: str = "builder",
+) -> None:
+    events = harness / "sessions" / sid / "events.jsonl"
+    events.parent.mkdir(parents=True, exist_ok=True)
+    event = {
+        "event_id": f"event-{dispatch_id}",
+        "session_id": sid,
+        "type": "model_call_succeeded",
+        "source": "model_call_runtime",
+        "sprint_id": sid,
+        "activity_id": dispatch_id,
+        "payload": {
+            "pane": pane,
+            "dispatch_id": dispatch_id,
+            "status": "processing_verified_without_keyword",
+            "instruction_file": str(harness / "sprints" / f"{sid}.{node_id}-dispatch.md"),
+            "model": {
+                "persona": role,
+                "pane_runtime": "claude" if provider == "anthropic" else "codex",
+                "provider": provider,
+                "model": model,
+                "metadata_source": str(harness / "run" / "pane-env" / "_2.json"),
+            },
+        },
+    }
+    with events.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event) + "\n")
+
+
 def test_codex_route_proof_accepts_openai_only(tmp_path):
     harness = tmp_path / "harness"
     sid = "sprint-route-ok"
@@ -203,3 +241,123 @@ def test_stale_physical_plan_operator_does_not_override_route_proof(tmp_path):
     assert warnings[0]["selected_operator_id"] == "mini-claude-sonnet-builder"
     assert warnings[0]["actual_operator_ids"] == ["codex-builder"]
     assert warnings[0]["diagnostic"] == "physical_plan_selected_operator_untrusted_for_route_proof"
+
+
+def test_route_proof_includes_succeeded_direct_builder_call(tmp_path):
+    harness = tmp_path / "harness"
+    sid = "sprint-direct-builder"
+    _seed_registry(harness)
+    _seed_pm_record(
+        harness,
+        sid,
+        "task-eval",
+        node_id="S1",
+        role="evaluator",
+        operator_id="claude-evaluator",
+        runtime_mode="claude",
+        provider_policy="anthropic",
+    )
+    _seed_result(
+        harness,
+        sid,
+        "task-eval",
+        node_id="S1",
+        operator_id="claude-evaluator",
+        provider="anthropic",
+        model="sonnet",
+    )
+    _seed_direct_model_call(
+        harness,
+        sid,
+        node_id="S1",
+        dispatch_id="graph-sprint-direct-builder-S1-20260713T184109Z",
+        pane="solar-harness:0.2",
+        provider="anthropic",
+        model="claude-opus-4-8",
+    )
+
+    proof = route_proof.write_route_proof(harness, sid)
+
+    assert proof["ok"] is True
+    assert proof["stage_count"] == 2
+    direct = next(stage for stage in proof["stages"] if stage.get("dispatch_mode") == "direct_pane")
+    assert direct["node_id"] == "S1"
+    assert direct["role"] == "builder"
+    assert direct["pane"] == "solar-harness:0.2"
+    assert direct["provider"] == "anthropic"
+    assert direct["model"] == "claude-opus-4-8"
+    assert direct["runtime_evidence"] == "model_call_succeeded"
+
+
+def test_route_proof_blocks_forbidden_provider_on_succeeded_direct_call(tmp_path):
+    harness = tmp_path / "harness"
+    sid = "sprint-direct-provider-violation"
+    _seed_registry(harness)
+    _seed_pm_record(
+        harness,
+        sid,
+        "task-planner",
+        node_id="N0",
+        role="planner",
+        operator_id="codex-builder",
+        runtime_mode="codex",
+        provider_policy="openai",
+    )
+    _seed_direct_model_call(
+        harness,
+        sid,
+        node_id="S1",
+        dispatch_id="graph-sprint-direct-provider-violation-S1-20260713T184109Z",
+        pane="solar-harness:0.2",
+        provider="anthropic",
+        model="claude-opus-4-8",
+    )
+
+    proof = route_proof.write_route_proof(harness, sid)
+
+    assert proof["ok"] is False
+    assert proof["violations"] == [
+        {
+            "task_id": "graph-sprint-direct-provider-violation-S1-20260713T184109Z",
+            "node_id": "S1",
+            "provider": "anthropic",
+            "allowed_providers": ["openai"],
+            "reason": "provider_policy_violation",
+        }
+    ]
+
+
+def test_route_proof_fails_closed_when_succeeded_direct_call_lacks_provider(tmp_path):
+    harness = tmp_path / "harness"
+    sid = "sprint-direct-missing-provider"
+    _seed_registry(harness)
+    _seed_pm_record(
+        harness,
+        sid,
+        "task-planner",
+        node_id="N0",
+        role="planner",
+        operator_id="codex-builder",
+        runtime_mode="codex",
+        provider_policy="openai",
+    )
+    _seed_direct_model_call(
+        harness,
+        sid,
+        node_id="S1",
+        dispatch_id="graph-sprint-direct-missing-provider-S1-20260713T184109Z",
+        pane="solar-harness:0.2",
+        provider="",
+        model="",
+    )
+
+    proof = route_proof.write_route_proof(harness, sid)
+
+    assert proof["ok"] is False
+    assert proof["violations"] == [
+        {
+            "task_id": "graph-sprint-direct-missing-provider-S1-20260713T184109Z",
+            "node_id": "S1",
+            "reason": "missing_provider",
+        }
+    ]
