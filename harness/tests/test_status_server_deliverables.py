@@ -90,3 +90,30 @@ def test_recorded_external_workdir_remains_supported(tmp_path: Path) -> None:
 
     assert result["source"] == "output"
     assert module._resolve_sprint_deliverable(sid, result["rel_path"]) == output.resolve()
+
+
+def test_workdir_report_outranks_larger_planner_report(tmp_path: Path) -> None:
+    """WRONG_RESULT_SELECTED: process prose must not become the user result.
+
+    The live failure had a 3.5 KiB ``N0.pm-result.md`` planning summary and a
+    smaller ``workdir/workspace/test_report.md`` produced by the task.  Both are
+    classified as reports, so choosing by size alone opens the planner summary.
+    """
+    module, _harness, sprints = _load_status_server(tmp_path)
+    sid = "sprint-result-selection"
+    planner_report = _write(
+        sprints / f"{sid}.N0.pm-result.md",
+        "# Planner result\n\n" + ("planning details\n" * 200),
+    )
+    user_report = _write(
+        sprints / sid / "workdir" / "workspace" / "test_report.md",
+        "# Test report\n\n5 tests passed.\n",
+    )
+
+    items = module._discover_sprint_deliverables(sid)
+    selected = [item for item in items if item["result"]]
+
+    assert planner_report.stat().st_size > user_report.stat().st_size
+    assert len(selected) == 1
+    assert selected[0]["name"] == "test_report.md"
+    assert selected[0]["source"] == "output"

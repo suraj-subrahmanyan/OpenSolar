@@ -1691,8 +1691,8 @@ def _deliverable_stage(name: str, rel_path: str, source: str) -> str:
 
 def _select_result_index(rows: list[dict]) -> int:
     """Pick the single canonical result among discovered rows. Preference: the
-    evaluator-accepted artifact, then a rendered report (HTML, then md/pdf), then the
-    largest produced output, then any produced output, then the newest primary."""
+    evaluator-accepted artifact, then workdir output, then process reports.  Within
+    each tier prefer rendered reports (HTML, then md/pdf) before raw output."""
     if not rows:
         return -1
 
@@ -1705,12 +1705,17 @@ def _select_result_index(rows: list[dict]) -> int:
     def renderable(row: dict) -> bool:
         return kind(row) in {"html", "htm", "md", "markdown", "pdf"}
 
+    def produced(row: dict) -> bool:
+        return row.get("source") == "output"
+
     tiers = (
         lambda r: "accepted" in name_l(r) and renderable(r),
+        lambda r: produced(r) and r.get("stage") == "report" and kind(r) in {"html", "htm"},
+        lambda r: produced(r) and r.get("stage") == "report" and renderable(r),
+        lambda r: produced(r) and renderable(r),
+        lambda r: produced(r),
         lambda r: r.get("stage") == "report" and kind(r) in {"html", "htm"},
         lambda r: r.get("stage") == "report" and renderable(r),
-        lambda r: r.get("source") == "output" and renderable(r),
-        lambda r: r.get("source") == "output",
         lambda r: bool(r.get("primary")),
         lambda r: True,
     )
