@@ -9,8 +9,8 @@ missing front-end.
 
 ## Sources
 
-- **Primary:** `~/opensolar-state/lisihao-Solar-mirror` `main` @ `e2480290` (Sihao's own main, carries
-  the DeepDive files merged). READ-ONLY; never modified.
+- **Primary:** maintainer-provided read-only mirror, `main` @ `e2480290` (carries the DeepDive files
+  merged). The source mirror was never modified.
 - **Cross-check:** this repo's `upstream/codex/evaluator-control-plane` ref (an earlier productization
   variant; commits `96b9e140`/`9de0586f`/`3d14bc4d` per `rsi-deepdive-workflow-lock.md`).
 
