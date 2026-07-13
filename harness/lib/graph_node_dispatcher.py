@@ -6792,6 +6792,46 @@ def _record_node_attribution(sid: str, node_id: str, fields: dict[str, Any]) -> 
         pass
 
 
+def _record_direct_pane_attribution(
+    sid: str,
+    node_id: str,
+    *,
+    pane: str,
+    dispatch_id: str,
+    instruction_file: Path,
+    role: str,
+) -> None:
+    """Persist actual direct-pane runtime attribution after a verified submit."""
+    metadata: dict[str, Any] = {}
+    try:
+        import model_call_runtime
+
+        metadata = model_call_runtime.pane_runtime_metadata(pane)
+    except Exception:
+        metadata = {}
+    runtime = str(metadata.get("pane_runtime") or "").strip().lower()
+    _record_node_attribution(
+        sid,
+        node_id,
+        {
+            "phase": "dispatched",
+            "role": role,
+            "dispatch_id": dispatch_id,
+            "dispatch_mode": "direct_pane_eval" if role == "evaluator" else "direct_pane",
+            "pane": pane,
+            "profile": metadata.get("persona") or role,
+            "backend": f"{runtime}-tui" if runtime else None,
+            "provider": metadata.get("provider"),
+            "model": metadata.get("model"),
+            "runtime": runtime or None,
+            "runtime_bin": metadata.get("runtime_bin"),
+            "runtime_metadata_source": metadata.get("metadata_source"),
+            "instruction_file": str(instruction_file),
+            "exit_code": None,
+        },
+    )
+
+
 def _physical_operator_spec(operator_id: str) -> dict[str, Any]:
     try:
         registry = json.loads((HARNESS_DIR / "config" / "physical-operators.json").read_text(encoding="utf-8"))
@@ -7835,6 +7875,14 @@ def dispatch_queue_item(item: dict[str, Any], dry_run: bool = False, ttl: int = 
                 if sent:
                     if not dry_run:
                         _write_submit_ack(sid, node_id, pane, dispatch_id)
+                        _record_direct_pane_attribution(
+                            sid,
+                            node_id,
+                            pane=pane,
+                            dispatch_id=dispatch_id,
+                            instruction_file=instruction_file,
+                            role="builder",
+                        )
                     return {
                         "ok": True,
                         "reason": "matching_queued_prompt_submitted",
@@ -7960,6 +8008,14 @@ def dispatch_queue_item(item: dict[str, Any], dry_run: bool = False, ttl: int = 
     if sent:
         if not dry_run:
             _write_submit_ack(sid, node_id, pane, dispatch_id)
+            _record_direct_pane_attribution(
+                sid,
+                node_id,
+                pane=pane,
+                dispatch_id=dispatch_id,
+                instruction_file=instruction_file,
+                role="builder",
+            )
             try:
                 graph = load_graph(graph_path)
                 set_node_status(graph, node_id, "dispatched", pane=pane, dispatch_id=dispatch_id)
@@ -8772,6 +8828,15 @@ def dispatch_node_evals(graph_path: str, dry_run: bool = False, ttl: int = 900,
                 used_evaluator_panes.add(assigned_pane)
                 break
             _write_submit_ack(sid, node_id, pane, str(assignment["dispatch_id"]))
+            if not assigned_pane.startswith("operator-pool:"):
+                _record_direct_pane_attribution(
+                    sid,
+                    node_id,
+                    pane=pane,
+                    dispatch_id=str(assignment["dispatch_id"]),
+                    instruction_file=instruction_file,
+                    role="evaluator",
+                )
             used_evaluator_panes.add(assigned_pane)
             used_evaluator_panes.add(pane)
             sent_records.append({

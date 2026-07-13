@@ -1262,16 +1262,38 @@ class TestSubmitFailureRecovery:
         assert len(enqueue_calls) == 1
 
     def test_dispatch_success_no_lease_release(self, tmp_harness, monkeypatch):
-        """When _send_to_pane succeeds, lease is NOT released."""
+        """A successful direct builder dispatch keeps its lease and records attribution."""
         import graph_node_dispatcher as gnd
+        import model_call_runtime
 
         tmp_path, sprints, sid, graph = tmp_harness
 
         monkeypatch.setattr(gnd, "_pane_exists", lambda p: True)
+        monkeypatch.setattr(gnd, "_assigned_pane_unavailable_reason", lambda _pane: "")
         monkeypatch.setattr(gnd, "acquire_lease", lambda *a, **kw: {"acquired": True})
         monkeypatch.setattr(gnd, "_send_to_pane", lambda *a, **kw: True)
         monkeypatch.setattr(gnd, "_write_submit_ack", lambda *a: None)
         monkeypatch.setattr(gnd, "_inject_dispatch_context", lambda *a, **kw: None)
+        monkeypatch.setattr(
+            model_call_runtime,
+            "pane_runtime_metadata",
+            lambda _pane: {
+                "pane_runtime": "claude",
+                "provider": "anthropic",
+                "model": "claude-opus-4-8",
+                "persona": "builder",
+                "runtime_bin": "/usr/local/bin/claude",
+                "metadata_source": "/tmp/pane-env/_2.json",
+            },
+            raising=False,
+        )
+
+        attribution_calls = []
+        monkeypatch.setattr(
+            gnd,
+            "_record_node_attribution",
+            lambda sprint_id, node_id, fields: attribution_calls.append((sprint_id, node_id, fields)),
+        )
 
         release_calls = []
         def mock_release(*a, **kw):
@@ -1298,6 +1320,15 @@ class TestSubmitFailureRecovery:
         result = gnd.dispatch_queue_item(item, dry_run=False)
         assert result["ok"] is True
         assert len(release_calls) == 0, "Lease should NOT be released on success"
+        assert len(attribution_calls) == 1
+        recorded_sid, recorded_node, attribution = attribution_calls[0]
+        assert (recorded_sid, recorded_node) == (sid, "N1")
+        assert attribution["role"] == "builder"
+        assert attribution["dispatch_mode"] == "direct_pane"
+        assert attribution["dispatch_id"] == "dispatch-123"
+        assert attribution["pane"] == "test:0.1"
+        assert attribution["provider"] == "anthropic"
+        assert attribution["model"] == "claude-opus-4-8"
 
     def test_pane_missing_requeues(self, tmp_harness, monkeypatch):
         """When pane does not exist, node is requeued."""
