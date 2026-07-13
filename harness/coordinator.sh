@@ -2082,6 +2082,26 @@ dispatch_to_pane() {
     # Ideating/Musing/Orbiting/Reticulating before a tool call; treating those
     # as idle causes false dispatch failures while the pane is actually working.
     pane_has_processing_snapshot "$verify_output" && has_processing=1
+
+    # The graph dispatcher already proved this recovery against live Claude:
+    # some builds render the complete instruction in the composer but accept
+    # Return only after the paste has settled.  Give that visible residue two
+    # delayed standalone Enter attempts before quarantine clears and retransmits
+    # the text.  This avoids prompt stacking while keeping capture verification.
+    if (( !has_runtime_blocker && has_keyword && !has_processing )); then
+      local rescue_try
+      for rescue_try in 1 2; do
+        log "${Y}[dispatch] residual prompt rescue: pane=${pane} try=${rescue_try}/2${N}"
+        tmux send-keys -t "$pane" Enter 2>/dev/null || true
+        sleep 3
+        verify_output=$(tmux capture-pane -t "$pane" -p 2>/dev/null | tail -120)
+        printf '%s\n' "$verify_output" | grep -qiE "You've hit your limit|hit your limit|rate[- ]limit|usage limit reached|usage limit exceeded|monthly usage limit|/upgrade to increase your usage limit|resets .*\(America/Toronto\)" && has_runtime_blocker=1
+        printf '%s\n' "$verify_output" | grep -qiE "How is Claude doing this session|1:[[:space:]]*Bad[[:space:]]+2:[[:space:]]*Fine[[:space:]]+3:[[:space:]]*Good[[:space:]]+0:[[:space:]]*Dismiss" && has_runtime_blocker=1
+        pane_has_processing_snapshot "$verify_output" && has_processing=1
+        (( has_runtime_blocker || has_processing )) && break
+      done
+    fi
+
     if (( has_runtime_blocker )); then
       log "${Y}[dispatch] runtime limit/blocker detected; not assigning pane=${pane} sid=${sid} try=$((tries + 1))/${max_tries}${N}"
     elif (( has_keyword && has_processing )); then

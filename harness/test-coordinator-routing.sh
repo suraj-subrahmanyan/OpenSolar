@@ -251,6 +251,26 @@ assert "ACK watcher still launches after capture ACK" \
   'grep -qF '\''ack_watcher_bg "$sid" "${_dispatch_id:-unknown}" 300'\'' "$COORDINATOR_SH"'
 echo ""
 
+# ── TC13: visible prompt residue gets a delayed standalone Enter rescue ──
+echo "TC13: coordinator rescues a visible-but-unsubmitted dispatch before clearing it"
+assert "residual prompt rescue precedes quarantine clearing" \
+  'python3 - "$COORDINATOR_SH" <<'\''PY'\''
+from pathlib import Path
+import sys
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+start = text.index("dispatch_to_pane()")
+end = text.index("# dispatch_with_gate", start)
+body = text[start:end]
+rescue = body.index("[dispatch] residual prompt rescue")
+clear = body.index("prompt_quarantine_send_fixkeys", rescue)
+snippet = body[rescue:clear]
+assert rescue < clear
+assert '\''tmux send-keys -t "$pane" Enter'\'' in snippet
+assert "sleep 3" in snippet
+PY'
+echo ""
+
 # ── Summary ──
 echo "=== Results: PASS=$PASS FAIL=$FAIL ==="
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1
