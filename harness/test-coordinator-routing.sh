@@ -59,6 +59,8 @@ with open(__import__('os').environ["COORDINATOR_SH"]) as f:
 # Extract discover_pane_by_persona, choose_* functions and pane_title_persona
 funcs_to_extract = [
     "pane_is_idle_snapshot",
+    "pane_has_runtime_blocker_snapshot",
+    "pane_has_active_work_snapshot",
     "pane_has_processing_snapshot",
     "pane_has_prompt_snapshot",
     "pane_prompt_input_snapshot",
@@ -269,6 +271,21 @@ assert rescue < clear
 assert '\''tmux send-keys -t "$pane" Enter'\'' in snippet
 assert "sleep 3" in snippet
 PY'
+echo ""
+
+# ── TC14: active Claude work and queued input are never treated as idle ──
+echo "TC14: active Claude spinner and queued input block redispatch"
+CLAUDE_ACTIVE_SNAPSHOT=$'· Simmering… (2m 7s · ↓ 4.7k tokens)\n────────────────────\n❯  \n────────────────────\n  ⏵⏵ bypass permissions on'
+CLAUDE_QUEUED_SNAPSHOT=$'❯ /clear\n❯ /clear\n────────────────────\n❯ Press up to edit queued messages\n────────────────────\n  ⏵⏵ bypass permissions on'
+CLAUDE_COMPLETED_SNAPSHOT=$'✻ Worked for 16s\n────────────────────\n❯  \n────────────────────\n  ⏵⏵ bypass permissions on'
+assert "Simmering marker is processing" \
+  'pane_has_processing_snapshot "$CLAUDE_ACTIVE_SNAPSHOT"'
+assert "active Claude snapshot is not idle despite empty composer/footer" \
+  '! pane_is_idle_snapshot "$CLAUDE_ACTIVE_SNAPSHOT"'
+assert "queued Claude messages are not idle" \
+  '! pane_is_idle_snapshot "$CLAUDE_QUEUED_SNAPSHOT"'
+assert "completed Claude history with an empty composer is idle" \
+  'pane_is_idle_snapshot "$CLAUDE_COMPLETED_SNAPSHOT"'
 echo ""
 
 # ── Summary ──

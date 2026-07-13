@@ -1157,13 +1157,30 @@ pane_has_runtime_blocker_snapshot() {
   printf '%s\n' "$snapshot" | grep -qiE "You've hit your limit|hit your limit|rate[- ]limit|usage limit reached|usage limit exceeded|monthly usage limit|/upgrade to increase your usage limit|resets .*\\(America/Toronto\\)|How is Claude doing this session|1:[[:space:]]*Bad[[:space:]]+2:[[:space:]]*Fine[[:space:]]+3:[[:space:]]*Good[[:space:]]+0:[[:space:]]*Dismiss"
 }
 
+pane_has_active_work_snapshot() {
+  local snapshot="$1"
+  # Active Claude spinners carry an ellipsis before the live duration.  Match
+  # that shape (including new playful verbs such as Simmering/Warping) instead
+  # of bare glyphs: completed history uses "Worked for"/"Churned for" and must
+  # not keep an otherwise empty composer permanently busy.
+  printf '%s\n' "$snapshot" | grep -qE 'esc to interrupt|• Working|Working \(|Crafting|Cogitating|Wandering|Sock-hopping|Puzzling|Gusting|Ideating|Musing|Orbiting|Reticulating|[·✻✶✳✢].*(…|\.\.\.)[[:space:]]*\('
+}
+
 pane_has_processing_snapshot() {
   local snapshot="$1"
-  printf '%s\n' "$snapshot" | grep -qE 'esc to interrupt|• Working|Working \(|Crafting|Cogitating|Wandering|Sock-hopping|Crunched|Puzzling|Gusting|Ideating|Musing|Orbiting|Reticulating|Read\(|Bash\(|Edit\(|Write\(|按 dispatch|合约、PRD 读毕|What should Claude do|⎿|✻|✶|✳|✢'
+  pane_has_active_work_snapshot "$snapshot" && return 0
+  printf '%s\n' "$snapshot" | grep -qE 'Crunched|Read\(|Bash\(|Edit\(|Write\(|按 dispatch|合约、PRD 读毕|What should Claude do|⎿|✻|✶|✳|✢'
 }
 
 pane_is_idle_snapshot() {
   local snapshot="$1"
+  local live_tail
+  live_tail="$(printf '%s\n' "$snapshot" | tail -14)"
+  # The edit-mode footer and an empty-looking composer remain visible while
+  # Claude is working or has queued input.  Those are not dispatch windows.
+  pane_has_runtime_blocker_snapshot "$live_tail" && return 1
+  pane_has_active_work_snapshot "$live_tail" && return 1
+  printf '%s\n' "$live_tail" | grep -qiE 'Press up to edit queued messages|queued messages' && return 1
   # sprint-20260502-182804 hot-reload follow-up: 修 idle 检测正则
   # 旧 bug: '❯ $' 要求 ❯ 后**只有一个空格**到行尾
   #         实际 Claude Code 输入框 = "❯" + 多个空格 (输入框宽度填充) + 行尾
