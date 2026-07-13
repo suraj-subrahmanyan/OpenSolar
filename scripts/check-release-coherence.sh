@@ -138,6 +138,18 @@ else
     fail "bin/solar has no version-compare guard (updates cannot refuse downgrades)"
 fi
 
+# ---- check 5b: legacy update recovery stays on maintained origin -----------
+log "check 5b: pre-channel receipt recovery is maintained-origin and version-derived"
+if grep -q 'github.com/Stellven/OpenSolar' bin/solar; then
+    fail "bin/solar still redirects a legacy receipt to the upstream fork"
+elif ! grep -q 'DEFAULT_SOLAR_REPO="https://github.com/suraj-subrahmanyan/OpenSolar.git"' bin/solar; then
+    fail "bin/solar maintained-origin fallback is missing"
+elif ! grep -q 'release_channel_from_version' bin/solar; then
+    fail "bin/solar legacy channel is not derived from the installed release version"
+else
+    ok "legacy update recovery stays on maintained origin and derives its release tag"
+fi
+
 # ---- check 6: receipt.sh channel fallback derives from VERSION ------------
 # PKG-001 sibling found by real-machine install verification (2026-07-13): a
 # direct install.sh run (dev tree, desktop-bundled Resources/harness) recorded

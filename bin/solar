@@ -70,6 +70,7 @@ if [ -z "${CLAUDE_DIR:-}" ]; then
     CLAUDE_DIR="$(receipt_value "$RECEIPT_PATH" claude_dir 2>/dev/null || true)"
 fi
 CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude}"
+DEFAULT_SOLAR_REPO="https://github.com/suraj-subrahmanyan/OpenSolar.git"
 
 usage() {
     cat <<'EOF'
@@ -477,6 +478,20 @@ version_compare() {
     return 0
 }
 
+# Recover the fetchable tag for a pre-channel receipt.  Development describe
+# strings (for example 1.0.0-rc.8-6-gabc123) are deliberately rejected: they
+# are not guaranteed to exist as remote refs, so guessing would make update
+# fetch an unrelated tree.  A user can still recover explicitly with
+# SOLAR_CHANNEL when the old receipt lacks a release version.
+release_channel_from_version() {
+    candidate="${1:-}"
+    if printf '%s\n' "$candidate" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'; then
+        printf 'v%s\n' "$candidate"
+        return 0
+    fi
+    return 1
+}
+
 # Real update: fetch the recorded channel, compare against the installed sha,
 # and either report up-to-date or reinstall from the fetched source (which runs
 # db_init + migrations + rewrites the receipt), then gate on doctor.
@@ -489,11 +504,21 @@ do_update() {
     repo="$(receipt_field repo)"
     channel="$(receipt_field channel)"
     cur_sha="$(receipt_field git_sha)"
+    cur_version="$(receipt_field version)"
     [ -n "$comps" ] || { echo "receipt has no components" >&2; exit 1; }
-    # Pre-channel receipts fall back to the published defaults (kept in sync
-    # with get-solar.sh and receipt.sh).
-    [ -n "$repo" ] || repo="https://github.com/Stellven/OpenSolar.git"
-    [ -n "$channel" ] || channel="v1.0.0-rc.3"
+    # Pre-channel receipts recover only onto the maintained repository and the
+    # release tag recorded by their own installed version.  Never silently
+    # redirect an old installation to a different fork or a stale fixed tag.
+    [ -n "$repo" ] || repo="${SOLAR_REPO:-$DEFAULT_SOLAR_REPO}"
+    if [ -z "$channel" ]; then
+        channel="${SOLAR_CHANNEL:-}"
+        [ -n "$channel" ] || channel="$(release_channel_from_version "$cur_version" || true)"
+    fi
+    if [ -z "$channel" ]; then
+        echo "update failed: legacy receipt has no fetchable release channel" >&2
+        echo "  reinstall from the current OpenSolar release, or set SOLAR_CHANNEL explicitly." >&2
+        exit 1
+    fi
 
     command -v git >/dev/null 2>&1 || {
         echo "git is required for solar update; install git, or use solar repair to reinstall in place" >&2
@@ -538,7 +563,6 @@ do_update() {
     # A receipt's channel can lag the installed tree (rc.8 installs recorded
     # rc.6 — P6 corpus PKG-001), so fetching the recorded channel must never
     # silently move an install BACKWARDS. Refuse a downgrade unless forced.
-    cur_version="$(receipt_field version)"
     [ -n "$cur_version" ] || cur_version="$(cat "$fetch_dir/VERSION" 2>/dev/null || echo unknown)"
     new_version="$(cat "$tmp_fetch/VERSION" 2>/dev/null || echo unknown)"
     if [ "${SOLAR_UPDATE_ALLOW_DOWNGRADE:-0}" != "1" ] \
