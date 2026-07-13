@@ -22,6 +22,9 @@ fail=0
 echo; echo "-- gate: bootstrap logic --"
 node src/runtime-detect.test.js || fail=1
 
+echo; echo "-- gate: bootstrap/package contract --"
+node bootstrap-contract.test.js || fail=1
+
 echo; echo "-- gate: backend contract --"
 node contract.js || fail=1
 

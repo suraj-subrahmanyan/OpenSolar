@@ -33,6 +33,7 @@ concurrency:
 
 jobs:
   build:
+    needs: gate
     name: Build ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -91,6 +92,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      - name: Check release/package coherence
+        run: bash scripts/check-release-coherence.sh
 
       - name: Set up Node
         uses: actions/setup-node@v4

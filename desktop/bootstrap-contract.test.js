@@ -21,6 +21,9 @@ const getSolar = read("../get-solar.sh");
 const releaseVersion = read("../VERSION").trim();
 const app = read("../harness/status-server/react-app/src/App.tsx");
 const pkg = JSON.parse(read("package.json"));
+const autotest = read("autotest.sh");
+const desktopWorkflow = read("../.github/workflows/desktop-build.yml");
+const desktopGateJob = desktopWorkflow.split("\n  gate:\n")[1] || "";
 const macResources = (pkg.build.mac.extraResources || []).map((entry) => entry.to);
 
 assert(
@@ -76,4 +79,19 @@ assert(
     main.includes("desktop.log") &&
     main.includes("renderer-process-gone") &&
     main.includes("window-unresponsive"),
+);
+
+assert(
+  "desktop autotest runs this bootstrap/package contract",
+  autotest.includes("node bootstrap-contract.test.js"),
+);
+
+assert(
+  "desktop artifacts wait for the gate before building",
+  /\n  build:\n    needs: gate\n/.test(desktopWorkflow),
+);
+
+assert(
+  "desktop tag gate runs release coherence before packaging",
+  desktopGateJob.includes("bash scripts/check-release-coherence.sh"),
 );
