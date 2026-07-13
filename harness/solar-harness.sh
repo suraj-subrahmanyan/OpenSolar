@@ -15,6 +15,14 @@
 set -eu
 
 HARNESS_DIR="${HARNESS_DIR:-${SOLAR_HARNESS_DIR:-$HOME/.solar/harness}}"
+# Every installed entry point must import from the harness it is executing.
+# Live campaign runners used to inject this externally, which hid a fresh-
+# install failure where product-mode intake rejected its own child process as
+# path-inconsistent.  Keep caller paths, but make the active tree authoritative.
+case "${PYTHONPATH:-}" in
+  "$HARNESS_DIR/lib"|"$HARNESS_DIR/lib:"*) ;;
+  *) export PYTHONPATH="$HARNESS_DIR/lib${PYTHONPATH:+:$PYTHONPATH}" ;;
+esac
 # Operator-owned config: when SOLAR_PANE_RUNTIME isn't set in the env, default to the pane
 # runtime the dashboard's runtime selector persisted (config key "runtime"). Env still wins.
 # Source the config helper early (it only needs HARNESS_DIR); harmless if re-sourced below.
