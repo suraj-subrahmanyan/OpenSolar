@@ -1586,12 +1586,30 @@ def _find_cwd_value(obj) -> str:
 
 
 def _sprint_workdir(sid: str) -> Path | None:
-    """Discover the sprint's working directory (where the builder produced the REAL
-    output — code, reports). That output lives in the workdir, not under SPRINTS_DIR,
-    so without surfacing it the deliverables rail shows only process plumbing. The
-    `cwd` field is recorded in the sprint's raw_intent / eval artifacts."""
+    """Discover the sprint's working directory where the builder produced output.
+
+    Product-mode sprints use ``sprints/<sid>/workdir``. Older/external-workspace
+    sprints record a ``cwd`` in raw-intent or eval artifacts, so retain that fallback.
+    """
     if not _valid_sprint_id(sid):
         return None
+
+    # The governed product path is sprint-owned. Resolve both sides so a symlinked
+    # ``workdir`` cannot escape the sprint while still being exposed as output.
+    try:
+        sprint_root = (SPRINTS_DIR / sid).resolve()
+        canonical = (sprint_root / "workdir").resolve()
+    except OSError:
+        canonical = None
+        sprint_root = None
+    if (
+        canonical is not None
+        and sprint_root is not None
+        and canonical.is_dir()
+        and _is_within(canonical, sprint_root)
+    ):
+        return canonical
+
     cwd = ""
     for name in (f"{sid}.raw_intent.json", f"{sid}.S1-eval.json", f"{sid}.S2-eval.json", f"{sid}.S3-eval.json"):
         p = SPRINTS_DIR / name
@@ -1711,6 +1729,7 @@ def _discover_sprint_deliverables(sid: str) -> list[dict]:
     if not _valid_sprint_id(sid):
         return []
     allowed_suffixes = {".html", ".htm", ".md", ".markdown", ".json", ".txt", ".log", ".pdf", ".png", ".jpg", ".jpeg"}
+    workdir = _sprint_workdir(sid)
     candidates: list[Path] = []
     try:
         for pattern in (f"{sid}*.html", f"{sid}*.htm", f"{sid}*.md", f"{sid}*.json"):
@@ -1728,6 +1747,19 @@ def _discover_sprint_deliverables(sid: str) -> list[dict]:
             continue
         try:
             for path in root.rglob("*"):
+                # A canonical workdir sits below the sprint root. Do not classify
+                # its cache/readme files as process artifacts; the bounded output
+                # scan below owns this subtree and applies its stricter filters.
+                if workdir is not None:
+                    try:
+                        # Use lexical containment here: resolving first would let
+                        # a workdir symlink to another sprint re-enter this process
+                        # scan under its target's path.
+                        path.absolute().relative_to(workdir.absolute())
+                    except ValueError:
+                        pass
+                    else:
+                        continue
                 if path.is_file() and path.suffix.lower() in allowed_suffixes:
                     candidates.append(path)
         except OSError:
@@ -1763,7 +1795,6 @@ def _discover_sprint_deliverables(sid: str) -> list[dict]:
     # Surface the REAL produced output from the sprint's working directory. The
     # builder writes code/reports to the workdir (cwd), not under SPRINTS_DIR, so
     # without this the rail shows only process plumbing and never the deliverable.
-    workdir = _sprint_workdir(sid)
     if workdir is not None:
         # Only surface files PRODUCED during the sprint (mtime at/after start), so a
         # workdir that is a populated repo doesn't dump pre-existing files as deliverables.
@@ -1801,6 +1832,8 @@ def _discover_sprint_deliverables(sid: str) -> list[dict]:
                     continue
                 try:
                     resolved = path.resolve()
+                    if not _is_within(resolved, workdir):
+                        continue
                     key = _safe_rel(resolved, HARNESS_DIR)  # absolute string for workdir files
                     if key in seen:
                         continue
