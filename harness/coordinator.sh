@@ -97,6 +97,7 @@ export SOLAR_GRAPH_BUILDER_OPERATOR_POOL
 [[ -f "$HARNESS_DIR/lib/ack-watcher.sh" ]] && . "$HARNESS_DIR/lib/ack-watcher.sh"
 [[ -f "$HARNESS_DIR/lib/prompt-quarantine.sh" ]] && . "$HARNESS_DIR/lib/prompt-quarantine.sh"
 [[ -f "$HARNESS_DIR/lib/portable.sh" ]] && . "$HARNESS_DIR/lib/portable.sh"
+[[ -f "$HARNESS_DIR/lib/optional-hooks.sh" ]] && . "$HARNESS_DIR/lib/optional-hooks.sh"
 
 # Coordinator predates strict-mode helper libs and intentionally treats corrupt
 # sprint files as data-plane warnings. Do not let sourced libs' shell options
@@ -4649,9 +4650,9 @@ ${fail_info}
   emit_event "$sid" "dispatched" "coordinator" "{\"to\":\"builder\",\"task\":\"fix\",\"round\":${round}}"
 
   # FAIL 时也提取教训 (FAIL 比 PASS 更有学习价值)
-  (bash ~/.claude/hooks/subconscious-learn.sh 2>> "$HARNESS_DIR/brain/learn.log") &
+  (solar_run_optional_claude_hook "subconscious-learn.sh" 2>> "$HARNESS_DIR/brain/learn.log") &
   # ── D9: 自进化钩子 (Sprint sprint-20260417-213037) ──
-  (bash ~/.claude/hooks/self-evolve-postmortem.sh "$sid" 2>> "$COORD_LOG") &
+  (solar_run_optional_claude_hook "self-evolve-postmortem.sh" "$sid" 2>> "$COORD_LOG") &
 
   # ── D1: 桌面通知 (同步, || true 兜底) ──
   bash "$HARNESS_DIR/osascript-notify.sh" "Sprint FAIL" "Round ${round}, ${sid}" "Blow" || true
@@ -5080,9 +5081,9 @@ handle_passed() {
   (bash "$HARNESS_DIR/token-tracker.sh" report "$sid" > "$HARNESS_DIR/.token-report.log" 2>&1) &
 
   # 异步教训提取 — 潜意识闭环核心入口 (不依赖 Claude Stop hook)
-  (bash ~/.claude/hooks/subconscious-learn.sh 2>> "$HARNESS_DIR/brain/learn.log") &
+  (solar_run_optional_claude_hook "subconscious-learn.sh" 2>> "$HARNESS_DIR/brain/learn.log") &
   # ── D9: 自进化钩子 (Sprint sprint-20260417-213037) ──
-  (bash ~/.claude/hooks/self-evolve-postmortem.sh "$sid" 2>> "$COORD_LOG") &
+  (solar_run_optional_claude_hook "self-evolve-postmortem.sh" "$sid" 2>> "$COORD_LOG") &
 
   # ── D1: 桌面通知 (同步, || true 兜底) ──
   bash "$HARNESS_DIR/osascript-notify.sh" "Sprint PASSED" "${title}" "Glass" || true
@@ -5574,7 +5575,7 @@ with open('$patches_file','w') as f:
       # D2: 检查规划者通知 (每 ~60s)
       check_planner_notice
       # D4: 扫 auto-generated drafting Sprint, Done>=3 则通知规划者
-      (bash ~/.claude/hooks/planner-review-drafting.sh 2>> "$COORD_LOG") || true
+      (solar_run_optional_claude_hook "planner-review-drafting.sh" 2>> "$COORD_LOG") || true
       # P0 lazy path: drive any drafting contract through PM → planner → active.
       auto_drive_drafting_sprints
       # D5: 扫 PLANNER-INBOX 未读条目, 派发到规划者 (silent)
@@ -5615,8 +5616,8 @@ PY
     # D3: 低分能力自愈 每 30 次迭代 (~5 分钟)
     if (( loop_count % 30 == 0 )); then
       log "[probe] mod30 branch reached, loop=$loop_count"
-      (bash ~/.claude/hooks/scan-low-quality-capabilities.sh 2>> "$COORD_LOG" && \
-       bash ~/.claude/hooks/auto-boost-capability.sh 2>> "$COORD_LOG") &
+      (solar_run_optional_claude_hook "scan-low-quality-capabilities.sh" 2>> "$COORD_LOG" && \
+       solar_run_optional_claude_hook "auto-boost-capability.sh" 2>> "$COORD_LOG") &
 
       # Sprint 20260420-113026: handle_passed 运行时补偿
       # 扫所有 status=passed 但无 .finalized 的 sprint → 补跑 handle_passed
