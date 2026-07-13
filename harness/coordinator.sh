@@ -69,11 +69,17 @@ SOLAR_COORD_LOCALE="${SOLAR_COORD_LOCALE:-$(solar_choose_utf8_locale)}"
 export LANG="$SOLAR_COORD_LOCALE"
 export LC_ALL="$SOLAR_COORD_LOCALE"
 
-# LOCAL-ONLY product architecture: the shipped single-Mac .app has no remote operator
-# pool — dispatch must land on the 4 local cockpit panes. Default the builder/evaluator
-# operator pool OFF here (gate read by lib/graph_node_dispatcher.py). Dev rigs can still
-# scale out by exporting SOLAR_GRAPH_BUILDER_OPERATOR_POOL=1 before the coordinator launches.
-export SOLAR_GRAPH_BUILDER_OPERATOR_POOL="${SOLAR_GRAPH_BUILDER_OPERATOR_POOL:-0}"
+# Product mode deliberately leaves the four cockpit panes as passive viewers;
+# its local operatord pool is therefore the only executable builder path.  Keep
+# legacy cockpit mode's pool default OFF, and preserve an explicit 0 as the
+# product-mode emergency kill switch.
+if [[ -z "${SOLAR_GRAPH_BUILDER_OPERATOR_POOL:-}" ]]; then
+  case "${SOLAR_PRODUCT_MODE:-0}" in
+    1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) SOLAR_GRAPH_BUILDER_OPERATOR_POOL=1 ;;
+    *) SOLAR_GRAPH_BUILDER_OPERATOR_POOL=0 ;;
+  esac
+fi
+export SOLAR_GRAPH_BUILDER_OPERATOR_POOL
 
 # sprint-20260503-163542 D3: bridge ledger
 [[ -f "$HARNESS_DIR/lib/bridge-ledger.sh" ]] && . "$HARNESS_DIR/lib/bridge-ledger.sh"

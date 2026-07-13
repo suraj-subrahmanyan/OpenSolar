@@ -6955,7 +6955,10 @@ def _ensure_lease(pane: str, sid: str, dispatch_id: str, ttl: int, dry_run: bool
 
 
 def _builder_operator_pool_enabled() -> bool:
-    return str(os.environ.get("SOLAR_GRAPH_BUILDER_OPERATOR_POOL", "0")).strip().lower() not in {
+    configured = str(os.environ.get("SOLAR_GRAPH_BUILDER_OPERATOR_POOL") or "").strip().lower()
+    if not configured:
+        return _product_mode_enabled()
+    return configured not in {
         "0",
         "false",
         "off",
@@ -8144,6 +8147,13 @@ def _discover_workers(dry_run: bool = False) -> list[dict[str, Any]]:
         pane_rows = [p.rstrip("\n").split("\t", 1) for p in out.splitlines() if p.strip()]
     except Exception:
         pane_rows = []
+    # Product-mode cockpit panes are viewers, not execution hosts.  Returning
+    # them here lets the scheduler consume a node into an idle bash shell and
+    # starves the local operatord pool (fresh-install RC9 proof, 2026-07-13).
+    # An unavailable pool must fail closed as no capacity, never fall back to a
+    # pane the product intentionally did not launch an agent into.
+    if _product_mode_enabled():
+        pane_rows = []
     workers = []
     pane_rows.sort(key=lambda row: _pane_execution_priority((row[0].strip() if row else "")))
     for row in pane_rows:
@@ -8220,7 +8230,8 @@ def _discover_evaluators(dry_run: bool = False) -> list[dict[str, Any]]:
     # runtime to one pane. Planning still decides whether a node may use a
     # single evaluator or require quorum semantics.
     restrict_to_session = os.environ.get("SOLAR_GRAPH_DISPATCH_RESTRICT_SESSION") == "1"
-    candidates = [f"{_current_harness_session()}:0.3"]
+    product_mode = _product_mode_enabled()
+    candidates = [] if product_mode else [f"{_current_harness_session()}:0.3"]
     try:
         out = subprocess.check_output(
             ["tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index}\t#{pane_title}"],
@@ -8231,6 +8242,8 @@ def _discover_evaluators(dry_run: bool = False) -> list[dict[str, Any]]:
     except Exception:
         pane_rows = []
     for row in pane_rows:
+        if product_mode:
+            continue
         pane = row[0].strip()
         if not pane or pane in candidates:
             continue
