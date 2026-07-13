@@ -101,6 +101,36 @@ function Test-WslReady {
     return ((Get-RegisteredDistro).Count -gt 0)
 }
 
+function ConvertTo-BashLiteral {
+    param([AllowEmptyString()][string]$Value)
+    # POSIX-safe single-quote encoding: close ', emit a literal quote through
+    # double quotes, then reopen '.  Building the five-character escape from
+    # pieces keeps the PowerShell representation readable.
+    $singleQuoteEscape = "'" + '"' + "'" + '"' + "'"
+    return "'" + $Value.Replace("'", $singleQuoteEscape) + "'"
+}
+
+function ConvertTo-PowerShellLiteral {
+    param([AllowEmptyString()][string]$Value)
+    return "'" + $Value.Replace("'", "''") + "'"
+}
+
+function New-SelfInvocationEncodedCommand {
+    param([Parameter(Mandatory = $true)][string]$ScriptPath)
+    # Elevation and RunOnce both cross a native Windows command-line boundary.
+    # Encode one complete PowerShell invocation so spaces, quotes, URLs, custom
+    # distro names, and the full ForwardArgs array survive without ad-hoc
+    # Start-Process/registry quoting.
+    $forwardLiterals = @($ForwardArgs | ForEach-Object { ConvertTo-PowerShellLiteral ([string]$_) })
+    $forwardExpression = '@(' + ($forwardLiterals -join ',') + ')'
+    $command = '& ' + (ConvertTo-PowerShellLiteral $ScriptPath) +
+        ' -Distro ' + (ConvertTo-PowerShellLiteral $Distro) +
+        ' -BootstrapUrl ' + (ConvertTo-PowerShellLiteral $BootstrapUrl) +
+        ' -RepoUrl ' + (ConvertTo-PowerShellLiteral $RepoUrl) +
+        ' -ForwardArgs ' + $forwardExpression
+    return [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+}
+
 function Get-ForwardString {
     $list = @($ForwardArgs)
     $joined = ($list -join ' ')
@@ -117,7 +147,7 @@ function Get-ForwardString {
     if ($joined -notmatch '--bootstrap-system-deps') {
         $list += '--bootstrap-system-deps'
     }
-    return ($list -join ' ')
+    return (($list | ForEach-Object { ConvertTo-BashLiteral ([string]$_) }) -join ' ')
 }
 
 # Fresh Ubuntu-24.04 ships python3.12 but NOT git / python3-pip / python3-venv / tmux / jq.
@@ -144,7 +174,8 @@ function Invoke-LinuxInstaller {
         if ($LASTEXITCODE -eq 0 -and $wp) {
             $wp = $wp.Trim()
             Write-Host "[solar] running bundled get-solar.sh inside WSL ($Distro): $wp"
-            & wsl.exe -d $Distro -- bash -lc "set -o pipefail; bash '$wp' $forwarded"
+            $wpLiteral = ConvertTo-BashLiteral $wp
+            & wsl.exe -d $Distro -- bash -lc "set -o pipefail; bash $wpLiteral $forwarded"
             if ($LASTEXITCODE -ne 0) { throw "Solar runtime install failed inside WSL (exit $LASTEXITCODE)" }
             return
         }
@@ -152,9 +183,11 @@ function Invoke-LinuxInstaller {
     }
     if ($BootstrapUrl -ne '') {
         Write-Host "[solar] bootstrapping the runtime from $BootstrapUrl inside WSL ($Distro)..."
-        & wsl.exe -d $Distro -- bash -lc "set -o pipefail; curl -fsSL '$BootstrapUrl' | bash -s -- $forwarded"
+        $bootstrapLiteral = ConvertTo-BashLiteral $BootstrapUrl
+        & wsl.exe -d $Distro -- bash -lc "set -o pipefail; curl -fsSL $bootstrapLiteral | bash -s -- $forwarded"
     } else {
-        $cmd = "set -e -o pipefail; tmp=`$(mktemp -d); git clone --depth 1 '$RepoUrl' `"`$tmp/OpenSolar`"; bash `"`$tmp/OpenSolar/install.sh`" $forwarded"
+        $repoLiteral = ConvertTo-BashLiteral $RepoUrl
+        $cmd = "set -e -o pipefail; tmp=`$(mktemp -d); git clone --depth 1 $repoLiteral `"`$tmp/OpenSolar`"; bash `"`$tmp/OpenSolar/install.sh`" $forwarded"
         Write-Host "[solar] cloning $RepoUrl and running install.sh inside WSL ($Distro)..."
         & wsl.exe -d $Distro -- bash -lc $cmd
     }
@@ -219,7 +252,8 @@ function Enable-WindowsAutostart {
 function Install-Wsl {
     if (-not (Test-Admin)) {
         Write-Host '[solar] WSL2 install needs administrator rights; re-launching elevated...'
-        $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"") + $ForwardArgs
+        $encodedCommand = New-SelfInvocationEncodedCommand $PSCommandPath
+        $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedCommand)
         Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Verb RunAs
         exit 0
     }
@@ -242,7 +276,8 @@ function Install-Wsl {
 
     $persistPs1 = Join-Path $persist 'install.ps1'
     $runOnce = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
-    $resume = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$persistPs1`" $(Get-ForwardString)"
+    $resumeEncodedCommand = New-SelfInvocationEncodedCommand $persistPs1
+    $resume = "powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $resumeEncodedCommand"
     Set-ItemProperty -Path $runOnce -Name 'OpenSolarResume' -Value $resume
     Write-Warning 'WSL2 was installed. A REBOOT is required (the one manual step).'
     Write-Warning 'After reboot, this installer resumes automatically via RunOnce.'
