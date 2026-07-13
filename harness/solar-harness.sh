@@ -3535,7 +3535,7 @@ print(json.dumps({
     mkdir -p "$HARNESS_DIR/run"
     _status_server_live_pids() {
       ps ax -o pid= -o args= | awk -v script="$HARNESS_DIR/lib/symphony/status-server.py" '
-        index($0, script) && $0 !~ /awk -v script/ { print $1 }
+        $2 ~ /(^|\/)python([0-9]+([.][0-9]+)*)?$/ && $3 == script { print $1 }
       '
     }
     _ss_pid_owned() {

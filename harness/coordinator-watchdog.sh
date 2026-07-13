@@ -25,8 +25,8 @@ fi
 HARNESS_DIR="${HARNESS_DIR:-${SOLAR_HARNESS_DIR:-$HOME/.solar/harness}}"
 SPRINTS_DIR="$HARNESS_DIR/sprints"
 export HARNESS_DIR SPRINTS_DIR
-SESSION_NAME="solar-harness"
-LAB_SESSION_NAME="solar-harness-lab"
+SESSION_NAME="${SOLAR_HARNESS_SESSION:-solar-harness}"
+LAB_SESSION_NAME="${SOLAR_HARNESS_LAB_SESSION:-${SESSION_NAME}-lab}"
 WATCHDOG_PID_FILE="$HARNESS_DIR/.watchdog.pid"
 WATCHDOG_STATE="$HARNESS_DIR/.watchdog-state"
 COORD_PID_FILE="$HARNESS_DIR/.coordinator.pid"
@@ -337,18 +337,28 @@ _load_layout_panes() {
       continue
     fi
     PERSONA_PANES["$target"]="$role"
-  done < <(python3 -c "
+  done < <(python3 - "$layout" "$SESSION_NAME" <<'PY'
 import json
-d=json.load(open('$layout'))
-default_session=d.get('session_name','solar-harness')
-for w in d.get('windows',[]):
-    session=w.get('session') or default_session
-    win=w.get('index',0)
-    for p in w.get('panes',[]):
-        print(f\"{session}:{win}.{p.get('pane_index')}\\t{p.get('persona') or p.get('role') or ''}\")
-" 2>/dev/null || true)
+import sys
+
+layout, configured_session = sys.argv[1:3]
+d = json.load(open(layout, encoding="utf-8"))
+layout_default = d.get("session_name", "solar-harness")
+for w in d.get("windows", []):
+    declared = w.get("session")
+    session = configured_session if not declared or declared == layout_default else declared
+    win = w.get("index", 0)
+    for p in w.get("panes", []):
+        print(f"{session}:{win}.{p.get('pane_index')}\t{p.get('persona') or p.get('role') or ''}")
+PY
+  )
 }
 _load_layout_panes
+
+tmux_has_exact_session() {
+  local wanted="$1"
+  tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -Fxq -- "$wanted"
+}
 
 ensure_tmux_sessions() {
   local missing=0
@@ -358,14 +368,14 @@ ensure_tmux_sessions() {
     return 0
   fi
 
-  if ! tmux has-session -t "$SESSION_NAME" &>/dev/null; then
+  if ! tmux_has_exact_session "$SESSION_NAME"; then
     warn "tmux session missing: ${SESSION_NAME}; rebuilding Product Delivery"
     TERM=dumb "$HARNESS_DIR/solar-harness.sh" --skip-doctor "$HOME" >> "$HARNESS_DIR/.watchdog-launchd.log" 2>&1 || true
     missing=1
   fi
 
   if [[ "$WATCHDOG_MANAGE_LAB" == "1" || "$WATCHDOG_MANAGE_LAB" == "true" ]]; then
-    if ! tmux has-session -t "$LAB_SESSION_NAME" &>/dev/null; then
+    if ! tmux_has_exact_session "$LAB_SESSION_NAME"; then
       warn "tmux session missing: ${LAB_SESSION_NAME}; rebuilding Strategy Lab"
       TERM=dumb "$HARNESS_DIR/solar-harness.sh" 扩展 "$HOME" >> "$HARNESS_DIR/.watchdog-launchd.log" 2>&1 || true
       missing=1
@@ -410,7 +420,7 @@ check_panes() {
   local target
   for target in "${!PERSONA_PANES[@]}"; do
     local session="${target%%:*}"
-    tmux has-session -t "$session" &>/dev/null || continue
+    tmux_has_exact_session "$session" || continue
 
     local pane_info pcmd pdead pane_pid
     pane_info=$(tmux display-message -p -t "$target" '#{pane_current_command} #{pane_dead} #{pane_pid}' 2>/dev/null) || continue
