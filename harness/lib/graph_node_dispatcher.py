@@ -1252,6 +1252,24 @@ def _retrieval_pack_dir(sid: str, node: dict[str, Any], eval_json: str | Path) -
     bases = [SPRINTS_DIR / sid / "workdir", SPRINTS_DIR / sid]
     if str(eval_path):
         bases.append(eval_path.parent)
+
+    def _contained(candidate: Path) -> bool:
+        # The gate must judge the sprint's OWN pack: an absolute or
+        # traversing declaration pointing outside every allowed base would
+        # let a node pass on a pre-staged pack it never produced
+        # (deep-review finding 2026-07-13).
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            return False
+        for base in bases:
+            try:
+                if resolved.is_relative_to(base.resolve()):
+                    return True
+            except OSError:
+                continue
+        return False
+
     rel_candidates: list[Path] = []
     for value in values:
         if value.lower().endswith(("sources.jsonl", "evidence.jsonl")):
@@ -1261,7 +1279,7 @@ def _retrieval_pack_dir(sid: str, node: dict[str, Any], eval_json: str | Path) -
     for rel in rel_candidates:
         for base in bases:
             candidate = rel if rel.is_absolute() else base / rel
-            if (candidate / "sources.jsonl").is_file():
+            if _contained(candidate) and (candidate / "sources.jsonl").is_file():
                 return candidate
     for base in bases:
         if (base / "sources.jsonl").is_file():
