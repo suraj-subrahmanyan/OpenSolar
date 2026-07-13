@@ -1330,6 +1330,118 @@ def evaluate_final_closeout(
     }
 
 
+def evaluate_retrieval_closeout(
+    output_dir: str | Path,
+    research_profile: str = "general",
+) -> dict[str, Any]:
+    """Closeout gate for retrieval-only artifact sets (P7 R1).
+
+    A retrieval node produces a source pack (sources.jsonl + evidence.jsonl
+    + extracts), not a report — evaluate_final_closeout would hard-fail it
+    on research_eval_json_missing. Verdict model per design §6a:
+    integrity violations (extract-less sources, hash mismatches, missing
+    hashes, evidence citing unknown sources) are the UNTRUTHFUL class →
+    hard_fail; an empty/missing pack is a retrieval failure → repairable
+    (retry, then the normal escalation machinery); a verifying pack passes.
+    Authority scoring attaches as metrics/warnings only — labels never
+    block retrieval (owner decision 2).
+    """
+    import datetime
+    from research.hashing import content_hash
+
+    root = Path(output_dir).expanduser()
+    issues: list[str] = []
+    warnings: list[str] = []
+    sources_path = root / "sources.jsonl"
+    evidence_path = root / "evidence.jsonl"
+    sources = _read_jsonl(sources_path)
+    evidence = _read_jsonl(evidence_path)
+
+    if not sources_path.exists():
+        issues.append("sources_jsonl_missing")
+    elif not sources:
+        issues.append("sources_jsonl_empty")
+    if not evidence_path.exists():
+        issues.append("evidence_jsonl_missing")
+    elif not evidence:
+        issues.append("evidence_jsonl_empty")
+    retrieval_empty = bool(issues)
+
+    extract_missing: list[str] = []
+    hash_missing: list[str] = []
+    hash_mismatch: list[str] = []
+    source_ids: set[str] = set()
+    for row in sources:
+        source_id = str(row.get("id") or row.get("source_id") or "") or "?"
+        source_ids.add(source_id)
+        extract_rel = str(row.get("extract_path") or "")
+        extract = (root / extract_rel) if extract_rel and not Path(extract_rel).is_absolute() else Path(extract_rel)
+        if not extract_rel or not extract.is_file():
+            extract_missing.append(source_id)
+            continue
+        digest = str(row.get("content_sha256") or row.get("content_hash") or "")
+        if not digest:
+            hash_missing.append(source_id)
+            continue
+        try:
+            actual = content_hash(extract.read_text(encoding="utf-8"))
+        except Exception:
+            extract_missing.append(source_id)
+            continue
+        if actual != digest:
+            hash_mismatch.append(source_id)
+    unknown_sources = sorted({
+        str(row.get("source_id") or "")
+        for row in evidence
+        if str(row.get("source_id") or "") not in source_ids
+    })
+    if extract_missing:
+        issues.append("source_extract_missing:" + ",".join(extract_missing[:10]))
+    if hash_missing:
+        issues.append("source_hash_missing:" + ",".join(hash_missing[:10]))
+    if hash_mismatch:
+        issues.append("source_extract_hash_mismatch:" + ",".join(hash_mismatch[:10]))
+    if unknown_sources:
+        issues.append("evidence_source_unknown:" + ",".join(unknown_sources[:10]))
+    integrity_broken = bool(extract_missing or hash_missing or hash_mismatch or unknown_sources)
+
+    metrics: dict[str, Any] = {
+        "source_count": len(sources),
+        "evidence_count": len(evidence),
+        "extract_missing_count": len(extract_missing),
+        "hash_mismatch_count": len(hash_mismatch),
+    }
+    try:
+        authority = audit_sources(root, research_profile, strict_profile=False)
+        metrics["source_authority_average"] = authority.get("source_authority_average")
+        metrics["source_high_authority_count"] = authority.get("source_high_authority_count")
+        warnings.extend(authority.get("warnings") or [])
+    except Exception:
+        warnings.append("source_authority_audit_unavailable")
+
+    if integrity_broken:
+        verdict = "hard_fail"
+    elif retrieval_empty:
+        verdict = "repairable_fail"
+    else:
+        verdict = "pass"
+
+    payload = {
+        "ok": verdict == "pass",
+        "verdict": verdict,
+        "retrieval_only": True,
+        "output_dir": str(root),
+        "issues": issues,
+        "warnings": warnings,
+        "metrics": metrics,
+        "timestamp": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if root.is_dir():
+        (root / "retrieval_closeout.json").write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return payload
+
+
 def evaluate_figures_grounding(output_dir: Path) -> tuple[bool, list[str], list[str]]:
     """Determine figure grounding quality.
     
