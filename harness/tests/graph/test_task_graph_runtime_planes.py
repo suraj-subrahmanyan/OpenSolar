@@ -107,3 +107,6 @@ def test_save_graph_marks_closure_closed_when_parent_ready(tmp_path, monkeypatch
     assert closure["status"] == "closed"
     assert closure["all_nodes_passed"] is True
     assert closure["all_required_gates_passed"] is True
+    # CLOSURE_TRACEABILITY_STALE: absence of a coverage projection is unknown,
+    # not evidence that zero requirements were traced.
+    assert closure["acceptance_traceability_coverage"] is None

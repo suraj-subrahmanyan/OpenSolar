@@ -35,6 +35,23 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _sync_closure_traceability(sprints_dir: Path, sid: str, coverage: dict[str, Any]) -> bool:
+    """Project canonical requirement coverage into an existing closure record."""
+    closure_path = sprints_dir / f"{sid}.closure.json"
+    try:
+        closure = _load_json(closure_path)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(closure, dict):
+        return False
+    ratio = (coverage.get("summary") or {}).get("coverage_ratio")
+    if isinstance(ratio, bool) or not isinstance(ratio, (int, float)):
+        return False
+    closure["acceptance_traceability_coverage"] = float(ratio)
+    _write_json(closure_path, closure)
+    return True
+
+
 def _derive_requirements(requirement_ir: dict[str, Any]) -> list[dict[str, Any]]:
     requirements = list(requirement_ir.get("requirements") or [])
     if requirements:
@@ -350,6 +367,7 @@ def evaluate_sid(
         _write_json(sprints_dir / f"{sid}.requirement_trace.json", trace)
         _write_json(sprints_dir / f"{sid}.coverage_report.json", coverage)
         _write_json(sprints_dir / f"{sid}.acceptance_verdict.json", verdict)
+        _sync_closure_traceability(sprints_dir, sid, coverage)
     if require_pass and verdict["verdict"] != "PASS":
         raise SystemExit(2)
     return bundle

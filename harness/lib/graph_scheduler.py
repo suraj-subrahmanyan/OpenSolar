@@ -401,7 +401,10 @@ def _save_closure_projection(path: Path, graph: dict[str, Any], state: dict[str,
     record["status"] = "closed" if parent.get("ready") else "pending"
     record["all_nodes_passed"] = not parent.get("open_nodes") and not parent.get("failed_nodes")
     record["all_required_gates_passed"] = not parent.get("missing_gates")
-    record["acceptance_traceability_coverage"] = record.get("acceptance_traceability_coverage", 0)
+    # No coverage artifact means unknown, not zero.  requirement_coverage owns
+    # the numeric projection and refreshes this field after it writes the
+    # canonical coverage report.
+    record["acceptance_traceability_coverage"] = record.get("acceptance_traceability_coverage")
     record["open_nodes"] = list(parent.get("open_nodes") or [])
     record["failed_nodes"] = list(parent.get("failed_nodes") or [])
     record["missing_gates"] = list(parent.get("missing_gates") or [])
