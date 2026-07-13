@@ -18,6 +18,7 @@ function assert(name, ok, detail = "") {
 
 const main = read("src/main.js");
 const getSolar = read("../get-solar.sh");
+const releaseVersion = read("../VERSION").trim();
 const app = read("../harness/status-server/react-app/src/App.tsx");
 const pkg = JSON.parse(read("package.json"));
 const macResources = (pkg.build.mac.extraResources || []).map((entry) => entry.to);
@@ -58,9 +59,8 @@ assert(
 );
 
 assert(
-  "get-solar fallback defaults to a published channel until rc8 tag exists",
-  getSolar.includes('SOLAR_CHANNEL="${SOLAR_CHANNEL:-v1.0.0-rc.6}"') &&
-    !getSolar.includes('SOLAR_CHANNEL="${SOLAR_CHANNEL:-v1.0.0-rc.8}"'),
+  "get-solar fallback defaults to the package release channel",
+  getSolar.includes(`SOLAR_CHANNEL="\${SOLAR_CHANNEL:-v${releaseVersion}}"`),
 );
 
 assert(

@@ -61,6 +61,48 @@ else
     ok "no stale tag references in $PIPX"
 fi
 
+# ---- check 2b: every public version-bearing surface is coherent ------------
+# A release is installed from more than VERSION/get-solar/pipx: the README,
+# first-session guide, PowerShell bootstrap, and desktop builders all embed or
+# package a release identity.  Scan the canonical public surfaces together so
+# a tag cannot publish mixed-version instructions or rc.8 desktop artifacts
+# under an rc.9 workflow run.
+log "check 2b: public install/docs/desktop surfaces coherent with VERSION"
+VERSIONED_PATHS=(
+    README.md
+    INSTALL.md
+    docs/FIRST-SESSION.md
+    get-solar.sh
+    install.ps1
+    distribution/pipx
+    desktop/package.json
+    desktop/package-lock.json
+    desktop/bootstrap-contract.test.js
+)
+PUBLIC_STALE_TAGS="$(git grep -hoE 'v1\.0\.0-rc\.[0-9]+' -- "${VERSIONED_PATHS[@]}" \
+    | grep -v "^$TAG$" | sort -u || true)"
+if [ -n "$PUBLIC_STALE_TAGS" ]; then
+    fail "public version-bearing surfaces reference stale tags: $(printf '%s' "$PUBLIC_STALE_TAGS" | tr '\n' ' ')"
+else
+    ok "no stale tags in public version-bearing surfaces"
+fi
+DESKTOP_VERSIONS="$(python3 - <<'PY'
+import json
+from pathlib import Path
+
+pkg = json.loads(Path("desktop/package.json").read_text(encoding="utf-8"))
+lock = json.loads(Path("desktop/package-lock.json").read_text(encoding="utf-8"))
+print(pkg.get("version", ""))
+print(lock.get("version", ""))
+print((lock.get("packages") or {}).get("", {}).get("version", ""))
+PY
+)"
+if [ "$DESKTOP_VERSIONS" != "$(printf '%s\n%s\n%s' "$VERSION" "$VERSION" "$VERSION")" ]; then
+    fail "desktop package versions are not all '$VERSION': $(printf '%s' "$DESKTOP_VERSIONS" | tr '\n' ' ')"
+else
+    ok "desktop package + lock versions $VERSION"
+fi
+
 # ---- check 3: every shebang script in scripts/ is executable (PKG-002) ----
 log "check 3: scripts/*.sh with shebangs are 755 in the index"
 BAD_MODE=0
