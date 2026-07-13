@@ -60,6 +60,49 @@ def test_standard_compiled_prd_passes_existing_schema_validator(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_short_compiled_prd_passes_existing_schema_validator(tmp_path):
+    router = _load_router()
+    payload = router.build_pm_intake(
+        "Create a Python CLI named hello.py with pytest tests.",
+        sprint_id="sprint-test",
+        target_system="solar-harness",
+    )
+    assert payload["requirement_ir"]["prd_view"]["variant"] == "short"
+    prd_path = tmp_path / "short.prd.md"
+    prd_path.write_text(payload["compiled_artifacts"]["prd_markdown"], encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", str(ROOT / "schemas" / "validate.sh"), "prd", str(prd_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_research_compiled_prd_passes_existing_schema_validator(tmp_path):
+    router = _load_router()
+    payload = router.build_pm_intake(
+        "Read these papers and synthesize research implications for the planner.",
+        papers=["paper-a"],
+        sprint_id="sprint-test",
+        target_system="solar-harness",
+    )
+    assert payload["requirement_ir"]["prd_view"]["variant"] == "research"
+    prd_path = tmp_path / "research.prd.md"
+    prd_path.write_text(payload["compiled_artifacts"]["prd_markdown"], encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", str(ROOT / "schemas" / "validate.sh"), "prd", str(prd_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_parallel_delivery_still_enforces_ready_width_gate():
     router = _load_router()
     payload = router.build_pm_intake(

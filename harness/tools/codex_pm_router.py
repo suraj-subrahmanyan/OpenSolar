@@ -530,19 +530,48 @@ def _make_prd_view(
     open_questions: list[str],
     risks: list[dict[str, str]],
 ) -> dict[str, Any]:
+    acceptance_body = "\n".join(f"- {item}" for item in acceptance) or "- N/A"
+    non_goals_body = "\n".join(f"- {item}" for item in non_goals) or "- N/A"
+    open_questions_body = "\n".join(f"- {item}" for item in open_questions) or "- N/A"
+    risks_body = "\n".join(
+        f"- [{risk['level']}] {risk['title']} -> {risk['mitigation']}" for risk in risks
+    ) or "- N/A"
+    source_context = (
+        "相关上下文: " + ", ".join(source_inputs["repo_context"] + source_inputs["logs"])
+        if source_inputs["repo_context"] or source_inputs["logs"]
+        else "基于当前请求直接定位到交付范围。"
+    )
     if request_type == "implementation":
         sections = [
-            {"title": "Goal", "body": normalized_goal},
-            {"title": "Context", "body": "相关上下文: " + ", ".join(source_inputs["repo_context"] + source_inputs["logs"]) if source_inputs["repo_context"] or source_inputs["logs"] else "基于当前请求直接定位到局部改动范围。"},
+            {"title": "背景 / Context", "body": source_context},
+            {"title": "用户问题 / Problem", "body": normalized_goal},
+            {"title": "用户目标 / Goals", "body": f"- {normalized_goal}"},
+            {"title": "用户故事 / User Stories", "body": f"- As the requester, I need {normalized_goal} so the result is directly usable and verifiable."},
+            {"title": "功能需求 / Requirements", "body": acceptance_body},
+            {"title": "验收标准 / Acceptance Criteria", "body": acceptance_body},
+            {"title": "非目标 / Non-Goals", "body": non_goals_body},
+            {"title": "约束 / Constraints", "body": "- Keep changes inside the declared sprint workspace and write scope.\n- Builder execution must go through task_graph dispatch.\n- Record evaluator-visible execution evidence before closeout."},
+            {"title": "风险 / Risks", "body": risks_body},
+            {"title": "开放问题 / Open Questions", "body": open_questions_body},
+            {"title": "架构交接 / Planner Handoff", "body": "Planner must preserve the declared write scope, map every acceptance criterion to a graph node, and require executable verification before builder closeout."},
             {"title": "Scope", "body": f"- {normalized_goal}"},
-            {"title": "Non-goals", "body": "\n".join(f"- {item}" for item in non_goals)},
-            {"title": "Acceptance Criteria", "body": "\n".join(f"- {item}" for item in acceptance)},
             {"title": "Validation", "body": "- 运行测试或 smoke check\n- 记录 diff / 风险 / 验证证据"},
             {"title": "Rollback", "body": "如验证失败，回退到变更前状态并保留失败证据。"},
         ]
         return {"variant": "short", "sections": sections}
     if request_type == "research":
         sections = [
+            {"title": "背景 / Context", "body": "The request requires source-backed research rather than unsupported model recall."},
+            {"title": "用户问题 / Problem", "body": normalized_goal},
+            {"title": "用户目标 / Goals", "body": f"- Produce a traceable, evidence-backed answer to: {normalized_goal}"},
+            {"title": "用户故事 / User Stories", "body": "- As the requester, I need claims tied to inspectable sources so I can distinguish evidence from synthesis."},
+            {"title": "功能需求 / Requirements", "body": "- Inventory relevant sources.\n- Extract claims and supporting evidence.\n- Preserve provenance and confidence.\n- Synthesize only from verified evidence."},
+            {"title": "验收标准 / Acceptance Criteria", "body": acceptance_body},
+            {"title": "非目标 / Non-Goals", "body": non_goals_body},
+            {"title": "约束 / Constraints", "body": "- Requirement IR remains the source of truth.\n- Every material claim must resolve to source evidence.\n- Unsupported claims must be omitted or labeled as unresolved."},
+            {"title": "风险 / Risks", "body": risks_body},
+            {"title": "开放问题 / Open Questions", "body": open_questions_body},
+            {"title": "架构交接 / Planner Handoff", "body": "Planner must convert the source, evidence, synthesis, and verification stages into an acyclic research DAG with explicit artifacts and closeout gates."},
             {"title": "Research Question", "body": normalized_goal},
             {"title": "Paper Inventory", "body": "\n".join(f"- {paper}" for paper in source_inputs["papers"]) or "- 待补充来源"},
             {"title": "Claim Extraction", "body": "对每篇论文提取核心 claim、方法、benchmark、限制条件。"},
@@ -551,8 +580,8 @@ def _make_prd_view(
             {"title": "Design Candidates", "body": "基于证据链生成候选设计方案，并明确 pros / cons。"},
             {"title": "Experiment Plan", "body": "定义 baseline、metric、threshold 和失败退出条件。"},
             {"title": "Build Plan", "body": "只有通过 eval gate 的研究结论才能进入实现 DAG。"},
-            {"title": "Adoption Criteria", "body": "\n".join(f"- {item}" for item in acceptance)},
-            {"title": "Rejection Criteria", "body": "\n".join(f"- [{risk['level']}] {risk['title']} -> {risk['mitigation']}" for risk in risks)},
+            {"title": "Adoption Criteria", "body": acceptance_body},
+            {"title": "Rejection Criteria", "body": risks_body},
         ]
         return {"variant": "research", "sections": sections}
     sections = [
