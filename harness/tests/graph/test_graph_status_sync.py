@@ -161,6 +161,71 @@ def test_sync_status_cache_revokes_passed_status_when_graph_parent_not_ready(tmp
     assert updated["graph_parent_ready"]["open_nodes"] == ["S1", "S2"]
 
 
+def test_sync_status_cache_reopens_failed_parent_when_repair_is_active(tmp_path, monkeypatch):
+    import graph_scheduler as gs
+
+    sprints = tmp_path / "sprints"
+    sprints.mkdir()
+    monkeypatch.setattr(gs, "SPRINTS_DIR", sprints)
+
+    sid = "sprint-test-repair-reopen"
+    graph_path = sprints / f"{sid}.task_graph.json"
+    status_path = sprints / f"{sid}.status.json"
+    graph = {
+        "sprint_id": sid,
+        "title": "Repairing graph",
+        "nodes": [
+            {
+                "id": "S1",
+                "status": "reviewing",
+                "depends_on": [],
+                "repair_attempts": 1,
+                "repair_context": {
+                    "attempt": 1,
+                    "max_attempts": 1,
+                    "created_at": "2026-07-01T19:00:44Z",
+                },
+            },
+            {"id": "S2", "status": "pending", "depends_on": ["S1"]},
+        ],
+        "node_results": {"S1": {"status": "failed", "updated_at": "2026-07-01T19:00:58Z"}},
+        "gate_results": {},
+    }
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    status_path.write_text(
+        json.dumps(
+            {
+                "sprint_id": sid,
+                "status": "failed",
+                "phase": "failed",
+                "stage": "failed",
+                "active_node": None,
+                "task_graph": str(graph_path),
+                "task_graph_status": "failed",
+                "history": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    parent = gs.parent_ready_check(graph)
+    assert parent["ready"] is False
+    assert parent["failed_nodes"] == []
+    assert parent["open_nodes"] == ["S1", "S2"]
+
+    result = gs.sync_status_cache_from_graph(graph, graph_path, actor="test", event="repair_projection")
+
+    assert result["ok"] is True
+    assert result["reason"] == "parent_reopened_for_repair"
+    updated = json.loads(status_path.read_text(encoding="utf-8"))
+    assert updated["status"] == "active"
+    assert updated["phase"] == "graph_in_progress"
+    assert updated["task_graph_status"] == "active"
+    assert updated["active_node"] == "S1"
+    assert updated["graph_parent_ready"]["failed_nodes"] == []
+    assert updated["graph_parent_ready"]["open_nodes"] == ["S1", "S2"]
+
+
 def test_parent_ready_check_self_heals_stale_blocked_gate(tmp_path, monkeypatch):
     import graph_scheduler as gs
 

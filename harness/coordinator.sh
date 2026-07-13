@@ -52,8 +52,22 @@ LAB_SESSION_NAME="${SOLAR_HARNESS_LAB_SESSION:-${SESSION_NAME}-lab}"
 HARNESS_MANAGE_LAB="${SOLAR_HARNESS_MANAGE_LAB:-${SOLAR_WATCHDOG_MANAGE_LAB:-0}}"
 COORD_STATE="$HARNESS_DIR/.coordinator-state"
 SESSION_SH="$HARNESS_DIR/session.sh"
-export LANG="en_US.UTF-8"
-export LC_ALL="en_US.UTF-8"
+
+solar_choose_utf8_locale() {
+  local locs
+  locs="$(locale -a 2>/dev/null || true)"
+  if printf '%s\n' "$locs" | grep -Eiq '^C\.UTF-?8$'; then
+    printf 'C.UTF-8'
+  elif printf '%s\n' "$locs" | grep -Eiq '^en_US\.UTF-?8$'; then
+    printf 'en_US.UTF-8'
+  else
+    printf 'C'
+  fi
+}
+
+SOLAR_COORD_LOCALE="${SOLAR_COORD_LOCALE:-$(solar_choose_utf8_locale)}"
+export LANG="$SOLAR_COORD_LOCALE"
+export LC_ALL="$SOLAR_COORD_LOCALE"
 
 # LOCAL-ONLY product architecture: the shipped single-Mac .app has no remote operator
 # pool — dispatch must land on the 4 local cockpit panes. Default the builder/evaluator
@@ -2688,6 +2702,15 @@ planner_artifacts_ready() {
   python3 "$HARNESS_DIR/lib/workflow_guard.py" route "$sid" --field route_role 2>/dev/null | grep -Eq '^(builder|builder_main)$'
 }
 
+planner_artifacts_present() {
+  # File-level presence (design+plan+task_graph non-empty) — deliberately NOT
+  # the workflow_guard route: with SOLAR_PLAN_VALIDATOR=1 the route stays pm
+  # until the graph is certified, and the acceptance seam below needs a
+  # certificate-independent "the planner already ran" signal (G3 run-4 fix).
+  local sid="$1"
+  [[ -s "$SPRINTS_DIR/${sid}.design.md" && -s "$SPRINTS_DIR/${sid}.plan.md" && -s "$SPRINTS_DIR/${sid}.task_graph.json" ]]
+}
+
 workflow_guard_route_role() {
   local sid="$1"
   python3 "$HARNESS_DIR/lib/workflow_guard.py" route "$sid" --field route_role 2>/dev/null || echo pm
@@ -2696,6 +2719,46 @@ workflow_guard_route_role() {
 workflow_guard_violations() {
   local sid="$1"
   python3 "$HARNESS_DIR/lib/workflow_guard.py" route "$sid" --field violations 2>/dev/null || echo '[]'
+}
+
+compile_generic_plan_graph() {
+  local sid="$1" out rc
+  out=$(HARNESS_DIR="$HARNESS_DIR" HARNESS_SPRINTS_DIR="$SPRINTS_DIR" \
+    python3 "$HARNESS_DIR/lib/plan_validator.py" compile-generic "$sid" --sprints-dir "$SPRINTS_DIR" 2>&1)
+  rc=$?
+  case "$rc" in
+    0)
+      return 0
+      ;;
+    3)
+      log "${Y}[plan-compile] ${sid} failed; planner bounce remains available: ${out}${N}"
+      emit_event "$sid" "plan_compile_failed" "coordinator" "$(python3 -c 'import json,sys; print(json.dumps({"rc": int(sys.argv[1]), "output": sys.argv[2][-2000:]}))' "$rc" "$out" 2>/dev/null || echo '{}')"
+      return 1
+      ;;
+    4)
+      log "${R}[plan-compile] ${sid} exhausted planner bounce budget; terminal failed/plan_compile_failed written: ${out}${N}"
+      emit_event "$sid" "plan_compile_terminal" "coordinator" "$(python3 -c 'import json,sys; print(json.dumps({"rc": int(sys.argv[1]), "output": sys.argv[2][-2000:]}))' "$rc" "$out" 2>/dev/null || echo '{}')"
+      return 1
+      ;;
+    *)
+      log "${R}[plan-compile] ${sid} validator error rc=${rc}: ${out}${N}"
+      emit_event "$sid" "plan_compile_error" "coordinator" "$(python3 -c 'import json,sys; print(json.dumps({"rc": int(sys.argv[1]), "output": sys.argv[2][-2000:]}))' "$rc" "$out" 2>/dev/null || echo '{}')"
+      return 1
+      ;;
+  esac
+}
+
+plan_validator_dispatch_ready() {
+  local sid="$1" out rc
+  out=$(HARNESS_DIR="$HARNESS_DIR" HARNESS_SPRINTS_DIR="$SPRINTS_DIR" \
+    python3 "$HARNESS_DIR/lib/plan_validator.py" check-generic-dispatch "$sid" --sprints-dir "$SPRINTS_DIR" 2>&1)
+  rc=$?
+  if (( rc == 0 )); then
+    return 0
+  fi
+  log "${R}[plan-compile] ${sid} graph dispatch refused by plan validator rc=${rc}: ${out}${N}"
+  emit_event "$sid" "plan_validator_dispatch_refused" "coordinator" "$(python3 -c 'import json,sys; print(json.dumps({"rc": int(sys.argv[1]), "output": sys.argv[2][-2000:]}))' "$rc" "$out" 2>/dev/null || echo '{}')"
+  return 1
 }
 
 status_has_bypass_pm() {
@@ -2747,6 +2810,25 @@ gate_check() {
 	      local guard_role guard_violations
 	      guard_role="$(workflow_guard_route_role "$sid")"
 	      guard_violations="$(workflow_guard_violations "$sid")"
+	      # G3 run-4 fix (p5-g3-live-rung-20260709T201817Z): the acceptance
+	      # seam for plain-sprint planner output. With the validator on, a
+	      # completed planner graph is uncertified until compile-generic
+	      # stamps it, so workflow_guard reports plan_certificate_required and
+	      # guard_role stays pm — the [backfill] compile below never fires (it
+	      # is gated on guard=builder: circular), and the legacy PRD schema
+	      # gate then demoted planning_complete back to drafting/spec, wedging
+	      # the sprint for 600s. Compile FIRST when the planner artifacts
+	      # exist, then re-read the route; the CLI is env-gated (flag off =
+	      # no-op exit 0), idempotent on stamped graphs, and skips
+	      # epic/fixed-contract graphs itself. A bounce (rc 3) leaves the
+	      # route on planner and the flow below re-dispatches the planner
+	      # with the compile errors.
+	      if [[ "$guard_role" != "builder_main" && "$guard_role" != "builder" ]] && planner_artifacts_present "$sid"; then
+	        if compile_generic_plan_graph "$sid"; then
+	          guard_role="$(workflow_guard_route_role "$sid")"
+	          guard_violations="$(workflow_guard_violations "$sid")"
+	        fi
+	      fi
 	      if [[ "$guard_role" == "builder_main" || "$guard_role" == "builder" ]]; then
 	        # Once workflow_guard says planner artifacts + task_graph are ready,
 	        # coordinator must not roll the sprint back to PM because of legacy
@@ -2762,7 +2844,11 @@ gate_check() {
         runtime_status_transition "$sid" "drafting" "active_blocked_missing_prd" "coordinator" '{"status_fields":{"phase":"spec","handoff_to":"pm","target_role":"pm"}}' || true
         return 1
       fi
-      if [[ "$req_file" == "$sprint_dir/${sid}.prd.md" ]]; then
+      # G3 run-4 fix: PM quality belongs BEFORE planner completion (the
+      # doctrine above). Once design+plan+task_graph exist, a PRD schema
+      # miss must not demote the sprint back to PM — that rollback wedged
+      # run 4 in a drafting/spec loop the headless runtime can never exit.
+      if [[ "$req_file" == "$sprint_dir/${sid}.prd.md" ]] && ! planner_artifacts_present "$sid"; then
         local prd_err
         if prd_err=$(validate_doc "prd" "$req_file"); then :; else
           log "${R}门禁拦截: PRD 结构不完整${N}"
@@ -2965,6 +3051,64 @@ mark_builder_flow() {
   grep -qx "${sid}:${intent}" "$marker" 2>/dev/null || echo "${sid}:${intent}" >> "$marker"
 }
 
+truthy_env() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+pm_operator_role_pool_enabled() {
+  truthy_env "${SOLAR_CODEX_ALLOW_PM_OPERATOR_DISPATCH:-}" && return 0
+  truthy_env "${SOLAR_PM_OPERATOR_DISPATCH:-}" && return 0
+  return 1
+}
+
+pm_operator_role_pool_task_seen() {
+  local sid="$1" role="${2:-planner}" node="N0"
+  [[ -n "$sid" ]] || return 1
+  case "$role" in
+    planner) node="N0" ;;
+    builder) node="B0" ;;
+    evaluator) node="E0" ;;
+  esac
+  python3 - "$HARNESS_DIR" "$sid" "$role" "$node" <<'PY' 2>/dev/null
+import json
+import sys
+from pathlib import Path
+
+h = Path(sys.argv[1])
+sid = sys.argv[2]
+role = sys.argv[3]
+node = sys.argv[4]
+prefix = f"pm-{sid}-{node}-"
+
+for status_path in (h / "run" / "operator-status").glob("*.json"):
+    try:
+        data = json.loads(status_path.read_text(encoding="utf-8"))
+    except Exception:
+        continue
+    task_id = str(data.get("current_task_id") or data.get("task_id") or "")
+    if task_id.startswith(prefix):
+        sys.exit(0)
+
+for task_path in (h / "run" / "pm-inbox").glob(f"{prefix}*.json"):
+    try:
+        data = json.loads(task_path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    if not data or str(data.get("requested_role") or role) == role:
+        sys.exit(0)
+
+results_root = h / "run" / "operator-results"
+for operator_dir in results_root.glob("*"):
+    if operator_dir.is_dir() and any(operator_dir.glob(f"{prefix}*")):
+        sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
 handle_queued() {
   local sid="$1" sf="$2"
   local blocked_by
@@ -3077,6 +3221,12 @@ PY
   guard_role="$(workflow_guard_route_role "$sid")"
 
   if [[ "$guard_role" != "builder_main" && "$guard_role" != "builder" ]]; then
+    if pm_operator_role_pool_enabled && pm_operator_role_pool_task_seen "$sid" "planner" \
+      && { [[ ! -s "$design" ]] || [[ ! -s "$plan" ]] || [[ ! -s "$graph" ]]; }; then
+      log "${G}PRD ready → planner role-pool task already active; suppress legacy pane planner dispatch for ${sid}${N}"
+      emit_event "$sid" "planner_role_pool_inflight" "coordinator" "{\"reason\":\"suppress_legacy_pane_dispatch\"}"
+      return 0
+    fi
     if [[ "$req_file" == "$prd" ]]; then
       local prd_err
       if prd_err=$(validate_doc "prd" "$req_file"); then :; else
@@ -3152,6 +3302,15 @@ PY
 
 **不要写业务代码，不要重启 harness，不要触碰 live tmux pane。**"
 
+    # G2b review finding 5: this legacy planner dispatch never carried the
+    # compile policy. The helper is env-gated (SOLAR_PLAN_VALIDATOR): it
+    # prints nothing when off, keeping the dispatch file byte-identical.
+    local planner_compile_policy_block=""
+    planner_compile_policy_block=$(python3 "$HARNESS_DIR/lib/plan_validator.py" planner-policy-block "$sid" --sprints-dir "$SPRINTS_DIR" 2>/dev/null || true)
+    if [[ -n "$planner_compile_policy_block" ]]; then
+      append_dispatch "$sid" "$planner_compile_policy_block"
+    fi
+
     dispatch_to_planner "$sid" "planner_design_plan" "$SPRINTS_DIR/${sid}.dispatch.md"
     local rc=$?
     if (( rc == 2 )); then
@@ -3174,6 +3333,10 @@ PY
   if ! annotate_requirement_matrix_for_planning "$sid"; then
     log "${R}Planner 产物存在但 Requirement Trace Matrix 注入失败，阻止推进 planning_complete${N}"
     emit_event "$sid" "gate_blocked" "coordinator" "{\"stage\":\"planning\",\"reason\":\"requirement_trace_annotation_failed\"}"
+    rollback_state_cache "$sid"
+    return 0
+  fi
+  if ! compile_generic_plan_graph "$sid"; then
     rollback_state_cache "$sid"
     return 0
   fi
@@ -3406,6 +3569,10 @@ handle_active() {
         local _guard_role _old_phase="$phase"
         _guard_role="$(workflow_guard_route_role "$sid" 2>/dev/null || true)"
         if [[ "$_guard_role" == "builder_main" || "$_guard_role" == "builder" ]]; then
+          if ! compile_generic_plan_graph "$sid"; then
+            rollback_state_cache "$sid"
+            return 0
+          fi
           log "${G}[backfill] ${sid} active/${_old_phase} but planner artifacts+task_graph ready (guard=${_guard_role}) → promote planning_complete/builder_main${N}"
           drafting_flow_clear "$sid" "planner"
           runtime_status_transition "$sid" "active" "active_artifacts_ready_backfill" "coordinator" '{"status_fields":{"phase":"planning_complete","handoff_to":"builder_main","target_role":"builder_main"},"note":"Backfilled split active/prd_ready state: planner artifacts and task_graph are complete."}' || true
@@ -3497,6 +3664,10 @@ EOF
   esac
   if [[ "$phase" == "graph_dispatch_active" || "$phase" == "planning_complete" ]]; then
     if [[ -f "$SPRINTS_DIR/${sid}.task_graph.json" ]]; then
+      if ! plan_validator_dispatch_ready "$sid"; then
+        rollback_state_cache "$sid"
+        return 0
+      fi
       log "${G}Sprint ${sid} ${phase} + task_graph → DAG graph_node 派发${N}"
       # Option A self-complete: for an APPROVED sprint (graph_dispatch_active), advance the DAG via the
       # proven multi-task path (build->eval->verdict->next-node) instead of graph-dispatch panes. Run a
@@ -3505,15 +3676,22 @@ EOF
       if [[ "${SOLAR_COORD_MULTITASK_SELFCOMPLETE:-0}" == "1" && "$phase" == "graph_dispatch_active" ]]; then
         local mt_rc=0 mt_out="" mt_log="$HARNESS_DIR/run/coord-multitask-${sid}.log"
         local mt_timeout="${SOLAR_COORD_MULTITASK_TIMEOUT_SEC:-90}"
+        local mt_stamp mt_out_file
+        mt_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+        mt_out_file="$HARNESS_DIR/run/coord-multitask-${sid}-${mt_stamp}.out"
         mkdir -p "$HARNESS_DIR/run"
-        mt_out="$(SOLAR_GRAPH_EVAL_OPERATOR_POOL="${SOLAR_GRAPH_EVAL_OPERATOR_POOL:-1}" \
+        HARNESS_DIR="$HARNESS_DIR" \
+          SPRINTS_DIR="$SPRINTS_DIR" \
+          SOLAR_GRAPH_EVAL_OPERATOR_POOL="${SOLAR_GRAPH_EVAL_OPERATOR_POOL:-1}" \
           SOLAR_MULTI_TASK_AUTO_ADVANCE="${SOLAR_MULTI_TASK_AUTO_ADVANCE:-1}" \
+          PYTHONFAULTHANDLER="${PYTHONFAULTHANDLER:-1}" \
           run_with_timeout "$mt_timeout" python3 "$HARNESS_DIR/lib/multi_task_runner.py" start \
             --graph "$SPRINTS_DIR/${sid}.task_graph.json" \
             --max-workers "${SOLAR_COORD_MULTITASK_WORKERS:-1}" \
-            --interval 20 --renderer plain --once 2>&1)" || mt_rc=$?
+            --interval 20 --renderer plain --once >"$mt_out_file" 2>&1 || mt_rc=$?
+        mt_out="$(tail -c 2000 "$mt_out_file" 2>/dev/null || true)"
         {
-          printf '\n[%s] rc=%s workers=%s timeout=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$mt_rc" "${SOLAR_COORD_MULTITASK_WORKERS:-1}" "$mt_timeout"
+          printf '\n[%s] rc=%s workers=%s timeout=%s output=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$mt_rc" "${SOLAR_COORD_MULTITASK_WORKERS:-1}" "$mt_timeout" "$mt_out_file"
           printf '%s\n' "$mt_out"
         } >> "$mt_log"
         if (( mt_rc != 0 )); then

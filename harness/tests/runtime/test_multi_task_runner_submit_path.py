@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import sys
+import types
 from pathlib import Path
 from unittest import mock
 
@@ -409,6 +410,49 @@ class TestSubmitPathResultTimeout:
 # ---------------------------------------------------------------------------
 
 class TestSubmitPathFallback:
+    def test_command_profile_without_physical_operator_keeps_profile_attribution(
+        self,
+        tmp_harness,
+        sample_node,
+        sample_graph,
+        monkeypatch,
+    ):
+        """Command-backed Codex profiles without operator_id must not erase attribution as N/A."""
+        monkeypatch.setattr(mtr, "OPERATORD_SUBMIT_ENABLED", True)
+        monkeypatch.setattr(mtr, "OPERATORD_RESULT_TIMEOUT_SEC", 0)
+
+        profile = {
+            "name": "codex-evaluator",
+            "role": "evaluator",
+            "persona": "evaluator",
+            "backend": "command",
+            "model": "gpt-5.5",
+            "approval_mode": "default",
+            "command": "python3 \"$HARNESS_DIR/tools/codex_operator.py\"",
+            "operator_fallback_reason": "",
+        }
+        graph_path = tmp_harness / "sprints" / "sprint-test-submit-001.task_graph.json"
+
+        patches = _base_patches(profile)
+        with patches["select_profile"], \
+             mock.patch.object(
+                 mtr,
+                 "capability_for_profile",
+                 return_value={"status": "ok", "provider": "openai"},
+             ), \
+             patches["build_dispatch_text"], patches["set_node_status"], \
+             patches["save_graph"], patches["set_last_launch"], \
+             mock.patch("operator_runtime.submit") as mock_submit:
+
+            result = mtr.launch_node(graph_path, sample_graph, sample_node, _make_args(), dry_run=True)
+
+        mock_submit.assert_not_called()
+        assert result["status"] == "dry_run"
+        assert result["operator_id"] == "codex-evaluator"
+        assert result["operator_vendor"] == "openai"
+        assert result["operator_model"] == "gpt-5.5"
+        assert result["dispatch_mode"] == "multi_task_command"
+
     def test_legacy_path_when_no_operator_id(
         self,
         tmp_harness,
@@ -526,3 +570,42 @@ class TestSubmitPathFallback:
 
         mock_submit.assert_not_called()
         assert result["status"] == "dry_run"
+
+
+class TestAutoAdvanceStatusSync:
+    def test_syncs_parent_status_cache_after_reconcile(self, tmp_harness, monkeypatch):
+        graph_path = tmp_harness / "sprints" / "sprint-test-submit-001.task_graph.json"
+        graph = {"sprint_id": "sprint-test-submit-001", "nodes": [{"id": "N1", "status": "passed"}]}
+        saved: list[tuple[str, dict]] = []
+        sync_calls: list[dict] = []
+
+        fake_gnd = types.SimpleNamespace(
+            dispatch_node_evals=lambda path: {"dispatched": [], "terminalized": []},
+            load_graph=lambda path: graph,
+            _reconcile_existing_dispatches=lambda graph_arg, path: [
+                {"node": "N1", "status": "passed", "reason": "eval_pass"}
+            ],
+            save_graph=lambda path, graph_arg: saved.append((path, graph_arg)),
+        )
+
+        def fake_sync_status_cache(graph_arg, path, *, actor, event):
+            sync_calls.append({"graph": graph_arg, "path": path, "actor": actor, "event": event})
+            return {"ok": True, "updated": True, "reason": "parent_passed"}
+
+        fake_graph_scheduler = types.SimpleNamespace(
+            sync_status_cache_from_graph=fake_sync_status_cache,
+        )
+        monkeypatch.setitem(sys.modules, "graph_node_dispatcher", fake_gnd)
+        monkeypatch.setitem(sys.modules, "graph_scheduler", fake_graph_scheduler)
+
+        result = mtr._advance_graph(graph_path)
+
+        assert saved == [(str(graph_path), graph)]
+        assert result["reconciled"] == [{"node": "N1", "status": "passed", "reason": "eval_pass"}]
+        assert result["status_sync"] == {"ok": True, "updated": True, "reason": "parent_passed"}
+        assert sync_calls == [{
+            "graph": graph,
+            "path": str(graph_path),
+            "actor": "multi_task_runner",
+            "event": "multi_task_auto_advance_reconciled",
+        }]

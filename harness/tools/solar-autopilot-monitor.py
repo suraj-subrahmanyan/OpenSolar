@@ -2506,6 +2506,26 @@ def dispatch_ready_graph_nodes(sid: str, lease: bool = True) -> dict:
     if load_graph is None or validate_graph is None:
         return {"ok": False, "reason": "graph_scheduler_unavailable"}
     graph = load_graph(path)
+    try:
+        import plan_validator  # type: ignore
+
+        plan_guard = plan_validator.check_planner_graph_dispatchable(graph)
+    except Exception as guard_exc:
+        if str(os.environ.get("SOLAR_PLAN_VALIDATOR") or "").strip().lower() not in {"0", "false", "no", "off"}:
+            return {
+                "ok": False,
+                "reason": "plan_validator_dispatch_refused",
+                "errors": [f"PLAN_VALIDATOR_UNCHECKABLE:{type(guard_exc).__name__}"],
+                "sprint_id": sid,
+            }
+        plan_guard = {"ok": True}
+    if not plan_guard.get("ok"):
+        return {
+            "ok": False,
+            "reason": "plan_validator_dispatch_refused",
+            "errors": plan_guard.get("errors") or [],
+            "sprint_id": sid,
+        }
     validation = validate_graph(graph) if validate_graph else {"ok": False, "errors": ["graph_scheduler_unavailable"]}
     if not validation.get("ok"):
         return {"ok": False, "reason": "task_graph_invalid", "validation": validation}
@@ -2571,10 +2591,22 @@ def instruction_for(status: dict, files: dict[str, bool]) -> str:
             "完成后把 status 更新为 phase=prd_ready handoff_to=planner target_role=planner。"
         )
     if handoff == "planner" and files["prd"] and planner_outputs_missing(files):
-        return (
+        instruction = (
             f"请接手 {sid}：读取 .prd.md 和 .contract.md，产出 {sid}.design.md、{sid}.plan.md 和 {sid}.task_graph.json。"
             "task_graph 必须通过 solar-harness graph-scheduler validate。不要问用户拍板；这是 P0 reliability 默认推进。"
         )
+        # P5 G2b: the legacy pane-wake path does not flow through pm_dispatch
+        # submit, so it appends the compile-policy block itself (env-gated
+        # inside the helper; "" when SOLAR_PLAN_VALIDATOR is off).
+        try:
+            import plan_validator  # type: ignore
+
+            policy_block = plan_validator.planner_compile_policy_block(SPRINTS, str(sid))
+        except Exception:
+            policy_block = ""
+        if policy_block:
+            instruction = f"{instruction}\n\n{policy_block}"
+        return instruction
     if (
         handoff in ("builder", "builder_main", "builder_parallel", "builder-lab")
         and files["plan"]
@@ -2629,6 +2661,29 @@ def normalize_status_to_workflow_route(sid: str, status: dict, route: dict) -> b
         }.get(role)
         if not fields:
             return False
+        if role in {"builder", "builder_main"}:
+            try:
+                import plan_validator  # type: ignore
+
+                compile_verdict = plan_validator.compile_planner_graph(
+                    SPRINTS,
+                    sid,
+                    config_dir=HARNESS / "config",
+                    workflows_dir=HARNESS / "config" / "workflows",
+                )
+            except Exception as exc:
+                compile_verdict = {
+                    "ok": False,
+                    "errors": [f"PLAN_VALIDATOR_UNCHECKABLE:{type(exc).__name__}"],
+                }
+            if not compile_verdict.get("ok"):
+                append_event(
+                    sid,
+                    "plan_compile_failed",
+                    "warn",
+                    {"route_role": role, "stage": stage, "verdict": compile_verdict},
+                )
+                return False
     new_status, new_phase, handoff, target_role = fields
     changed = any(
         str(status.get(k, "")) != v

@@ -14,24 +14,295 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 HOME = Path.home()
 
 
 def _harness_dir() -> Path:
-    raw = os.environ.get("HARNESS_DIR")
+    # HARNESS_DIR > SOLAR_HARNESS_DIR > source tree (round-4 G7: align with the
+    # graph_scheduler rule so a SOLAR_HARNESS_DIR-only run reads/writes the same
+    # sprints dir the gates and route writers use). The nothing-set fallback
+    # stays the SOURCE TREE, never ~/.solar — a dev checkout must not touch the
+    # live runtime (lane3-spec-mismatches.md D11).
+    raw = os.environ.get("HARNESS_DIR") or os.environ.get("SOLAR_HARNESS_DIR")
     return Path(raw) if raw else Path(__file__).resolve().parents[1]
 
 
 HARNESS_DIR = _harness_dir()
 if str(HARNESS_DIR / "lib") not in sys.path:
     sys.path.insert(0, str(HARNESS_DIR / "lib"))
-SPRINTS_DIR = HARNESS_DIR / "sprints"
+# HARNESS_SPRINTS_DIR override matches graph_scheduler:49 (round-4 G7).
+SPRINTS_DIR = Path(os.environ.get("HARNESS_SPRINTS_DIR") or (HARNESS_DIR / "sprints"))
+
+try:  # Lane 3 gate ledger (R4/R5); optional so a partial install never breaks dispatch
+    import gate_ledger as _gate_ledger
+except Exception:  # pragma: no cover
+    _gate_ledger = None
+
+
+def _ledger_enabled() -> bool:
+    return _gate_ledger is not None and _gate_ledger.enabled()
+
+
+def _product_mode_enabled() -> bool:
+    return str(os.environ.get("SOLAR_PRODUCT_MODE") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _ledger_transition(sid: str, node_id: str, from_status: str, to_status: str, writer: str,
+                       *, author_type: str = "scheduler", operator_id: str | None = None,
+                       note: str | None = None, **extra: Any) -> None:
+    """Report a dispatcher-side node-status write to the gate ledger (Lane 3, R4).
+
+    No-op unless SOLAR_GATE_LEDGER=1; never raises into the dispatch hot path."""
+    if not _ledger_enabled():
+        return
+    try:
+        _gate_ledger.record_status_transition(
+            SPRINTS_DIR, sid, node_id,
+            from_status=from_status or "", to_status=to_status,
+            author_type=author_type, writer=writer, operator_id=operator_id,
+            note=note, **extra,
+        )
+    except Exception:
+        pass
+
+
+def _ledger_record(sid: str, **kwargs: Any) -> None:
+    """Append an arbitrary gate-ledger record (eval_verdict/gate_check/repair_*)."""
+    if not _ledger_enabled():
+        return
+    try:
+        _gate_ledger.append_record(SPRINTS_DIR, sid, **kwargs)
+    except Exception:
+        pass
+
+
+try:  # Lane 3 artifact manifest (R6); optional like the ledger
+    import artifact_manifest as _artifact_manifest
+except Exception:  # pragma: no cover
+    _artifact_manifest = None
+
+
+def _workflow_contract_guard(graph: dict[str, Any]) -> dict[str, Any] | None:
+    """C1+C2 net-new dispatcher guard (design §1.2), Lane 3 serialized item.
+
+    A graph claiming a ``workflow_contract_id`` must correspond to a registered
+    contract: same version, and (for fixed-stage contracts) the same
+    contract-determined node structure. Planner-generated contracts are checked
+    for registration+version only — their stages are plan_validator's job.
+    Fail-closed under SOLAR_GATE_LEDGER; returns None when the guard passes,
+    is inapplicable, or the flag is off.
+    """
+    if not _ledger_enabled():
+        return None
+    contract_id = str((graph or {}).get("workflow_contract_id") or "").strip()
+    if not contract_id:
+        return None
+    errors: list[str] = []
+    try:
+        import workflow_contract as wc
+    except Exception:
+        return {
+            "ok": False,
+            "reason": "workflow_contract_guard_failed",
+            "workflow_contract_id": contract_id,
+            "errors": ["WORKFLOW_CONTRACT_MODULE_MISSING"],
+        }
+    try:
+        workflows_dir = globals().get("WORKFLOWS_DIR") or (HARNESS_DIR / "config" / "workflows")
+        contract = wc.find_contract(contract_id, workflows_dir)
+    except Exception:
+        contract = None
+    if contract is None:
+        errors.append(f"WORKFLOW_CONTRACT_UNREGISTERED:{contract_id}")
+    else:
+        graph_version = str(graph.get("workflow_contract_version") or "")
+        contract_version = str(contract.get("version") or "")
+        if graph_version != contract_version:
+            errors.append(
+                f"WORKFLOW_CONTRACT_VERSION_MISMATCH:{graph_version}!={contract_version}"
+            )
+        planner_generated = contract.get("stages_mode") == getattr(wc, "STAGES_MODE_PLANNER", "planner_generated")
+        if planner_generated and not errors:
+            # P5 G1: a planner-generated contract has no fixed structure to
+            # compare, so the guard demands PROOF the stages were validated —
+            # a plan_certificate whose hash still matches the governed graph
+            # content. Without this, claiming pm.generic.v1 was a free pass.
+            try:
+                import plan_validator as _plan_validator
+            except Exception:
+                errors.append("PLAN_CERTIFICATE_UNCHECKABLE:plan_validator_module_missing")
+            else:
+                for cert_error in _plan_validator.check_plan_certificate(graph):
+                    errors.append(
+                        f"{cert_error.get('code')}:{cert_error.get('node_id', '?')}"
+                    )
+        if not planner_generated and not errors:
+            stages = {str(s.get("id") or ""): s for s in contract.get("stages") or []}
+            nodes = {str(n.get("id") or ""): n for n in graph.get("nodes") or []}
+            if set(stages) != set(nodes):
+                errors.append(
+                    "WORKFLOW_CONTRACT_STRUCTURE_MISMATCH:node_ids:"
+                    f"{sorted(set(nodes) ^ set(stages))}"
+                )
+            for node_id in sorted(set(stages) & set(nodes)):
+                stage, node = stages[node_id], nodes[node_id]
+                if list(node.get("depends_on") or []) != list(stage.get("depends_on") or []):
+                    errors.append(f"WORKFLOW_CONTRACT_STRUCTURE_MISMATCH:{node_id}:depends_on")
+                if str(node.get("task_type") or "") != str(stage.get("task_type") or ""):
+                    errors.append(f"WORKFLOW_CONTRACT_STRUCTURE_MISMATCH:{node_id}:task_type")
+                allowed = [str(x) for x in (stage.get("allowed_capsules") or [])]
+                capsule = str(node.get("capability_capsule_id") or "")
+                if allowed and capsule and capsule not in allowed:
+                    errors.append(f"WORKFLOW_CONTRACT_STRUCTURE_MISMATCH:{node_id}:capability_capsule_id")
+                stage_gate = str((stage.get("evaluator_gate") or {}).get("kind") or "none")
+                node_gate = str((node.get("evaluator_gate") or {}).get("kind") or "none")
+                if node_gate != stage_gate:
+                    errors.append(f"WORKFLOW_CONTRACT_STRUCTURE_MISMATCH:{node_id}:evaluator_gate.kind")
+                # on_human_review is contract-determined (instantiate copies it
+                # verbatim from the stage's evaluator_gate, never substituted);
+                # a tamper flips readiness/skip semantics for dependents with no
+                # downstream re-check (round-4 G4). Raw compare — instantiate
+                # always copies a shipped policy, so absence on a policy-shipping
+                # contract is itself an edit.
+                stage_review = str((stage.get("evaluator_gate") or {}).get("on_human_review") or "")
+                node_review = str(node.get("on_human_review") or "")
+                if node_review != stage_review:
+                    errors.append(f"WORKFLOW_CONTRACT_STRUCTURE_MISMATCH:{node_id}:on_human_review")
+    if not errors:
+        return None
+    return {
+        "ok": False,
+        "reason": "workflow_contract_guard_failed",
+        "workflow_contract_id": contract_id,
+        "errors": errors,
+    }
+
+
+def _plan_validator_enabled() -> bool:
+    # G4 default-on: the validator is the runtime default; explicit 0 kills it.
+    return str(os.environ.get("SOLAR_PLAN_VALIDATOR", "") or "").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+
+
+def _plan_validator_dispatch_guard(graph: dict[str, Any]) -> dict[str, Any] | None:
+    """P5 G1b fix (review finding 1): certificate check at the launch path
+    itself, gated on SOLAR_PLAN_VALIDATOR — NOT on SOLAR_GATE_LEDGER, and NOT
+    skipped for graphs with no workflow_contract_id. _workflow_contract_guard
+    early-returns for uncontracted graphs, so before this guard an uncertified
+    generic graph enqueued even with the validator flag on.
+
+    check_planner_graph_dispatchable is env-gated internally and skips epic /
+    fixed-contract graphs, so with the flag off (or for non-generic graphs)
+    this is a no-op. Returns None when dispatch may proceed, a refusal dict
+    otherwise."""
+    if not _plan_validator_enabled():
+        return None
+    try:
+        import plan_validator as _plan_validator
+    except Exception:
+        return {
+            "ok": False,
+            "reason": "plan_validator_dispatch_refused",
+            "errors": ["PLAN_VALIDATOR_MODULE_MISSING"],
+        }
+    try:
+        verdict = _plan_validator.check_planner_graph_dispatchable(graph or {})
+    except Exception as exc:
+        return {
+            "ok": False,
+            "reason": "plan_validator_dispatch_refused",
+            "errors": [f"PLAN_VALIDATOR_UNCHECKABLE:{type(exc).__name__}"],
+        }
+    if verdict.get("ok"):
+        return None
+    try:
+        # G3 fix: a PASS-certified graph refused for hash mismatch is
+        # unrecoverable at dispatch time — terminalize the sprint truthfully
+        # instead of re-refusing every coordinator tick (uncertified refusals
+        # are left alone; the helper only acts on
+        # PLAN_CERTIFICATE_HASH_MISMATCH).
+        _plan_validator.record_certificate_mismatch_refusal(
+            SPRINTS_DIR, graph or {}, verdict.get("errors")
+        )
+    except Exception:
+        pass
+    return {
+        "ok": False,
+        "reason": "plan_validator_dispatch_refused",
+        "errors": verdict.get("errors") or [],
+    }
+
+
+def _manifest_presence(sid: str, node_id: str) -> dict[str, Any]:
+    """The node's manifest presence view (design §1.5), or {} off the contracted path.
+
+    Consulted only when SOLAR_GATE_LEDGER=1 AND a manifest exists — a manifest is
+    only ever written on the contracted path, so its existence is the signal."""
+    if _artifact_manifest is None or not _ledger_enabled():
+        return {}
+    try:
+        manifest = _artifact_manifest.read_manifest(SPRINTS_DIR, sid, node_id)
+        if not manifest:
+            return {}
+        return _artifact_manifest.presence_map(manifest)
+    except Exception:
+        return {}
+
+
+_GENERIC_WORKFLOW_CONTRACT_ID = "pm.generic.v1"
+
+
+def _graph_is_certified_generic(graph: dict[str, Any]) -> bool:
+    """Graph-kind check, mirroring contract_gate_executor._sprint_is_certified_generic:
+    keyed on the GRAPH KIND (workflow_contract_id), never on the validator flag, so
+    fixed-contract and legacy uncontracted graphs keep byte-identical behavior."""
+    return str((graph or {}).get("workflow_contract_id") or "").strip() == _GENERIC_WORKFLOW_CONTRACT_ID
+
+
+def _manifest_anchor(
+    sid: str, graph: dict[str, Any], node: dict[str, Any]
+) -> tuple[Path, dict[str, Any], list[str] | None]:
+    """(base_dir, roots, write_scope) for the node artifact manifest.
+
+    G3 run 11 (F-CLASS-16 in the proof layer): certified-generic builders execute
+    with work_dir = sprints/<sid>/workdir and declare canonical-root outputs
+    (workspace/...) relative to it, but the manifest was written with
+    base_dir=HARNESS_DIR and roots={} (the planner graph carries no artifact_roots
+    map), so every declared output resolved to a nonexistent HARNESS_DIR path and
+    the proof gate failed real work on S1/S2/S3. Same principle as the run-5
+    gate-cwd fix (contract_gate_executor): certified-generic anchors at the sprint
+    workdir with the contract's canonical root, and the contract's alias
+    spellings (sprints/<sid>/workdir/X, workdir/X) normalize onto it. Fixed
+    contracts keep the HARNESS_DIR anchor and graph-carried roots (P2/P3 proven).
+    A returned write_scope of None means "use the node's own write_scope"."""
+    graph_roots = graph.get("artifact_roots") if isinstance(graph.get("artifact_roots"), dict) else {}
+    if not _graph_is_certified_generic(graph):
+        return HARNESS_DIR, graph_roots, None
+    workdir = SPRINTS_DIR / sid / "workdir"
+    if not workdir.is_dir():
+        return HARNESS_DIR, graph_roots, None
+    aliases = (f"sprints/{sid}/workdir/", "workdir/")
+    scope: list[str] = []
+    for declared in node.get("write_scope") or []:
+        text = str(declared or "").strip()
+        if not text:
+            continue
+        for alias in aliases:
+            if text.startswith(alias):
+                text = text[len(alias):]
+                break
+        scope.append(text)
+    return workdir, {"canonical": "workspace/"}, scope
+
+
 MULTI_TASK_RUN_DIR = HARNESS_DIR / "run" / "multi-task"
 SESSION = os.environ.get("SOLAR_HARNESS_SESSION", "solar-harness")
 NO_DISPATCH_FLAG = HARNESS_DIR / "run" / "no-dispatch.flag"
@@ -65,16 +336,36 @@ PANE_QUOTA_EXHAUSTED_RE = re.compile(
 PANE_RATE_LIMIT_FALLBACK_SEC = int(os.environ.get("SOLAR_PANE_RATE_LIMIT_FALLBACK_SEC", "900"))
 OPERATOR_CONTRACT_CLOSEOUT_COOLDOWN_SEC = int(os.environ.get("SOLAR_GRAPH_OPERATOR_CONTRACT_CLOSEOUT_COOLDOWN_SEC", "900"))
 GRAPH_NODE_REPAIR_MAX_ATTEMPTS = int(os.environ.get("SOLAR_GRAPH_NODE_REPAIR_MAX_ATTEMPTS", "1"))
+# AC-R4.1: the gate runner's own vocabulary of mechanical/infrastructure failure
+# reasons. A FAIL verdict carrying one of these is evidence-machinery failure, not
+# a content judgment, and must never flip a policy-passed node on the contracted path.
+MECHANICAL_EVAL_REASONS = {
+    "research_eval_json_missing",
+    "eval_json_missing",
+    "eval_json_unreadable",
+    "evaluator_temporarily_busy",
+    "eval_dispatch_unavailable",
+    "eval_closeout_invalid",
+}
 # Bounded eval-dispatch failure escalation. A node whose evaluator dispatch keeps failing for a
 # capacity reason (e.g. no evaluator pane in the pool) would otherwise sit in `reviewing` forever
 # (Run D: 246x no_available_evaluator with no terminal state). After this many consecutive
 # capacity-class failures, the node is escalated to a durable needs_human_review with a reason +
 # next_action instead of retrying silently. 0 = unlimited (legacy infinite-retry behavior).
 GRAPH_NODE_EVAL_MAX_DISPATCH_FAILURES = int(os.environ.get("SOLAR_GRAPH_NODE_EVAL_MAX_DISPATCH_FAILURES", "8"))
+# G4 UI-rung run 3 (p5-g4-ui-rung-20260710T204856Z): the BUILDER-dispatch sibling of
+# the eval cap. S2 ping-ponged assigned->pending (stale_submit_ack_without_live_lease)
+# 122 ledger rows / 632s with zero progress while the only builder operator sat in its
+# 900s contract-closeout cooldown — the dispatcher re-assigned every tick, the
+# reconcile reset every tick, and nobody counted. Consecutive dispatch-failure resets
+# past this cap escalate the node to a durable needs_human_review (never auto-pass /
+# auto-fail); real progress clears the streak. 0 = unlimited (legacy).
+GRAPH_NODE_DISPATCH_MAX_FAILURES = int(os.environ.get("SOLAR_GRAPH_NODE_DISPATCH_MAX_FAILURES", "8"))
 # Eval-dispatch skip reasons that mean "the node cannot be evaluated right now for a capacity reason"
 # (as opposed to a transient within-batch lease collision). Only these accrue toward escalation.
 _EVAL_STUCK_REASONS = frozenset({
     "no_available_evaluator",
+    "evaluator_temporarily_busy",
     "insufficient_evaluator_capacity",
     "insufficient_selected_evaluators",
     "multi_evaluator_quorum_not_implemented",
@@ -275,6 +566,7 @@ from graph_scheduler import (  # noqa: E402
     enqueue_ready,
     set_node_status,
     node_status,
+    node_recorded_status,
     mark_node_result,
     parent_ready_check,
     sync_status_cache_from_graph,
@@ -1056,6 +1348,10 @@ def _prepare_human_search_handoff(sid: str, graph_path: str | Path, node: dict[s
 
     graph = load_graph(graph_path)
     live = next((n for n in graph.get("nodes", []) if n.get("id") == node_id), node)
+    _ledger_transition(
+        str(graph.get("sprint_id") or Path(str(graph_path)).stem.replace(".task_graph", "")),
+        node_id, str(live.get("status") or ""), "waiting_human_search", "human_search_wait",
+    )
     live["status"] = "waiting_human_search"
     live["human_search"] = {
         "provider": "human-in-the-loop",
@@ -1118,6 +1414,14 @@ def _model_registry() -> dict[str, Any]:
 
 
 def _normalize_model_alias(alias: str) -> str:
+    # AC-R8.3 (Lane 3 serialized item): in product mode a bare "sonnet" resolves
+    # Anthropic — never the legacy GLM fallback below, and regardless of any
+    # machine-local registry remap. Flag-off keeps the table bit-identical.
+    if (
+        str(os.environ.get("SOLAR_PRODUCT_MODE") or "").strip() == "1"
+        and str(alias or "").strip().lower() == "sonnet"
+    ):
+        return "claude-sonnet"
     reg = _model_registry()
     if _normalize_model is not None:
         try:
@@ -1397,6 +1701,29 @@ def _canonical_output_paths_block(node: dict[str, Any]) -> str:
     )
 
 
+def _generic_workdir_block(sid: str, graph: dict[str, Any]) -> str:
+    """Certified-generic builder teaching: STATE the workdir, name the trap.
+
+    G4-lite run 2 (codex-cli-output.log:1938): with cwd correctly set to
+    sprints/<sid>/workdir and the workdir never stated in the dispatch text,
+    the builder agent absolutized its output paths by analogy with the
+    sprint's dot-suffixed artifact files and invented sprints/<sid>.workdir.
+    The runtime now recovers that stray spelling, but the dispatch text must
+    stop inviting it."""
+    if not _graph_is_certified_generic(graph):
+        return ""
+    workdir = SPRINTS_DIR / sid / "workdir"
+    return (
+        "## Sprint Workdir\n\n"
+        f"Your working directory is the sprint workdir: `{workdir}`\n"
+        "(a DIRECTORY under the sprint id — `" + sid + "/workdir`).\n"
+        "Write every declared output RELATIVE to it (e.g. `workspace/<file>`), or use\n"
+        "the absolute form above. NEVER construct a `sprints/" + sid + ".workdir`\n"
+        "path: sprint FILES use dot-suffixed names (`" + sid + ".plan.md`),\n"
+        "but the workdir is the `" + sid + "/workdir` directory."
+    )
+
+
 def _write_scope_preflight_block(sid: str, node: dict[str, Any]) -> str:
     """Warn builders when write-scope artifacts already exist from another sprint.
 
@@ -1591,8 +1918,39 @@ def _archive_path_for_repair(path: Path, attempt: int) -> Path:
     return path.with_name(f"{path.stem}.repair{attempt}.{stamp}.{os.getpid()}{path.suffix}")
 
 
-def _archive_node_review_sidecars(sid: str, node_id: str, handoff_file: Path | None, eval_json_path: str | Path, attempt: int) -> dict[str, str]:
-    archived: dict[str, str] = {}
+def _attempt_archive_dir(sid: str, node_id: str, attempt: int) -> Path:
+    return SPRINTS_DIR / sid / "attempts" / _safe_node_id(node_id) / str(max(1, int(attempt or 1)))
+
+
+def _copy_attempt_archive(path: Path, sid: str, node_id: str, attempt: int, key: str) -> Path | None:
+    try:
+        src = path.expanduser()
+    except Exception:
+        return None
+    if not src.exists() or not src.is_file():
+        return None
+    archive_dir = _attempt_archive_dir(sid, node_id, attempt)
+    safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(key or "artifact")).strip("-") or "artifact"
+    suffix = src.suffix or ".artifact"
+    dest = archive_dir / f"{safe_key}{suffix}"
+    try:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            stem = dest.stem
+            for index in range(2, 100):
+                candidate = dest.with_name(f"{stem}.{index}{dest.suffix}")
+                if not candidate.exists():
+                    dest = candidate
+                    break
+        shutil.copy2(src, dest)
+    except Exception:
+        return None
+    return dest
+
+
+def _archive_node_review_sidecars(sid: str, node_id: str, handoff_file: Path | None, eval_json_path: str | Path, attempt: int) -> dict[str, Any]:
+    archived: dict[str, Any] = {}
+    attempt_archived: dict[str, str] = {}
     candidates: list[tuple[str, Path]] = []
     if handoff_file is not None:
         candidates.append(("handoff_md", Path(handoff_file)))
@@ -1614,12 +1972,18 @@ def _archive_node_review_sidecars(sid: str, node_id: str, handoff_file: Path | N
         if resolved in seen or not resolved.exists():
             continue
         seen.add(resolved)
+        attempt_copy = _copy_attempt_archive(resolved, sid, node_id, attempt, key)
+        if attempt_copy is not None:
+            attempt_archived[key] = str(attempt_copy)
         archive = _archive_path_for_repair(resolved, attempt)
         try:
             resolved.replace(archive)
         except Exception:
             continue
         archived[key] = str(archive)
+    if attempt_archived:
+        archived["_attempt_archive_dir"] = str(_attempt_archive_dir(sid, node_id, attempt))
+        archived["_attempt_sidecars"] = attempt_archived
     return archived
 
 
@@ -1630,7 +1994,7 @@ def _archive_stale_repair_eval_sidecars(
     handoff_file: Path | None,
     eval_json_path: str | Path,
     status: str,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     if status in {"passed", "failed"}:
         return {}
     attempt = _node_repair_attempts(node)
@@ -1642,7 +2006,7 @@ def _archive_stale_repair_eval_sidecars(
     except Exception:
         return {}
 
-    archived: dict[str, str] = {}
+    archived: dict[str, Any] = {}
     candidates: list[tuple[str, Path]] = []
     if str(eval_json_path or "").strip():
         candidates.append(("eval_json", Path(str(eval_json_path))))
@@ -1685,6 +2049,165 @@ def _node_eval_dispatched_after(node: dict[str, Any], marker: datetime.datetime)
         if dispatched_at and dispatched_at > marker:
             return True
     return False
+
+
+def _eval_payload_generation(payload: dict[str, Any]) -> int | None:
+    """Best-effort repair/eval generation parsed from an evaluator JSON sidecar."""
+    raw_values: list[Any] = [
+        payload.get("eval_generation"),
+        payload.get("repair_attempt"),
+        payload.get("repair_generation"),
+    ]
+    context = payload.get("eval_context")
+    if isinstance(context, dict):
+        raw_values.extend([
+            context.get("eval_generation"),
+            context.get("repair_attempt"),
+            context.get("repair_generation"),
+        ])
+    for raw in raw_values:
+        try:
+            text = str(raw).strip()
+            if text:
+                return int(text)
+        except Exception:
+            continue
+    return None
+
+
+def _payload_time(payload: dict[str, Any], *keys: str) -> datetime.datetime | None:
+    for key in keys:
+        value = str(payload.get(key) or "").strip()
+        parsed = _parse_utc(value)
+        if parsed:
+            return parsed
+    context = payload.get("eval_context")
+    if isinstance(context, dict):
+        for key in keys:
+            value = str(context.get(key) or "").strip()
+            parsed = _parse_utc(value)
+            if parsed:
+                return parsed
+    return None
+
+
+def _eval_payload_stale_for_current_repair(node: dict[str, Any], payload: dict[str, Any]) -> str:
+    """Return a reason if an eval sidecar is not valid for this node's current repair generation.
+
+    A repaired node must not be decided by an evaluator/doctor output from an older evidence
+    snapshot. Normal first-pass evals are unaffected. For repaired nodes we accept either explicit
+    matching generation metadata or ordinary evaluator output whose timestamps do not predate the
+    repair marker. Scheduler/doctor backfills without generation are treated as stale because they
+    are exactly the artifact class that can repopulate canonical eval sidecars after repair.
+    """
+    attempt = _node_repair_attempts(node)
+    if attempt <= 0 or not payload:
+        return ""
+
+    generation = _eval_payload_generation(payload)
+    if generation is not None and generation != attempt:
+        return f"eval_generation_mismatch:{generation}!={attempt}"
+
+    assignment_dispatch_ids = {
+        str(item.get("dispatch_id") or "").strip()
+        for item in (node.get("eval_assignments") or [])
+        if isinstance(item, dict) and str(item.get("dispatch_id") or "").strip()
+    }
+    eval_context = payload.get("eval_context") if isinstance(payload.get("eval_context"), dict) else {}
+    payload_dispatch_id = str(
+        payload.get("eval_dispatch_id")
+        or eval_context.get("eval_dispatch_id")
+        or ""
+    ).strip()
+    if payload_dispatch_id and assignment_dispatch_ids and payload_dispatch_id not in assignment_dispatch_ids:
+        return "eval_dispatch_id_mismatch_after_repair"
+
+    assignment_pm_task_ids = {
+        str(item.get("pm_task_id") or "").strip()
+        for item in (node.get("eval_assignments") or [])
+        if isinstance(item, dict) and str(item.get("pm_task_id") or "").strip()
+    }
+    payload_pm_task_id = str(
+        payload.get("pm_task_id")
+        or payload.get("task_id")
+        or eval_context.get("pm_task_id")
+        or ""
+    ).strip()
+    if payload_pm_task_id and assignment_pm_task_ids and payload_pm_task_id not in assignment_pm_task_ids:
+        return "eval_pm_task_id_mismatch_after_repair"
+
+    repair_created_at = _repair_context_created_at(node)
+    payload_at = _payload_time(
+        payload,
+        "evidence_snapshot_at",
+        "eval_instruction_created_at",
+        "checked_at",
+        "created_at",
+        "finished_at",
+        "updated_at",
+    )
+    if repair_created_at and payload_at and payload_at < repair_created_at:
+        return "eval_evidence_snapshot_predates_repair"
+
+    if generation is None:
+        generated_by = str(payload.get("generated_by") or "").strip().lower()
+        generation_mode = str(payload.get("generation_mode") or "").strip().lower()
+        if generated_by == "graph_scheduler.doctor" or generation_mode in {"repair_backfill", "manual_node_eval"}:
+            return "eval_missing_repair_generation_after_repair"
+    return ""
+
+
+def _archive_current_repair_stale_eval_sidecars(
+    sid: str,
+    node: dict[str, Any],
+    node_id: str,
+    eval_json_path: str | Path,
+    reason: str,
+) -> dict[str, Any]:
+    if not reason:
+        return {}
+    candidates: list[tuple[str, Path]] = []
+    if str(eval_json_path or "").strip():
+        candidates.append(("eval_json", Path(str(eval_json_path))))
+    candidates.append(("eval_md", _eval_md_file(sid, node_id)))
+
+    archived: dict[str, Any] = {}
+    attempt_archived: dict[str, str] = {}
+    attempt = max(1, _node_repair_attempts(node))
+    seen: set[Path] = set()
+    for key, raw_path in candidates:
+        try:
+            path = raw_path.expanduser()
+            if path in seen or not path.exists():
+                continue
+            seen.add(path)
+            attempt_copy = _copy_attempt_archive(path, sid, node_id, attempt, key)
+            if attempt_copy is not None:
+                attempt_archived[key] = str(attempt_copy)
+            archive = _archive_path_for_repair(path, attempt)
+            path.replace(archive)
+        except Exception:
+            continue
+        archived[key] = str(archive)
+    if attempt_archived:
+        archived["_attempt_archive_dir"] = str(_attempt_archive_dir(sid, node_id, attempt))
+        archived["_attempt_sidecars"] = attempt_archived
+    if archived:
+        node["stale_eval_archived_at"] = _utc_now()
+        node["stale_eval_archive_reason"] = reason
+        _append_event(sid, {
+            "event": "graph_eval_sidecar_archived_after_repair",
+            "by": "graph-dispatch",
+            "severity": "warn",
+            "data": {"node": node_id, "reason": reason, "archived": archived},
+        })
+        _record_node_runstate(sid, node_id, {
+            "last_eval_result": "STALE_ARCHIVED",
+            "last_eval_reason": reason,
+            "next_action": "dispatch_fresh_eval",
+            "status": str(node.get("status") or ""),
+        })
+    return archived
 
 
 def _archive_late_pre_repair_eval_sidecars(
@@ -1779,6 +2302,9 @@ def _start_node_repair_from_eval_fail(
     if prior_attempts >= max_attempts:
         # Repair budget exhausted: the reconcile caller falls through and marks this node terminal
         # `failed`. Record the (otherwise silent) exhaustion so the terminal cause is provable from disk.
+        _ledger_record(sid, node_id=node_id, kind="repair_exhausted",
+                       author={"type": "policy"}, repair_attempt=prior_attempts,
+                       note="repair_budget_exhausted")
         _record_node_runstate(sid, node_id, {
             "repair_attempt": prior_attempts,
             "max_repair_attempts": max_attempts,
@@ -1826,6 +2352,11 @@ def _start_node_repair_from_eval_fail(
         artifacts.pop("eval_json", None)
         artifacts.pop("handoff_md", None)
 
+    _ledger_record(sid, node_id=node_id, kind="repair_start", author={"type": "policy"},
+                   repair_attempt=attempt, eval_generation=attempt,
+                   note=f"repair_requested_from_eval_sidecar:{Path(eval_json_path).name}")
+    _ledger_transition(sid, node_id, str(node.get("status") or ""), "failed_review",
+                       "_start_node_repair_from_eval_fail")
     node["status"] = "failed_review"
     node["repair_attempts"] = attempt
     node["repair_context"] = repair_context
@@ -1895,7 +2426,12 @@ def _active_multi_task_status_for(sid: str, node_id: str) -> dict[str, Any] | No
     return newest[1] if newest else None
 
 
-def _latest_operator_result_for(sid: str, node_id: str, operator_id: str = "") -> dict[str, Any] | None:
+def _latest_operator_result_for(
+    sid: str,
+    node_id: str,
+    operator_id: str = "",
+    task_id: str = "",
+) -> dict[str, Any] | None:
     """Return the newest terminal PM/operator result for a graph node.
 
     Operator-pool dispatch is asynchronous: `pm_dispatch submit` can succeed
@@ -1914,6 +2450,8 @@ def _latest_operator_result_for(sid: str, node_id: str, operator_id: str = "") -
         if str(data.get("node_id") or "") != node_id:
             continue
         if operator_id and str(data.get("operator_id") or "") != operator_id:
+            continue
+        if task_id and str(data.get("task_id") or "") != task_id:
             continue
         status = str(data.get("status") or "").strip().lower()
         if status not in {"completed", "failed", "failed_missing_handoff", "failed_stale_handoff", "cancelled", "error"}:
@@ -2089,6 +2627,13 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
             str(status or "").strip().lower(),
         )
         if late_pre_repair_eval_archived:
+            _ledger_record(
+                sid, node_id=node_id, kind="eval_verdict",
+                author={"type": "evaluator"},
+                repair_attempt=_node_repair_attempts(node),
+                gate_consumable=False, archived=True,
+                stale_reason="late_pre_repair_eval_output_archived",
+            )
             repaired.append(
                 {
                     "node": node_id,
@@ -2106,6 +2651,13 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
             str(status or "").strip().lower(),
         ) if not late_pre_repair_eval_archived else {}
         if stale_eval_archived:
+            _ledger_record(
+                sid, node_id=node_id, kind="eval_verdict",
+                author={"type": "evaluator"},
+                repair_attempt=_node_repair_attempts(node),
+                gate_consumable=False, archived=True,
+                stale_reason="repair_handoff_newer_than_eval_sidecar",
+            )
             repaired.append(
                 {
                     "node": node_id,
@@ -2120,6 +2672,38 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
             if backfilled_eval is not None:
                 eval_json_path = str(backfilled_eval)
         eval_payload = {} if (late_pre_repair_eval_archived or stale_eval_archived) else (_read_json_file_safe(eval_json_path) if eval_json_path else {})
+        stale_eval_generation_reason = _eval_payload_stale_for_current_repair(node, eval_payload)
+        if stale_eval_generation_reason:
+            # AC-R4.4: stale-generation verdict evidence is archived, never applied —
+            # recorded in the gate ledger as a non-consumable eval_verdict.
+            _ledger_record(
+                sid, node_id=node_id, kind="eval_verdict",
+                author={"type": "evaluator"},
+                verdict=str(eval_payload.get("verdict") or eval_payload.get("status") or "") or None,
+                eval_generation=_eval_payload_generation(eval_payload),
+                repair_attempt=_node_repair_attempts(node),
+                generation_mode=str(eval_payload.get("generation_mode") or "") or None,
+                gate_consumable=False, archived=True,
+                stale_reason=stale_eval_generation_reason,
+            )
+            archived_generation_eval = _archive_current_repair_stale_eval_sidecars(
+                sid,
+                node,
+                node_id,
+                eval_json_path,
+                stale_eval_generation_reason,
+            )
+            if archived_generation_eval:
+                repaired.append(
+                    {
+                        "node": node_id,
+                        "status": status,
+                        "reason": "stale_eval_generation_archived",
+                        "stale_reason": stale_eval_generation_reason,
+                        "archived_sidecars": archived_generation_eval,
+                    }
+                )
+            eval_payload = {}
         raw_eval_verdict = str(eval_payload.get("verdict") or eval_payload.get("status") or "").strip().lower()
         if raw_eval_verdict in {"pass", "passed", "ok", "success", "succeeded"}:
             eval_verdict = "PASS"
@@ -2215,6 +2799,75 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
                     }
                 )
                 continue
+            # Divided-mark-authority fix (G3 runs 5 + 12): a reconcile PASS on the
+            # CONTRACTED path must run the same proof seam node_verdict runs —
+            # run 12's S2 (deterministic-gate node) was marked passed here with no
+            # manifest and its proof obligations never checked; run 5's S1 had a
+            # recorded proof_obligations_failed block overwritten by this mark.
+            # Proof failure never marks passed: bounded repair, then truthful
+            # terminal failed (never a silent re-block loop). Legacy uncontracted
+            # graphs keep the pre-fix reconcile behavior byte-identical.
+            if (
+                eval_verdict == "PASS"
+                and _ledger_enabled()
+                and _gate_ledger is not None
+                and _gate_ledger.contracted(graph)
+            ):
+                proof_gate = _run_node_proof_seam(sid, node, graph, eval_json_path, handoff_file)
+                if proof_gate.get("required") and not proof_gate.get("ok"):
+                    _ledger_record(sid, node_id=node_id, kind="gate_check", author={"type": "policy"},
+                                   verdict="block", note="proof_obligations_failed")
+                    missing = [
+                        f"{item.get('requirement')}:{item.get('field')}"
+                        for item in (proof_gate.get("missing") or [])
+                        if isinstance(item, dict)
+                    ]
+                    proof_fail_payload = {
+                        "verdict": "FAIL",
+                        "summary": "reconcile proof gate: proof_obligations_failed — "
+                                   + ", ".join(missing[:8]),
+                        "failed_conditions": missing[:20],
+                    }
+                    repair_context = _start_node_repair_from_eval_fail(
+                        graph, node, sid, node_id, handoff_file, eval_json_path, proof_fail_payload,
+                    )
+                    if repair_context is not None:
+                        repaired.append(
+                            {
+                                "node": node_id,
+                                "status": "failed_review",
+                                "reason": "reconcile_proof_gate_failed_repair_requested",
+                                "handoff": str(handoff_file),
+                                "eval_json": eval_json_path,
+                                "proof_gate": proof_gate,
+                                "repair_attempt": repair_context.get("attempt"),
+                                "max_repair_attempts": repair_context.get("max_attempts"),
+                            }
+                        )
+                        continue
+                    node.pop("assigned_to", None)
+                    node.pop("dispatch_id", None)
+                    mark_node_result(
+                        graph,
+                        node_id,
+                        "failed",
+                        gate_status="failed",
+                        note="reconcile_proof_gate_failed:proof_obligations_failed",
+                    )
+                    node["status"] = "failed"
+                    node["updated_at"] = _utc_now()
+                    node["eval_json"] = eval_json_path
+                    repaired.append(
+                        {
+                            "node": node_id,
+                            "status": "failed",
+                            "reason": "reconcile_proof_gate_failed_terminal",
+                            "handoff": str(handoff_file),
+                            "eval_json": eval_json_path,
+                            "proof_gate": proof_gate,
+                        }
+                    )
+                    continue
             node.pop("assigned_to", None)
             node.pop("dispatch_id", None)
             verdict_status = "passed" if eval_verdict == "PASS" else "failed"
@@ -2316,6 +2969,8 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
                 if operator_cooldown:
                     node["last_operator_cooldown_after_closeout"] = operator_cooldown
                 node["updated_at"] = _utc_now()
+                _ledger_transition(sid, node_id, status, "pending", "_reconcile_existing_dispatches",
+                                   note=str(closeout["reason"]))
                 node["status"] = "pending"
                 graph.setdefault("node_results", {}).pop(node_id, None)
                 _append_dispatch_ledger(
@@ -2381,6 +3036,8 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
                     node.pop("dispatch_id", None)
                     node["dispatch_retry_reason"] = unavailable_reason
                     node["updated_at"] = _utc_now()
+                    _ledger_transition(sid, node_id, status, "pending", "_reconcile_existing_dispatches",
+                                       note=str(unavailable_reason))
                     node["status"] = "pending"
                     graph.setdefault("node_results", {}).pop(node_id, None)
                     _append_dispatch_ledger(
@@ -2409,6 +3066,8 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
                         node.pop("dispatch_id", None)
                         node["dispatch_retry_reason"] = "submit_ack_idle_no_worker_activity"
                         node["updated_at"] = _utc_now()
+                        _ledger_transition(sid, node_id, status, "pending", "_reconcile_existing_dispatches",
+                                           note="submit_ack_idle_no_worker_activity")
                         node["status"] = "pending"
                         graph.setdefault("node_results", {}).pop(node_id, None)
                         repaired.append(
@@ -2436,6 +3095,8 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
                         node.pop("dispatch_id", None)
                         node["dispatch_retry_reason"] = "live_lease_idle_without_submit_ack"
                         node["updated_at"] = _utc_now()
+                        _ledger_transition(sid, node_id, status, "pending", "_reconcile_existing_dispatches",
+                                           note="live_lease_idle_without_submit_ack")
                         node["status"] = "pending"
                         graph.setdefault("node_results", {}).pop(node_id, None)
                         repaired.append(
@@ -2458,6 +3119,8 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
                     node.pop("dispatch_id", None)
                     node["dispatch_retry_reason"] = dispatch_prompt_reason or unavailable_reason or "stale_submit_ack_without_live_lease"
                     node["updated_at"] = _utc_now()
+                    _ledger_transition(sid, node_id, status, "pending", "_reconcile_existing_dispatches",
+                                       note=str(node["dispatch_retry_reason"]))
                     node["status"] = "pending"
                     graph.setdefault("node_results", {}).pop(node_id, None)
                     repaired.append(
@@ -2477,6 +3140,8 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
                     node["dispatch_retry_reason"] = unavailable_reason
                     node["updated_at"] = _utc_now()
                     if _recoverable_pane_blocker(unavailable_reason):
+                        _ledger_transition(sid, node_id, status, "pending", "_reconcile_existing_dispatches",
+                                           note=str(unavailable_reason))
                         node["status"] = "pending"
                         graph.setdefault("node_results", {}).pop(node_id, None)
                         _append_dispatch_ledger(
@@ -2502,6 +3167,8 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
                         "updated_at": node["updated_at"],
                         "blocking_reason": unavailable_reason,
                     }
+                    _ledger_transition(sid, node_id, status, "worker_blocked", "_reconcile_existing_dispatches",
+                                       note=str(unavailable_reason))
                     node["status"] = "worker_blocked"
                     repaired.append(
                         {
@@ -2521,11 +3188,17 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
                 if not pane.startswith("operator:"):
                     continue
                 operator_id = pane.split(":", 1)[1].strip()
-                result = _latest_operator_result_for(sid, node_id, operator_id=operator_id)
+                result = _latest_operator_result_for(
+                    sid,
+                    node_id,
+                    operator_id=operator_id,
+                    task_id=str(assignment.get("pm_task_id") or ""),
+                )
                 if result and not Path(str(assignment.get("eval_json_path") or _eval_json_file(sid, node_id))).exists():
                     terminal_operator_assignment = {
                         "pane": pane,
                         "dispatch_id": str(assignment.get("dispatch_id") or "").strip(),
+                        "pm_task_id": str(assignment.get("pm_task_id") or "").strip(),
                         "reason": "eval_failed_contract_closeout",
                         "operator_status": str(result.get("status") or ""),
                         "result_json": str(result.get("_result_json") or ""),
@@ -2630,6 +3303,9 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
             node.pop("dispatch_id", None)
             node["dispatch_retry_reason"] = unavailable_reason or "stale_submit_ack_without_live_lease"
             node["updated_at"] = _utc_now()
+            _ledger_transition(sid, node_id, str(node.get("status") or ""), "pending",
+                               "_reconcile_existing_dispatches",
+                               note=str(node["dispatch_retry_reason"]))
             node["status"] = "pending"
             graph.setdefault("node_results", {}).pop(node_id, None)
             repaired.append(
@@ -2669,7 +3345,85 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
             event="graph_dependency_blocked_projection",
         )
         repaired.append({"reason": "parent_projection_after_dependency_block", "projection": parent_projection})
+    _account_dispatch_retry_failures(graph, sid, repaired)
     return repaired
+
+
+def _account_dispatch_retry_failures(
+    graph: dict[str, Any],
+    sid: str,
+    repaired: list[dict[str, Any]],
+) -> None:
+    """Builder-dispatch mirror of _account_eval_dispatch_failures (G4 UI-rung
+    run 3). Post-processes this reconcile pass: every node the pass RESET to
+    pending (a dispatch that did not stick — stale ack, idle lease, operator
+    closeout failure, pane unavailable, ...) increments its
+    dispatch_failure_streak; past GRAPH_NODE_DISPATCH_MAX_FAILURES the node
+    escalates to a durable needs_human_review with the reason and a
+    next_action, instead of feeding the assign/reset ping-pong forever.
+    Nodes observed making real progress (dispatched/reviewing/passed) get
+    their streak cleared, so slow-but-alive dispatch is never punished."""
+    max_fail = GRAPH_NODE_DISPATCH_MAX_FAILURES
+    node_index = {str(n.get("id") or ""): n for n in graph.get("nodes", [])}
+    escalations: list[dict[str, Any]] = []
+    for item in repaired:
+        node_id = str(item.get("node") or "")
+        node = node_index.get(node_id)
+        if node is None:
+            continue
+        if str(item.get("status") or "") != "pending" or not str(item.get("reason") or ""):
+            continue
+        if str(node_status(graph, node_id) or "").strip().lower() != "pending":
+            continue
+        reason = str(item.get("reason"))
+        failures = int(node.get("dispatch_failure_streak") or 0) + 1
+        node["dispatch_failure_streak"] = failures
+        node["last_dispatch_failure_reason"] = reason
+        node["last_dispatch_failure_at"] = _utc_now()
+        if max_fail <= 0 or failures < max_fail:
+            continue
+        now = _utc_now()
+        blocked_reason = f"dispatch_starvation:{reason}:{failures}_consecutive_failures"
+        next_action = "connect_builder_operator_or_clear_cooldown_then_requeue_dispatch"
+        _ledger_transition(sid, node_id, "pending", "needs_human_review",
+                           "_account_dispatch_retry_failures", note=blocked_reason)
+        node["status"] = "needs_human_review"
+        node["dispatch_blocked_reason"] = blocked_reason
+        node["next_action"] = next_action
+        node["updated_at"] = now
+        graph.setdefault("node_results", {})[node_id] = {
+            "status": "needs_human_review",
+            "updated_at": now,
+            "note": blocked_reason,
+            "next_action": next_action,
+        }
+        _append_event(sid, {
+            "event": "graph_dispatch_escalated_to_human",
+            "node": node_id,
+            "reason": blocked_reason,
+            "next_action": next_action,
+        })
+        _record_node_runstate(sid, node_id, {
+            "dispatch_failure_streak": failures,
+            "last_dispatch_failure_reason": reason,
+            "next_action": next_action,
+            "status": "needs_human_review",
+        })
+        escalations.append({
+            "node": node_id,
+            "status": "needs_human_review",
+            "reason": blocked_reason,
+        })
+    # Progress clears the streak — checked by CURRENT status so both
+    # set-dispatched sites (with and without a repaired entry) are covered.
+    for node_id, node in node_index.items():
+        if not int(node.get("dispatch_failure_streak") or 0):
+            continue
+        current = str(node_status(graph, node_id) or "").strip().lower()
+        if current in {"dispatched", "reviewing", "passed"}:
+            node.pop("dispatch_failure_streak", None)
+            node.pop("last_dispatch_failure_reason", None)
+    repaired.extend(escalations)
 
 
 def _eval_dispatch_file(sid: str, node_id: str) -> Path:
@@ -2790,6 +3544,7 @@ def _node_eval_assignments(node: dict[str, Any]) -> list[dict[str, Any]]:
                 {
                     "pane": pane,
                     "dispatch_id": dispatch_id,
+                    "pm_task_id": str(item.get("pm_task_id") or ""),
                     "role": str(item.get("role") or "secondary"),
                     "eval_md_path": str(item.get("eval_md_path") or ""),
                     "eval_json_path": str(item.get("eval_json_path") or ""),
@@ -2804,6 +3559,7 @@ def _node_eval_assignments(node: dict[str, Any]) -> list[dict[str, Any]]:
             {
                 "pane": pane,
                 "dispatch_id": dispatch_id,
+                "pm_task_id": str(node.get("eval_pm_task_id") or ""),
                 "role": "primary",
                 "eval_md_path": str(node.get("eval_md_path") or ""),
                 "eval_json_path": str(node.get("eval_json") or ""),
@@ -2823,23 +3579,47 @@ def _read_json_file_safe(path: str | Path) -> dict[str, Any]:
         return {}
 
 
+def _append_proof_obligations(out: list[dict[str, Any]], payload: Any) -> None:
+    if isinstance(payload, dict) and isinstance(payload.get("proof_obligations"), list):
+        out.extend(item for item in payload.get("proof_obligations", []) if isinstance(item, dict))
+
+
+def _dedupe_proof_obligations(obligations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for item in obligations:
+        try:
+            key = json.dumps(item, sort_keys=True, ensure_ascii=False)
+        except Exception:
+            key = repr(sorted(item.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
 def _node_proof_obligations(sid: str, node: dict[str, Any]) -> list[dict[str, Any]]:
-    obligations = node.get("proof_obligations")
-    if isinstance(obligations, list):
-        return [item for item in obligations if isinstance(item, dict)]
+    obligations: list[dict[str, Any]] = []
+    inline = node.get("proof_obligations")
+    if isinstance(inline, list):
+        obligations.extend(item for item in inline if isinstance(item, dict))
+
     for key in ("capsule_plan_ir", "physical_plan_ir"):
         payload = node.get(key)
-        if isinstance(payload, dict) and isinstance(payload.get("proof_obligations"), list):
-            return [item for item in payload.get("proof_obligations", []) if isinstance(item, dict)]
+        if isinstance(payload, dict):
+            _append_proof_obligations(obligations, payload)
+        elif isinstance(payload, str) and payload.strip():
+            _append_proof_obligations(obligations, _read_json_file_safe(_artifact_path(payload) or payload))
+
     artifacts = node.get("artifacts") if isinstance(node.get("artifacts"), dict) else {}
     for key in ("capsule_plan_ir", "physical_plan_ir"):
         path = artifacts.get(key)
         if not path:
             continue
-        data = _read_json_file_safe(path)
-        if isinstance(data.get("proof_obligations"), list):
-            return [item for item in data.get("proof_obligations", []) if isinstance(item, dict)]
-    return []
+        _append_proof_obligations(obligations, _read_json_file_safe(_artifact_path(path) or path))
+
+    return _dedupe_proof_obligations(obligations)
 
 
 # --- Deterministic secret-leak guard + resource binding (general builder/operator path) ---
@@ -2885,11 +3665,81 @@ def _expected_node_sidecar_file(sid: str, node_id: str, kind: str) -> Path:
     return SPRINTS_DIR / f"{sid}.{_safe_node_id(node_id)}-{kind}{suffix}"
 
 
-def _resolve_write_scope_paths(node: dict[str, Any]) -> list[Path]:
+def _artifact_path(value: Any) -> Path | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = SPRINTS_DIR / raw
+    return candidate
+
+
+def _node_patch_diff_candidates(sid: str, node: dict[str, Any]) -> list[Path]:
+    """Return patch/diff files that belong to this node.
+
+    Builders/repair workers write node-scoped patch files such as
+    `{sid}.S1-patch.diff` and `{sid}.S1-patch_diff.diff`.  The previous proof
+    path only knew the sprint-level `{sid}.patch.diff`, so a repair could create
+    a real node patch and still fail `output_present: patch_diff`.
+    """
+    node_id = str(node.get("id") or "")
+    nid = _safe_node_id(node_id)
+    artifacts = node.get("artifacts") if isinstance(node.get("artifacts"), dict) else {}
+    candidates: list[Path] = []
+    for key in ("patch_diff", "patch-diff", "patch_diff_path", "patch_path", "diff"):
+        candidate = _artifact_path(artifacts.get(key))
+        if candidate is not None:
+            candidates.append(candidate)
+    candidates.extend(
+        [
+            SPRINTS_DIR / f"{sid}.{nid}-patch.diff",
+            SPRINTS_DIR / f"{sid}.{nid}-patch_diff.diff",
+            SPRINTS_DIR / f"{sid}.{nid}-patch-diff.diff",
+            SPRINTS_DIR / f"{sid}.{nid}.patch.diff",
+            SPRINTS_DIR / f"{sid}.patch.diff",
+        ]
+    )
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return unique
+
+
+def _existing_node_patch_diff(sid: str, node: dict[str, Any]) -> Path | None:
+    for candidate in _node_patch_diff_candidates(sid, node):
+        try:
+            if candidate.exists() and candidate.is_file() and candidate.stat().st_size > 0:
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+def _resolve_write_scope_paths(node: dict[str, Any], sid: str = "") -> list[Path]:
     """Resolve a node's write_scope entries to existing filesystem paths, scoped to known roots."""
-    roots = [HARNESS_DIR, HARNESS_DIR.parent, SPRINTS_DIR, Path.cwd()]
+    roots: list[Path] = []
+    if sid:
+        roots.extend(
+            [
+                SPRINTS_DIR / sid / "workdir",
+                SPRINTS_DIR / sid,
+                HARNESS_DIR / "sprints" / sid / "workdir",
+                HARNESS_DIR / "sprints" / sid,
+            ]
+        )
+    roots.extend([HARNESS_DIR, HARNESS_DIR.parent, SPRINTS_DIR, Path.cwd()])
     resolved: list[Path] = []
-    for entry in (node.get("write_scope") or []):
+    entries: list[Any] = list(node.get("write_scope") or [])
+    for entry in (node.get("outputs") or []):
+        if entry not in entries:
+            entries.append(entry)
+    for entry in entries:
         rel = str(entry or "").strip()
         if not rel:
             continue
@@ -2916,10 +3766,10 @@ def _collect_guard_scan_targets(sid: str, node: dict[str, Any]) -> list[Path]:
     handoff = _existing_node_handoff(sid, node, {"nodes": [node]}) or _handoff_file(sid, node_id)
     if handoff and Path(handoff).exists():
         targets.append(Path(handoff))
-    patch = SPRINTS_DIR / f"{sid}.patch.diff"
-    if patch.exists():
-        targets.append(patch)
-    for path in _resolve_write_scope_paths(node):
+    for patch in _node_patch_diff_candidates(sid, node):
+        if patch.exists():
+            targets.append(patch)
+    for path in _resolve_write_scope_paths(node, sid):
         if path.is_dir():
             for sub in sorted(path.rglob("*")):
                 if sub.is_file():
@@ -2954,6 +3804,83 @@ def _scan_paths_for_secrets(paths: list[Path]) -> list[dict[str, Any]]:
                 redacted = (snippet[:6] + "...[REDACTED]") if len(snippet) > 6 else "[REDACTED]"
                 matches.append({"path": str(path), "pattern": pattern, "match_redacted": redacted})
     return matches
+
+
+def _patch_rel_path(path: Path) -> str:
+    for root in (HARNESS_DIR.parent, HARNESS_DIR, SPRINTS_DIR):
+        try:
+            return path.resolve(strict=False).relative_to(root.resolve(strict=False)).as_posix()
+        except Exception:
+            continue
+    return path.name
+
+
+def _new_file_patch_for_path(path: Path) -> str:
+    rel = _patch_rel_path(path)
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception as exc:
+        lines = [f"[unable to read {path}: {type(exc).__name__}]"]
+    out = [
+        f"diff --git a/{rel} b/{rel}",
+        "new file mode 100644",
+        "--- /dev/null",
+        f"+++ b/{rel}",
+        f"@@ -0,0 +1,{len(lines)} @@",
+    ]
+    out.extend(f"+{line}" for line in lines)
+    return "\n".join(out) + "\n"
+
+
+def _node_requires_patch_diff(sid: str, node: dict[str, Any]) -> bool:
+    return _proof_obligations_require_field(sid, node, "patch_diff")
+
+
+def _patch_diff_not_emitted_file(sid: str, node: dict[str, Any]) -> Path:
+    return SPRINTS_DIR / f"{sid}.{_safe_node_id(str(node.get('id') or ''))}-patch_diff_not_emitted.json"
+
+
+def _record_patch_diff_not_emitted(sid: str, node: dict[str, Any], reason: str) -> None:
+    payload = {
+        "node_id": str(node.get("id") or ""),
+        "reason": reason,
+        "write_scope": list(node.get("write_scope") or []),
+        "outputs": list(node.get("outputs") or []),
+        "checked_at": _utc_now(),
+    }
+    try:
+        path = _patch_diff_not_emitted_file(sid, node)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+def _emit_node_patch_diff_sidecar(sid: str, node: dict[str, Any]) -> Path | None:
+    if not _node_requires_patch_diff(sid, node):
+        return None
+    existing = _existing_node_patch_diff(sid, node)
+    if existing is not None:
+        return existing
+    targets = [path for path in _resolve_write_scope_paths(node, sid) if path.is_file()]
+    if not targets:
+        _record_patch_diff_not_emitted(sid, node, "patch_diff_not_emitted_no_write_scope_targets")
+        return None
+    patch_path = _node_patch_diff_candidates(sid, node)[0]
+    parts = [
+        f"# Deterministic patch proof for {sid} / {node.get('id', '')}",
+        "# Generated from existing write_scope files because no node patch_diff artifact was present.",
+        "",
+    ]
+    for target in sorted(targets, key=lambda item: str(item)):
+        parts.append(_new_file_patch_for_path(target))
+    try:
+        patch_path.write_text("\n".join(parts).rstrip() + "\n", encoding="utf-8")
+        return patch_path
+    except Exception:
+        return None
 
 
 def _emit_guard_resource_sidecars(sid: str, node: dict[str, Any]) -> dict[str, Any]:
@@ -3001,10 +3928,18 @@ def _emit_guard_resource_sidecars(sid: str, node: dict[str, Any]) -> dict[str, A
 
 
 def _proof_obligations_require_field(sid: str, node: dict[str, Any], field: str) -> bool:
+    field = str(field or "").strip()
     for obligation in _node_proof_obligations(sid, node):
-        if str(obligation.get("field") or "") == field:
+        obligation_field = str(obligation.get("field") or "").strip()
+        if obligation_field == field:
             return True
-        requirement = str(obligation.get("requirement") or "")
+        requirement = str(obligation.get("requirement") or "").strip().lower()
+        if field == "patch_diff" and (
+            "patch_diff" in requirement
+            or requirement == "patch diff exists"
+            or (requirement == "output_present" and obligation_field == "patch_diff")
+        ):
+            return True
         if field == "guard_decision" and requirement in {"check.guard_decision_written", "guard_decision exists"}:
             return True
         if field == "resource_binding" and requirement in {"check.resource_binding_written", "resource_binding exists"}:
@@ -3048,17 +3983,15 @@ def _emit_bridged_artifact_sidecar(sid: str, node: dict[str, Any]) -> Path | Non
     handoff = _existing_node_handoff(sid, node, {"nodes": [node]}) or _handoff_file(sid, node_id)
     candidate_files: list[tuple[str, Path]] = [
         ("handoff_md", Path(handoff)),
-        ("patch_diff", SPRINTS_DIR / f"{sid}.patch.diff"),
         ("guard_decision", _expected_node_sidecar_file(sid, node_id, "guard_decision")),
         ("resource_binding", _expected_node_sidecar_file(sid, node_id, "resource_binding")),
     ]
+    candidate_files.extend(("patch_diff", path) for path in _node_patch_diff_candidates(sid, node))
     artifacts = node.get("artifacts") if isinstance(node.get("artifacts"), dict) else {}
     for key in ("capsule_plan_ir", "physical_plan_ir", "patch_diff", "test_report", "test_log"):
         value = artifacts.get(key)
-        if isinstance(value, str) and value.strip():
-            candidate = Path(value).expanduser()
-            if not candidate.is_absolute():
-                candidate = SPRINTS_DIR / value
+        candidate = _artifact_path(value)
+        if candidate is not None:
             candidate_files.append((key, candidate))
 
     existing_files = "\n".join(
@@ -3105,6 +4038,9 @@ Source artifacts:
 
 def _emit_node_proof_sidecars(sid: str, node: dict[str, Any]) -> dict[str, str]:
     emitted: dict[str, str] = {}
+    patch_diff = _emit_node_patch_diff_sidecar(sid, node)
+    if patch_diff:
+        emitted["patch_diff"] = str(patch_diff)
     guard = _emit_guard_resource_sidecars(sid, node)
     if guard:
         emitted["guard_decision"] = str(_expected_node_sidecar_file(sid, str(node.get("id") or ""), "guard_decision"))
@@ -3122,6 +4058,9 @@ def _proof_support_artifacts_block(sid: str, node: dict[str, Any]) -> str:
         if _proof_obligations_require_field(sid, node, kind):
             existing = _node_sidecar_file(sid, node_id, kind)
             entries.append((kind, existing or _expected_node_sidecar_file(sid, node_id, kind)))
+    if _proof_obligations_require_field(sid, node, "patch_diff"):
+        patch_diff = _existing_node_patch_diff(sid, node)
+        entries.append(("patch_diff", patch_diff or _node_patch_diff_candidates(sid, node)[0]))
     if not entries:
         return "- `N/A`"
     lines = []
@@ -3139,13 +4078,13 @@ def _proof_artifact_presence(sid: str, node: dict[str, Any], eval_json: str | Pa
     handoff = _existing_node_handoff(sid, node, {"nodes": [node]})
     eval_json_path = Path(eval_json).expanduser() if str(eval_json) else _eval_json_file(sid, node_id)
     eval_md_path = _eval_md_file(sid, node_id)
-    patch_path = Path(str(artifacts.get("patch_diff") or "")).expanduser() if artifacts.get("patch_diff") else Path("")
+    patch_path = _existing_node_patch_diff(sid, node)
     test_path = Path(str(artifacts.get("test_log") or artifacts.get("test_report") or "")).expanduser() if (artifacts.get("test_log") or artifacts.get("test_report")) else Path("")
     presence = {
         "handoff_md": bool(handoff and Path(handoff).exists()),
         "eval_json": bool(eval_json_path.exists()),
         "eval_md": bool(eval_md_path.exists()),
-        "patch_diff": bool(str(patch_path) not in {"", "."} and patch_path.exists()) or bool(handoff and node.get("write_scope")),
+        "patch_diff": bool(patch_path),
         "test_log": bool(str(test_path) not in {"", "."} and test_path.exists()),
     }
     # Deterministic guard/resource sidecars (lib/ previously had no lookup — tools/ did).
@@ -3156,6 +4095,16 @@ def _proof_artifact_presence(sid: str, node: dict[str, Any], eval_json: str | Pa
     presence["guard_decision"] = bool(guard_sidecar) and str(guard_payload.get("decision") or "").lower() == "allow"
     presence["resource_binding"] = _node_sidecar_file(sid, node_id, "resource_binding") is not None
     presence["bridged_artifact"] = _node_sidecar_file(sid, node_id, "bridged_artifact") is not None
+    # Lane 3 (R6/AC-R6.2): on the contracted path the manifest is the discovery
+    # authority — its kind-keyed view overrides the filename-shape scan above.
+    # guard_decision keeps the scan's allow/block semantics (presence alone is
+    # not an "allow"), so the manifest never overrides it.
+    manifest_presence = _manifest_presence(sid, node_id)
+    if manifest_presence:
+        for key, value in manifest_presence.items():
+            if key == "guard_decision":
+                continue
+            presence[key] = bool(value)
     for artifact_key, artifact_value in artifacts.items():
         if artifact_key in presence:
             continue
@@ -3210,16 +4159,75 @@ def _proof_artifact_presence(sid: str, node: dict[str, Any], eval_json: str | Pa
     return presence
 
 
+def _proof_field_presence(presence: dict[str, Any], field: str) -> bool | None:
+    """Presence of a CONCRETE declared field: direct key, else the manifest's
+    output:-keyed rows matched by full relpath or basename suffix (the P2
+    smoke-4 rule). None = the presence map has no row for this field at all
+    (caller falls back to its coarse heuristic)."""
+    if not field:
+        return None
+    if field in presence:
+        return bool(presence[field])
+    matches = [
+        bool(value) for key, value in presence.items()
+        if key.startswith("output:")
+        and (key[len("output:"):] == field
+             or key[len("output:"):].endswith("/" + field))
+    ]
+    if matches:
+        return any(matches)
+    return None
+
+
 def _evaluate_proof_obligations(sid: str, node: dict[str, Any], eval_json: str | Path = "") -> dict[str, Any]:
     obligations = _node_proof_obligations(sid, node)
-    if not obligations:
+    presence = _proof_artifact_presence(sid, node, eval_json=eval_json)
+    # "all_outputs_present" reaches the presence map only from a written
+    # manifest, i.e. only on the contracted path — its presence is the signal
+    # that manifest-completeness gating applies (legacy uncontracted pinned).
+    manifest_gated = "all_outputs_present" in presence
+    if not obligations and not manifest_gated:
         return {"required": False, "ok": True, "checked": [], "missing": []}
 
     eval_data = _read_json_file_safe(eval_json or _eval_json_file(sid, str(node.get("id") or "")))
     proof_checks = eval_data.get("proof_checks") if isinstance(eval_data.get("proof_checks"), dict) else {}
-    presence = _proof_artifact_presence(sid, node, eval_json=eval_json)
     checked: list[dict[str, Any]] = []
     missing: list[dict[str, Any]] = []
+    if presence.get("artifact_root_violation"):
+        # AC-R6.3: an observed write outside the declared artifact roots blocks the
+        # gate regardless of which obligations the node declares.
+        entry = {
+            "kind": "artifact_root",
+            "requirement": "writes_within_declared_roots",
+            "field": None,
+            "reason": "ARTIFACT_ROOT_VIOLATION",
+        }
+        checked.append({**entry, "satisfied": False})
+        missing.append(entry)
+    if manifest_gated:
+        # Battery run-1 B12: the node's only proof obligations were
+        # capsule-injected (guard/resource), so a builder that never produced
+        # two of its DECLARED write-scope outputs still passed — the manifest
+        # recorded exists=false rows that no obligation named. A declared
+        # output is a claim; like AC-R6.3 this blocks regardless of which
+        # obligations the node declares, and the normal repair path gives the
+        # builder a bounded round to produce (or stop declaring) the files.
+        # The output: keys (not the writer's all_outputs_present) are the
+        # trigger — presence_map treats an existing directory as present.
+        missing_rows = sorted(
+            key[len("output:"):]
+            for key, value in presence.items()
+            if key.startswith("output:") and not value
+        )
+        if missing_rows:
+            entry = {
+                "kind": "artifact_manifest",
+                "requirement": "declared_outputs_exist",
+                "field": ",".join(missing_rows),
+                "reason": "MISSING_DECLARED_OUTPUT",
+            }
+            checked.append({**entry, "satisfied": False})
+            missing.append(entry)
 
     for obligation in obligations:
         kind = str(obligation.get("kind") or "")
@@ -3250,12 +4258,26 @@ def _evaluate_proof_obligations(sid: str, node: dict[str, Any], eval_json: str |
                 reason = "patch_diff_missing" if not satisfied else ""
             elif "test" in requirement or field in {"test_log", "test_report"}:
                 satisfied = presence["test_log"]
+                if not satisfied:
+                    # G3 run-12 replay: capsule obligations name a CONCRETE
+                    # evidence file (test_evidence_present +
+                    # field=workspace/test-report.md) — the declared field
+                    # wins over the coarse test_log heuristic when the
+                    # manifest/presence map has a row for it.
+                    field_present = _proof_field_presence(presence, field)
+                    if field_present is not None:
+                        satisfied = field_present
                 reason = "test_log_missing" if not satisfied else ""
             elif "eval" in requirement or field == "eval_json":
                 satisfied = presence["eval_json"]
                 reason = "eval_json_missing" if not satisfied else ""
             elif requirement == "output_present" and field:
-                satisfied = presence.get(field, False)
+                # Contract obligations name the bare output file (e.g.
+                # '<tool>.py' -> 'uniqwords.py') while the manifest presence
+                # map keys rows by the full declared relpath — matched by
+                # _proof_field_presence (P2 smoke-4 S1: proof_obligations_
+                # failed with every output present).
+                satisfied = bool(_proof_field_presence(presence, field))
                 reason = f"{field}_missing" if not satisfied else ""
                 if not satisfied and field == "guard_decision":
                     _gf = _node_sidecar_file(sid, str(node.get("id") or ""), "guard_decision")
@@ -3292,6 +4314,69 @@ def _evaluate_proof_obligations(sid: str, node: dict[str, Any], eval_json: str |
     }
 
 
+def _run_node_proof_seam(
+    sid: str,
+    node: dict[str, Any],
+    graph: dict[str, Any],
+    eval_json: str | Path,
+    observed_handoff: Path | str | None,
+) -> dict[str, Any]:
+    """The single proof authority for a node claiming PASS: emit deterministic
+    support sidecars (guard/resource/adapter bridge from real node outputs),
+    write the build-complete artifact manifest on the contracted path (Lane 3
+    R6 — the proof gate discovers artifacts via the manifest, not filenames),
+    then evaluate the node's proof obligations.
+
+    Extracted from node_verdict so the sidecar-reconcile path runs the SAME
+    seam. G3 run 12: S2 was reconcile-marked passed with node_verdict never
+    running — no manifest written, proof obligations never checked; G3 run 5
+    had the mirror image, a reconcile pass overwriting a recorded
+    proof_obligations_failed block (divided mark authority)."""
+    node_id = str(node.get("id") or "")
+    # G4-lite run 2: recover builder output written under the stray
+    # sprints/<sid>.workdir spelling BEFORE sidecar emission (the patch
+    # emitter scans write-scope targets) and manifest resolution.
+    if _graph_is_certified_generic(graph):
+        try:
+            import contract_gate_executor as _cge_recovery
+
+            recovered = _cge_recovery.recover_stray_workdir(SPRINTS_DIR, sid)
+            if recovered.get("recovered"):
+                _ledger_record(
+                    sid, node_id=node_id, kind="artifact_recovery",
+                    author={"type": "policy"},
+                    note="recovered_stray_workdir:" + ",".join(recovered["recovered"][:10]),
+                )
+        except Exception:
+            pass
+    _emit_node_proof_sidecars(sid, node)
+    if (
+        _artifact_manifest is not None
+        and _ledger_enabled()
+        and _gate_ledger is not None
+        and _gate_ledger.contracted(graph)
+    ):
+        try:
+            _mf_base, _mf_roots, _mf_scope = _manifest_anchor(sid, graph, node)
+            _artifact_manifest.write_manifest(
+                SPRINTS_DIR, sid, node,
+                generation=_node_repair_attempts(node),
+                base_dir=_mf_base,
+                roots=_mf_roots,
+                write_scope=_mf_scope,
+                sidecars={
+                    "handoff_md": str(observed_handoff or ""),
+                    "patch_diff": str(_existing_node_patch_diff(sid, node) or ""),
+                    "eval": [str(eval_json or "")],
+                    "guard_decision": str(_node_sidecar_file(sid, node_id, "guard_decision") or ""),
+                    "resource_binding": str(_node_sidecar_file(sid, node_id, "resource_binding") or ""),
+                },
+            )
+        except Exception:
+            pass
+    return _evaluate_proof_obligations(sid, node, eval_json=eval_json)
+
+
 def _proof_checks_template(obligations: list[dict[str, Any]]) -> dict[str, Any]:
     template: dict[str, Any] = {}
     for obligation in obligations:
@@ -3321,9 +4406,13 @@ def _store_eval_assignments(node: dict[str, Any], assignments: list[dict[str, An
         {
             "pane": str(item.get("pane") or ""),
             "dispatch_id": str(item.get("dispatch_id") or ""),
+            "pm_task_id": str(item.get("pm_task_id") or ""),
             "role": str(item.get("role") or "secondary"),
             "eval_md_path": str(item.get("eval_md_path") or ""),
             "eval_json_path": str(item.get("eval_json_path") or ""),
+            "eval_generation": int(item.get("eval_generation") or _node_repair_attempts(node)),
+            "repair_context_created_at": str(item.get("repair_context_created_at") or ""),
+            "dispatched_at": dispatched_at,
         }
         for item in assignments
         if str(item.get("pane") or "") and str(item.get("dispatch_id") or "")
@@ -3332,6 +4421,7 @@ def _store_eval_assignments(node: dict[str, Any], assignments: list[dict[str, An
     primary = next((item for item in normalized if item.get("role") == "primary"), normalized[0] if normalized else {})
     node["eval_assigned_to"] = str(primary.get("pane") or "")
     node["eval_dispatch_id"] = str(primary.get("dispatch_id") or "")
+    node["eval_pm_task_id"] = str(primary.get("pm_task_id") or "")
     node["eval_dispatched_at"] = dispatched_at
 
 
@@ -3339,6 +4429,7 @@ def _clear_eval_assignments(node: dict[str, Any]) -> None:
     node.pop("eval_assignments", None)
     node.pop("eval_assigned_to", None)
     node.pop("eval_dispatch_id", None)
+    node.pop("eval_pm_task_id", None)
     node.pop("eval_dispatched_at", None)
 
 
@@ -3432,6 +4523,10 @@ def _mark_graph_node(graph_path: str, node_id: str, status: str,
             if node.get("id") != node_id:
                 continue
             updated_at = _utc_now()
+            _ledger_transition(
+                str(graph.get("sprint_id") or Path(str(graph_path)).stem.replace(".task_graph", "")),
+                node_id, str(node.get("status") or ""), status, "_mark_graph_node",
+            )
             node["status"] = status
             node["updated_at"] = updated_at
             results = graph.setdefault("node_results", {})
@@ -3691,6 +4786,7 @@ def build_dispatch_text(payload: dict[str, Any], pane: str) -> str:
     )
     write_scope_preflight = _write_scope_preflight_block(str(sid), node)
     canonical_output_paths = _canonical_output_paths_block(node)
+    generic_workdir_block = _generic_workdir_block(str(sid), graph_for_policy)
     repair_context_block = _node_repair_context_block(node)
 
     return f"""{STATE_READ_PREFLIGHT}
@@ -3739,6 +4835,8 @@ Graph: `{graph_path}`
 {_scope_lines(node.get("write_scope"))}
 
 {canonical_output_paths}
+
+{generic_workdir_block}
 
 {write_scope_preflight}
 
@@ -3830,6 +4928,12 @@ def build_eval_dispatch_text(graph: dict[str, Any], graph_path: str, node: dict[
     peer_eval_json_paths = peer_eval_json_paths or []
     canonical_eval_json_path = canonical_eval_json_path or str(_eval_json_file(sid, node_id))
     canonical_eval_md_path = canonical_eval_md_path or str(_eval_md_file(sid, node_id))
+    eval_generation = _node_repair_attempts(node)
+    repair_context_created = ""
+    repair_context_created_at = _repair_context_created_at(node)
+    if repair_context_created_at is not None:
+        repair_context_created = repair_context_created_at.isoformat().replace("+00:00", "Z")
+    eval_instruction_created_at = _utc_now()
     peer_block = "\n".join(f"- `{path}`" for path in peer_eval_json_paths) if peer_eval_json_paths else "- `N/A`"
     verdict_step = f"""3. 提交节点 verdict。通过时会自动释放下游 ready node；失败时只阻塞依赖它的下游：
    ```bash
@@ -3864,6 +4968,15 @@ Evaluator Role: `{evaluator_role}`
 Evaluator Index: `{evaluator_index}/{evaluator_total}`
 Graph: `{graph_path}`
 Handoff: `{handoff}`
+
+## Eval Generation Contract
+
+- Eval Generation: `{eval_generation}`
+- Repair Context Created At: `{repair_context_created or "N/A"}`
+- Eval Instruction Created At: `{eval_instruction_created_at}`
+- The machine-readable JSON MUST copy `eval_generation`, `repair_attempt`, `eval_dispatch_id`,
+  `repair_context_created_at`, and `eval_instruction_created_at` exactly. Solar ignores stale
+  repaired-node eval sidecars whose generation predates or cannot be tied to the current repair.
 
 ## Handoff Candidates
 
@@ -3971,6 +5084,11 @@ solar-harness session evaluate "{sid}" --json
      "node_id": "{node_id}",
      "verdict": "PASS",
      "summary": "",
+     "eval_generation": {eval_generation},
+     "repair_attempt": {eval_generation},
+     "eval_dispatch_id": "{dispatch_id}",
+     "repair_context_created_at": "{repair_context_created}",
+     "eval_instruction_created_at": "{eval_instruction_created_at}",
      "evaluation_plan": {json.dumps(evaluation_plan, ensure_ascii=False, indent=2)},
      "proof_obligations": {json.dumps(proof_obligations, ensure_ascii=False, indent=2)},
      "proof_checks": {json.dumps(proof_checks_template, ensure_ascii=False, indent=2)},
@@ -5736,6 +6854,26 @@ def _append_event(sid: str, event: dict[str, Any]) -> None:
             pass
 
 
+def _write_route_proof_for_sprint(sid: str) -> dict[str, Any]:
+    if not sid:
+        return {}
+    try:
+        lib_dir = HARNESS_DIR / "lib"
+        if str(lib_dir) not in sys.path:
+            sys.path.insert(0, str(lib_dir))
+        import route_proof  # type: ignore
+
+        return route_proof.write_route_proof(HARNESS_DIR, sid, sprints_dir=SPRINTS_DIR)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "enforced": False,
+            "sprint_id": sid,
+            "error": str(exc),
+            "reason": "route_proof_write_failed",
+        }
+
+
 def _mark_parent_sprint_passed_if_ready(sid: str, parent: dict[str, Any], dry_run: bool) -> bool:
     if dry_run or not parent.get("ready"):
         return False
@@ -5745,6 +6883,20 @@ def _mark_parent_sprint_passed_if_ready(sid: str, parent: dict[str, Any], dry_ru
     try:
         data = json.loads(status_file.read_text(encoding="utf-8"))
     except Exception:
+        return False
+
+    route = _write_route_proof_for_sprint(sid)
+    if route.get("enforced") and not route.get("ok"):
+        _append_event(sid, {
+            "event": "graph_parent_ready_route_proof_blocked",
+            "by": "graph-dispatch",
+            "data": {
+                "path": route.get("path"),
+                "selected_runtime": route.get("selected_runtime"),
+                "allowed_providers": route.get("allowed_providers", []),
+                "violations": route.get("violations", []),
+            },
+        })
         return False
 
     now = _utc_now()
@@ -5891,6 +7043,59 @@ def _operator_pool_role_available(role: str) -> bool:
 def _provider_policy_values_from_env(env: dict[str, str]) -> set[str]:
     raw = env.get("SOLAR_PM_DEFAULT_PROVIDERS") or env.get("SOLAR_MULTI_TASK_DEFAULT_PROVIDERS") or ""
     return {item.strip().lower() for item in str(raw).split(",") if item.strip()}
+
+
+def _provider_aliases(values: Iterable[Any]) -> set[str]:
+    aliases: set[str] = set()
+    for value in values:
+        text = str(value or "").strip().lower()
+        if not text:
+            continue
+        aliases.add(text)
+        if any(marker in text for marker in ("openai", "codex", "gpt")):
+            aliases.update({"openai", "codex", "gpt"})
+        if any(marker in text for marker in ("anthropic", "claude", "sonnet", "opus")):
+            aliases.update({"anthropic", "claude", "claude-code"})
+        if any(marker in text for marker in ("google", "gemini")):
+            aliases.update({"google", "gemini"})
+    return aliases
+
+
+def _provider_policy_values_from_graph(graph: dict[str, Any]) -> set[str]:
+    policy = graph.get("provider_policy") if isinstance(graph.get("provider_policy"), dict) else {}
+    return _provider_aliases((policy or {}).get("allowed_providers") or [])
+
+
+def _worker_provider_aliases(worker: dict[str, Any]) -> set[str]:
+    values: list[Any] = []
+    for key in ("provider", "vendor", "effective_provider", "backend", "operator_id", "actor_id", "pane", "title"):
+        values.append(worker.get(key))
+    models = worker.get("models")
+    if isinstance(models, list):
+        values.extend(models)
+    else:
+        values.append(models)
+    return _provider_aliases(values)
+
+
+def _worker_matches_graph_provider_policy(worker: dict[str, Any], providers: set[str]) -> bool:
+    if not providers:
+        return True
+    return bool(_worker_provider_aliases(worker) & providers)
+
+
+def _filter_workers_for_graph_provider_policy(
+    graph: dict[str, Any],
+    workers: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not (_ledger_enabled() or _product_mode_enabled()):
+        return workers
+    if not str((graph or {}).get("workflow_contract_id") or "").strip():
+        return workers
+    providers = _provider_policy_values_from_graph(graph)
+    if not providers:
+        return workers
+    return [worker for worker in workers if _worker_matches_graph_provider_policy(worker, providers)]
 
 
 def _operator_matches_provider_policy_for_graph(op: dict[str, Any], providers: set[str]) -> bool:
@@ -6536,6 +7741,28 @@ def dispatch_queue_item(item: dict[str, Any], dry_run: bool = False, ttl: int = 
     human_handoff = _prepare_human_search_handoff(sid, graph_path, node, dry_run=dry_run)
     if human_handoff is not None:
         return human_handoff
+    # P5 G2b review finding 1: drain_queue dispatches items through here
+    # without re-checking the certificate — an item enqueued before a
+    # post-PASS graph edit (or a direct dispatch_queue_item call) wrote an
+    # instruction file for an uncertified graph. Same guard as dispatch_ready;
+    # an unreadable graph falls back to {} (non-generic → guard skips), which
+    # preserves the legacy no-graph-file behavior.
+    if _plan_validator_enabled():
+        try:
+            guard_graph = load_graph(graph_path)
+        except Exception:
+            guard_graph = {}
+        validator_refusal = _plan_validator_dispatch_guard(guard_graph)
+        if validator_refusal is not None:
+            _append_event(sid, {
+                "event": "plan_validator_dispatch_refused",
+                "by": "graph-dispatch",
+                "severity": "error",
+                "data": {"graph": str(graph_path), "node": node_id, **validator_refusal},
+            })
+            if not dry_run:
+                _mark_graph_node(graph_path, node_id, "pending", clear_assignment=True)
+            return {**validator_refusal, "node": node_id, "dispatch_id": dispatch_id, "requeued": False}
     use_operator_pool = (
         current_status in {"assigned", "pending", "queued"}
         and (not current_dispatch_id or current_dispatch_id == dispatch_id)
@@ -7061,6 +8288,39 @@ def _discover_evaluators(dry_run: bool = False) -> list[dict[str, Any]]:
     return evaluators
 
 
+def _order_evaluators_for_graph(graph: dict[str, Any], evaluators: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Contracted-path evaluator ordering: dispatchable pool evaluators first.
+
+    _discover_evaluators sorts pane-first (cockpit :0.3 = priority 0, the
+    operator-pool virtual worker last) and _evaluation_capacity_snapshot
+    selects available[:required] — pure list order. That is the interactive
+    cockpit rule. On the contracted path it wedged the first live Claude
+    smoke: claude TUI panes accept direct dispatch and match the evaluator
+    role, so the live pane outranked the pool, the injected eval sat
+    unexecuted in the TUI, and the in-flight sidecar suppressed every later
+    dispatch tick (S1 reviewing for the whole budget, dispatched=[]). A pane
+    eval is also evidence-free — no operatord lease, no result.json, no route
+    records — while the pool is the evidence-generating seam the gate ledger
+    audits. So on contracted graphs (SOLAR_GATE_LEDGER + workflow_contract_id)
+    non-busy pool evaluators outrank panes; panes stay as fallback when the
+    pool has none. Uncontracted graphs keep pane-first ordering unchanged."""
+    if not evaluators:
+        return evaluators
+    if not (_ledger_enabled() and _gate_ledger is not None and _gate_ledger.contracted(graph)):
+        return evaluators
+    if not _eval_operator_pool_enabled():
+        return evaluators
+    pool = [
+        item for item in evaluators
+        if str(item.get("pane") or "").startswith("operator-pool:evaluator")
+    ]
+    if not any(not item.get("busy") for item in pool):
+        return evaluators
+    pool_ids = {id(item) for item in pool}
+    rest = [item for item in evaluators if id(item) not in pool_ids]
+    return pool + rest
+
+
 def _node_eval_self_graded(sid: str, node_id: str) -> bool:
     """The node's eval.json was written by the EXECUTING agent itself (generation_mode=manual_node_eval)
     with no INDEPENDENT evaluator report (no non-empty {node}-eval.md and no {node}-eval-dispatch sidecar).
@@ -7179,20 +8439,116 @@ def _first_available_evaluator(dry_run: bool = False) -> dict[str, Any] | None:
     return None
 
 
+def _maybe_execute_contract_gate(graph: dict[str, Any], sid: str, node: dict[str, Any],
+                                 *, dry_run: bool = False) -> dict[str, Any] | None:
+    """Execute a contracted stage's none/deterministic_command evaluator gate.
+
+    Returns a dispatched-entry dict when this node's gate was executed (or
+    planned, under dry_run), None to fall through to the llm_eval path. The
+    executor writes the same eval.json/eval.md sidecar pair a live evaluator
+    writes, so the proven sidecar-reconcile -> mark -> ledger-verdict ->
+    repair machinery consumes the result unchanged (P3 rehearsal: nothing
+    executed non-llm gate kinds; contracted non-llm stages wedged in
+    reviewing). Contracted-path only — uncontracted graphs and llm_eval
+    stages keep legacy behavior byte-identically."""
+    if not (_ledger_enabled() and _gate_ledger is not None and _gate_ledger.contracted(graph)):
+        return None
+    gate = node.get("evaluator_gate") if isinstance(node.get("evaluator_gate"), dict) else {}
+    kind = str((gate or {}).get("kind") or "none")
+    try:
+        import contract_gate_executor as _cge
+    except Exception:
+        return None
+    if kind not in _cge.EXECUTABLE_GATE_KINDS:
+        return None
+    node_id = str(node.get("id") or "")
+    # Deterministic gates evaluate COMPLETED stage outputs. On the pool path
+    # the handoff appears while the builder is still in flight, and
+    # _node_eval_needed accepts dispatched/in_progress — fine for slow llm
+    # evals, fatal for a gate that runs in seconds (P3 live run 1: D1
+    # evaluated at status=dispatched -> premature pass -> the builder-complete
+    # mark downgraded it back to reviewing where its now-stale sidecar was
+    # never re-consumed; D3 evaluated half-written artifacts ->
+    # research_eval_json_missing FAIL -> repair archived the handoff -> both
+    # in-flight builders failed contract closeout exit 67. D2, whose gate
+    # happened to run after the reviewing mark, passed cleanly in the same
+    # run). Wait for the builder-complete `reviewing` mark.
+    if str(node_status(graph, node_id) or "").strip().lower() != "reviewing":
+        return {
+            "node": node_id,
+            "dispatch_mode": "deterministic_gate",
+            "gate_kind": kind,
+            "skip_reason": "deterministic_gate_waiting_for_builder",
+        }
+    if dry_run:
+        return {
+            "node": node_id,
+            "dispatch_mode": "deterministic_gate",
+            "gate_kind": kind,
+            "dry_run": True,
+        }
+    # The staleness classifiers (_archive_late_pre_repair_eval_sidecars and
+    # friends) accept a verdict only when the node's eval dispatch is NEWER
+    # than the repair marker — a field only the llm dispatch path stamped.
+    # Without it every post-repair executor FAIL was archived as
+    # late_pre_repair_eval_output and the gate re-fired forever (P3 live run
+    # 2: D3 looped every ~11s after repair exhaustion).
+    node["eval_dispatched_at"] = _utc_now()
+    result = _cge.execute_gate(SPRINTS_DIR, sid, node, gate or {}, harness_dir=HARNESS_DIR)
+    _ledger_record(
+        sid, node_id=node_id, kind="gate_check", author={"type": "policy"},
+        verdict="pass" if result.get("ok") else "fail",
+        verdict_kind=str(result.get("verdict_kind") or "") or None,
+        note=f"deterministic_gate_executed:{kind}",
+        exit_code=result.get("exit_code"),
+    )
+    return {
+        "node": node_id,
+        "dispatch_mode": "deterministic_gate",
+        "gate_kind": kind,
+        "verdict": result.get("verdict"),
+        "verdict_kind": result.get("verdict_kind"),
+        "eval_json": result.get("eval_json"),
+        "exit_code": result.get("exit_code"),
+    }
+
+
 def dispatch_node_evals(graph_path: str, dry_run: bool = False, ttl: int = 900,
                         force: bool = False, max_items: int = 0) -> dict[str, Any]:
     graph = load_graph(graph_path)
     sid = str(graph.get("sprint_id") or Path(graph_path).stem.replace(".task_graph", ""))
+    validator_refusal = _plan_validator_dispatch_guard(graph)
+    if validator_refusal is not None:
+        _append_event(sid, {
+            "event": "plan_validator_dispatch_refused",
+            "by": "graph-dispatch",
+            "severity": "error",
+            "data": {"graph": str(graph_path), **validator_refusal},
+        })
+        return {**validator_refusal, "sprint_id": sid, "dispatched": [], "skipped": []}
     dispatched: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     used_evaluator_panes: set[str] = set()
-    evaluators = _discover_evaluators(dry_run)
+    evaluators = _order_evaluators_for_graph(graph, _discover_evaluators(dry_run))
 
     for node in graph.get("nodes", []):
         if max_items and len(dispatched) >= max_items:
             break
         node_id = str(node.get("id") or "")
         if not _node_eval_needed(graph, sid, node, force=force):
+            continue
+        if not dry_run:
+            _emit_node_proof_sidecars(sid, node)
+        gate_result = _maybe_execute_contract_gate(graph, sid, node, dry_run=dry_run)
+        if gate_result is not None:
+            if gate_result.get("skip_reason"):
+                skipped.append({
+                    "node": gate_result.get("node"),
+                    "reason": gate_result["skip_reason"],
+                    "gate_kind": gate_result.get("gate_kind"),
+                })
+            else:
+                dispatched.append(gate_result)
             continue
         requested_plan = _plan_node_evaluation(graph, node)
         loop_evaluators = [
@@ -7257,6 +8613,11 @@ def dispatch_node_evals(graph_path: str, dry_run: bool = False, ttl: int = 900,
         total_evaluators = int(runtime_plan.get("required_evaluators") or 1)
         dispatch_group_id = f"graph-eval-{sid}-{node_id}-{_utc_now().replace(':', '').replace('-', '')}"
         planned_assignments: list[dict[str, Any]] = []
+        eval_generation = _node_repair_attempts(node)
+        repair_context_created = ""
+        repair_context_created_at = _repair_context_created_at(node)
+        if repair_context_created_at is not None:
+            repair_context_created = repair_context_created_at.isoformat().replace("+00:00", "Z")
         for idx, evaluator in enumerate(selected_evaluators[:total_evaluators], start=1):
             pane = str(evaluator.get("pane") or "")
             if pane in used_evaluator_panes:
@@ -7279,6 +8640,8 @@ def dispatch_node_evals(graph_path: str, dry_run: bool = False, ttl: int = 900,
                     "index": idx,
                     "eval_md_path": str(eval_md_path),
                     "eval_json_path": str(eval_json_path),
+                    "eval_generation": eval_generation,
+                    "repair_context_created_at": repair_context_created,
                 }
             )
         if not planned_assignments:
@@ -7314,9 +8677,6 @@ def dispatch_node_evals(graph_path: str, dry_run: bool = False, ttl: int = 900,
                 "evaluation_plan": runtime_plan,
             })
             continue
-
-        if not dry_run:
-            _emit_node_proof_sidecars(sid, node)
 
         canonical_eval_md = str(_eval_md_file(sid, node_id))
         canonical_eval_json = str(_eval_json_file(sid, node_id))
@@ -7377,6 +8737,11 @@ def dispatch_node_evals(graph_path: str, dry_run: bool = False, ttl: int = 900,
                 if sent:
                     pane = str(submit_result.get("pane") or pane)
                     assignment["pane"] = pane
+                    pm_dispatch = submit_result.get("pm_dispatch")
+                    if isinstance(pm_dispatch, dict):
+                        pm_task_id = str(pm_dispatch.get("pm_task_id") or pm_dispatch.get("task_id") or "")
+                        if pm_task_id:
+                            assignment["pm_task_id"] = pm_task_id
             else:
                 submit_result = {}
                 sent = _send_to_pane(pane, instruction_file, dry_run, sid=sid, dispatch_id=str(assignment["dispatch_id"]))
@@ -7412,6 +8777,7 @@ def dispatch_node_evals(graph_path: str, dry_run: bool = False, ttl: int = 900,
             })
             continue
 
+        _ledger_transition(sid, node_id, node_status(graph, node_id), "reviewing", "dispatch_node_evals")
         node["status"] = "reviewing"
         node["eval_dispatch_group_id"] = dispatch_group_id
         # A successful dispatch clears the consecutive-failure streak so a later transient
@@ -7483,6 +8849,8 @@ def _account_eval_dispatch_failures(
             # Set node + node_results directly: graph_scheduler._status_rank ranks reviewing(4) above
             # needs_human_review(0), so set_node_status would refuse this transition. This mirrors the
             # direct-write pattern already used by _start_node_repair_from_eval_fail.
+            _ledger_transition(sid, node_id, current, "needs_human_review",
+                               "_account_eval_dispatch_failures", note=blocked_reason)
             node["status"] = "needs_human_review"
             node["eval_blocked_reason"] = blocked_reason
             node["next_action"] = next_action
@@ -7524,16 +8892,35 @@ def dispatch_ready(graph_path: str, dry_run: bool = False, ttl: int = 900,
         return {"ok": False, "reason": "no_dispatch_flag", "graph": graph_path, "enqueue": {}, "drain": {}}
     graph = load_graph(graph_path)
     sid = graph.get("sprint_id") or Path(graph_path).stem.replace(".task_graph", "")
+    guard = _workflow_contract_guard(graph)
+    if guard is not None:
+        _append_event(str(sid), {
+            "event": "workflow_contract_guard_failed",
+            "by": "graph-dispatch",
+            "severity": "error",
+            "data": {"graph": str(graph_path), **guard},
+        })
+        return {**guard, "graph": graph_path, "enqueue": {}, "drain": {}}
+    validator_refusal = _plan_validator_dispatch_guard(graph)
+    if validator_refusal is not None:
+        _append_event(str(sid), {
+            "event": "plan_validator_dispatch_refused",
+            "by": "graph-dispatch",
+            "severity": "error",
+            "data": {"graph": str(graph_path), **validator_refusal},
+        })
+        return {**validator_refusal, "graph": graph_path, "enqueue": {}, "drain": {}}
     effective_max_parallel = int(max_parallel) if max_parallel is not None else _effective_graph_max_parallel(8)
     reconciled: list[dict[str, Any]] = []
     if not dry_run:
         reconciled = _reconcile_existing_dispatches(graph, graph_path)
         if reconciled:
             save_graph(graph_path, graph)
+    workers = _filter_workers_for_graph_provider_policy(graph, _discover_workers(dry_run))
     enqueue_result = enqueue_ready(
         graph,
         graph_path,
-        _discover_workers(dry_run),
+        workers,
         max_parallel=effective_max_parallel,
         lease=not dry_run,
         ttl=ttl,
@@ -7556,18 +8943,65 @@ def dispatch_ready(graph_path: str, dry_run: bool = False, ttl: int = 900,
         drain_result = {"ok": all(r.get("ok", False) for r in results), "processed": len(results), "results": results}
     else:
         drain_result = drain_queue(str(sid), dry_run=dry_run, max_items=len(enqueue_result.get("enqueued", [])), ttl=ttl)
+    status_sync: dict[str, Any] = {}
+    if not dry_run:
+        # Converge the legacy parent projection EVERY tick, regardless of
+        # which loop consumed the final node's eval. Two reconcile loops race
+        # (this dispatcher tick and the multi-task auto-advance loop); only
+        # the latter synced, and only when ITS reconcile was non-empty — so
+        # when this tick consumed the final sidecar (P3 run 4: D6 passed
+        # 15:08:24, status.json last write 15:08:21), no sync ever ran and
+        # the sprint projection froze at active/open_nodes=["D6"] until the
+        # wrapper timed out with the graph fully closed underneath. The sync
+        # is idempotent and cheap (already_synced / parent_not_ready
+        # short-circuit) and must never break the dispatch hot path.
+        try:
+            status_sync = sync_status_cache_from_graph(
+                graph,
+                graph_path,
+                actor="graph_node_dispatcher",
+                event="dispatch_tick_projection",
+            )
+        except Exception as exc:
+            status_sync = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     return {
         "ok": enqueue_result.get("ok") and drain_result.get("ok"),
         "reconciled": reconciled,
         "concurrency": {"graph_max_parallel": effective_max_parallel},
         "enqueue": enqueue_result,
         "drain": drain_result,
+        "status_sync": {k: status_sync.get(k) for k in ("ok", "updated", "reason", "error") if k in status_sync},
     }
+
+
+def _node_policy_passed(graph: dict[str, Any], sid: str, node_id: str) -> bool:
+    """AC-R4.1 hold discriminator (round-4 G1): was the node RECORDED passed?
+
+    node_status() fail-closed-downgrades a passed-without-required-eval node to
+    "reviewing" — and the real v5 shape (handoff present, eval.json missing) is
+    exactly the state that produces the mechanical FAIL the hold exists for, so
+    gating the hold on the effective status bypassed it. Consult the recorded
+    fold first, then the ledger projection (an applied audited pass survives
+    even a graph-side clobber)."""
+    try:
+        if node_recorded_status(graph, node_id) == "passed":
+            return True
+    except Exception:
+        pass
+    try:
+        if (
+            _gate_ledger is not None
+            and _gate_ledger.project_node_status(SPRINTS_DIR, sid, node_id) == "passed"
+        ):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
                  eval_json: str = "", dry_run: bool = False, ttl: int = 900,
-                 dispatch_downstream: bool = True) -> dict[str, Any]:
+                 dispatch_downstream: bool = True, verdict_kind: str = "") -> dict[str, Any]:
     graph = load_graph(graph_path)
     sid = str(graph.get("sprint_id") or Path(graph_path).stem.replace(".task_graph", ""))
     node = _node_by_id(graph, node_id)
@@ -7582,6 +9016,90 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
     else:
         return {"ok": False, "reason": "invalid_verdict", "verdict": verdict}
 
+    # AC-R4.1: the gate runner (this function) sets verdict_kind explicitly; when a
+    # caller does not, classification uses the runner-owned mechanical vocabulary,
+    # never free-text inference.
+    effective_verdict_kind = str(verdict_kind or "").strip().lower()
+    if effective_verdict_kind not in {"content", "mechanical", "infrastructure"}:
+        effective_verdict_kind = (
+            "mechanical" if str(reason or "").strip().lower() in MECHANICAL_EVAL_REASONS else "content"
+        )
+    _eval_generation = _node_repair_attempts(node)
+    _assignment_pm_task_id = next(
+        (str(item.get("pm_task_id") or "").strip()
+         for item in (node.get("eval_assignments") or [])
+         if isinstance(item, dict) and str(item.get("pm_task_id") or "").strip()),
+        None,
+    )
+    # AC-R4.4 generation fence on the LIVE verdict path (G4-lite run 2): a
+    # repair had just archived the gen-0 sidecars and dispatched the repair
+    # builder when the ORIGINAL FAIL arrived here — this function stamps
+    # eval_generation from the node's CURRENT repair_attempts, so the stale
+    # verdict masqueraded as the repair generation, burned the just-granted
+    # budget, and terminalized the node while its repair builder was still
+    # running. The reconcile path already ran this fence; the evaluator-CLI
+    # path must too. Archived non-consumable, never applied.
+    _fence_payload = _read_json_file_safe(eval_json or _eval_json_file(sid, node_id))
+    _stale_reason = _eval_payload_stale_for_current_repair(node, _fence_payload)
+    if _stale_reason:
+        _ledger_record(sid, node_id=node_id, kind="eval_verdict",
+                       author={"type": "evaluator"},
+                       verdict="PASS" if status == "passed" else "FAIL",
+                       eval_generation=_eval_payload_generation(_fence_payload),
+                       repair_attempt=_eval_generation,
+                       gate_consumable=False, archived=True,
+                       stale_reason=_stale_reason, note=reason or None)
+        return {
+            "ok": False,
+            "reason": "stale_eval_generation",
+            "node": node_id,
+            "status": str(node.get("status") or ""),
+            "stale_reason": _stale_reason,
+        }
+    if (
+        status == "failed"
+        and effective_verdict_kind in {"mechanical", "infrastructure"}
+        and _ledger_enabled()
+        and _gate_ledger.contracted(graph)
+        and _node_policy_passed(graph, sid, node_id)
+    ):
+        # v5 replay (AC-R4.1): a mechanical/infrastructure FAIL must not flip a
+        # policy-passed node — archive the verdict, never apply it. Gated on the
+        # RECORDED pass, not node_status(): the fail-closed passed-without-eval
+        # downgrade projects the real v5 shape as "reviewing" (round-4 G1).
+        _ledger_record(sid, node_id=node_id, kind="eval_verdict",
+                       author={"type": "evaluator"}, verdict="FAIL",
+                       verdict_kind=effective_verdict_kind,
+                       eval_generation=_eval_generation, repair_attempt=_eval_generation,
+                       pm_task_id=_assignment_pm_task_id,
+                       gate_consumable=False, archived=True, note=reason or None)
+        _ledger_record(sid, node_id=node_id, kind="gate_check", author={"type": "policy"},
+                       verdict="hold", verdict_kind=effective_verdict_kind,
+                       note="mechanical_fail_cannot_flip_passed_node")
+        return {
+            "ok": False,
+            "reason": "mechanical_fail_cannot_flip_passed_node",
+            "node": node_id,
+            "status": "passed",
+            "verdict_kind": effective_verdict_kind,
+        }
+    # A self-graded PASS (executor-authored eval.json, no independent report) must
+    # not leave a gate-consumable verdict record — the guard below blocks it, and
+    # its ledger trace is explicitly non-consumable (R4 provenance, F-CLASS-30).
+    _entry_self_graded = bool(
+        status == "passed"
+        and _existing_node_handoff(sid, node, graph)
+        and _node_eval_self_graded(sid, node_id)
+    )
+    _ledger_record(sid, node_id=node_id, kind="eval_verdict",
+                   author={"type": "evaluator"},
+                   verdict="PASS" if status == "passed" else "FAIL",
+                   verdict_kind=effective_verdict_kind,
+                   eval_generation=_eval_generation, repair_attempt=_eval_generation,
+                   pm_task_id=_assignment_pm_task_id, note=reason or None,
+                   self_graded=True if _entry_self_graded else None,
+                   gate_consumable=False if _entry_self_graded else None)
+
     proof_gate: dict[str, Any] = {"required": False}
     if status == "passed":
         resolved_eval_json = eval_json or _eval_json_file(sid, node_id)
@@ -7591,6 +9109,8 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
                 resolved_eval_json = backfilled_eval
         observed_handoff = _existing_node_handoff(sid, node, graph) or _handoff_file(sid, node_id)
         if observed_handoff and not Path(str(resolved_eval_json)).expanduser().exists():
+            _ledger_record(sid, node_id=node_id, kind="gate_check", author={"type": "policy"},
+                           verdict="block", note="missing_eval_json_for_pass")
             return {
                 "ok": False,
                 "reason": "missing_eval_json_for_pass",
@@ -7599,12 +9119,10 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
                 "eval_json": str(resolved_eval_json),
                 "handoff_md": str(observed_handoff),
             }
-        # Deterministic support sidecars before the proof gate. This emits
-        # guard/resource/adapter bridge artifacts from real node outputs, so the
-        # proof gate checks files rather than narrative claims.
-        _emit_node_proof_sidecars(sid, node)
-        proof_gate = _evaluate_proof_obligations(sid, node, eval_json=resolved_eval_json)
+        proof_gate = _run_node_proof_seam(sid, node, graph, resolved_eval_json, observed_handoff)
         if proof_gate.get("required") and not proof_gate.get("ok"):
+            _ledger_record(sid, node_id=node_id, kind="gate_check", author={"type": "policy"},
+                           verdict="block", note="proof_obligations_failed")
             return {
                 "ok": False,
                 "reason": "proof_obligations_failed",
@@ -7627,6 +9145,8 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
                 **_deepresearch_quality_gate_auto_run(sid, node, resolved_eval_json),
             }
             if not research_quality_gate.get("present"):
+                _ledger_record(sid, node_id=node_id, kind="gate_check", author={"type": "policy"},
+                               verdict="block", note="missing_deepresearch_quality_gate")
                 return {
                     "ok": False,
                     "reason": "missing_deepresearch_quality_gate",
@@ -7637,6 +9157,8 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
                     "research_quality_gate": research_quality_gate,
                 }
         if not research_quality_gate.get("ok"):
+            _ledger_record(sid, node_id=node_id, kind="gate_check", author={"type": "policy"},
+                           verdict="block", note="deepresearch_quality_gate_failed")
             return {
                 "ok": False,
                 "reason": "deepresearch_quality_gate_failed",
@@ -7717,6 +9239,9 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
     # per-node eval). Closes the eval-backfill false-positive vector at the node_verdict entry point.
     self_graded_handoff = _existing_node_handoff(sid, node, graph)
     if status == "passed" and self_graded_handoff and _node_eval_self_graded(sid, node_id):
+        _ledger_record(sid, node_id=node_id, kind="gate_check", author={"type": "policy"},
+                       verdict="block", self_graded=True,
+                       note="self_graded_eval_requires_independent_report")
         return {
             "ok": False,
             "reason": "self_graded_eval_requires_independent_report",

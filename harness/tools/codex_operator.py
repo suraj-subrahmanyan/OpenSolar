@@ -69,23 +69,67 @@ def _truthy_env(name: str, default: str = "1") -> bool:
     return os.environ.get(name, default).strip().lower() not in {"0", "false", "off", "no", ""}
 
 
+def _prepend_env_path(env: dict[str, str], name: str, entries: list[Path | str]) -> None:
+    existing = [part for part in env.get(name, "").split(os.pathsep) if part]
+    prefix = [str(Path(part).expanduser()) for part in entries if str(part)]
+    seen: set[str] = set()
+    merged: list[str] = []
+    for part in prefix + existing:
+        if part and part not in seen:
+            merged.append(part)
+            seen.add(part)
+    env[name] = os.pathsep.join(merged)
+
+
+def _install_harness_command_shims(task_dir: Path, harness_dir: Path) -> Path:
+    shim_dir = task_dir / "cmd-shims"
+    shim_dir.mkdir(parents=True, exist_ok=True)
+    solar_harness = shim_dir / "solar-harness"
+    solar_harness.write_text(
+        (
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "exec \"${HARNESS_DIR}/solar-harness.sh\" \"$@\"\n"
+        ),
+        encoding="utf-8",
+    )
+    solar_harness.chmod(0o755)
+    return shim_dir
+
+
 def _codex_exec_env(task_dir: Path) -> dict[str, str]:
     """Build a deterministic environment for non-interactive Codex operator runs.
 
     Keep the user's CODEX_HOME/Auth as-is, but give Codex's SQLite/app-server
     state a harness-owned writable home by default. Without this, daemonized
     runs can inherit a cwd/sandbox context where Codex fails before the model
-    starts with read-only filesystem errors.
+    starts with read-only filesystem errors. The model shell must also resolve
+    Solar helper commands from this active harness, not from any installed
+    ~/.solar runtime left on the developer machine.
     """
     env = os.environ.copy()
-    harness_dir = Path(env.get("HARNESS_DIR") or Path.home() / ".solar" / "harness").expanduser()
+    harness_dir = Path(env.get("HARNESS_DIR") or Path.home() / ".solar" / "harness").expanduser().resolve(strict=False)
+    shim_dir = _install_harness_command_shims(task_dir, harness_dir)
     state_home = Path(
         env.get("CODEX_SQLITE_HOME")
         or env.get("SOLAR_CODEX_STATE_HOME")
         or harness_dir / "run" / "codex-state"
     ).expanduser()
     state_home.mkdir(parents=True, exist_ok=True)
+    sprints_dir = Path(
+        env.get("SPRINTS_DIR")
+        or env.get("HARNESS_SPRINTS_DIR")
+        or harness_dir / "sprints"
+    ).expanduser().resolve(strict=False)
+    env["HARNESS_DIR"] = str(harness_dir)
+    env["SOLAR_HARNESS_DIR"] = str(harness_dir)
+    env["SPRINTS_DIR"] = str(sprints_dir)
+    env["HARNESS_SPRINTS_DIR"] = str(sprints_dir)
+    env["SOLAR_HARNESS_SPRINTS_DIR"] = str(sprints_dir)
+    env["SOLAR_HARNESS_CMD"] = str(shim_dir / "solar-harness")
     env["CODEX_SQLITE_HOME"] = str(state_home)
+    _prepend_env_path(env, "PATH", [shim_dir, harness_dir / "bin", harness_dir])
+    _prepend_env_path(env, "PYTHONPATH", [harness_dir / "lib", harness_dir / "tools"])
     return env
 
 

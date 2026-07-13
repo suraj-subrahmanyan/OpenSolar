@@ -154,6 +154,30 @@ def test_running_status_with_dead_recorded_process_is_recovered(monkeypatch):
     assert optime.get_operator_status(operator_id) is None
 
 
+def test_stale_running_status_without_pid_is_recovered(monkeypatch):
+    """Interrupted once-mode workers can leave active status without pid evidence."""
+    operator_id = "mini-claude-sonnet-builder"
+    optime.set_operator_status(operator_id, "running")
+    status_path = optime.OPERATOR_STATUS_DIR / f"{operator_id}.json"
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    status.pop("updated_at", None)
+    status["heartbeat_at"] = "2026-01-01T00:00:00Z"
+    status_path.write_text(json.dumps(status), encoding="utf-8")
+    monkeypatch.setenv("SOLAR_OPERATOR_ACTIVE_STATUS_STALE_SECONDS", "60")
+
+    assert optime.get_operator_runtime_state(operator_id) == "idle"
+    assert optime.get_operator_status(operator_id) is None
+
+
+def test_fresh_running_status_without_pid_remains_active(monkeypatch):
+    """Fresh no-pid active status is tolerated briefly while daemon metadata catches up."""
+    operator_id = "mini-claude-sonnet-builder"
+    optime.set_operator_status(operator_id, "running")
+    monkeypatch.setenv("SOLAR_OPERATOR_ACTIVE_STATUS_STALE_SECONDS", "3600")
+
+    assert optime.get_operator_runtime_state(operator_id) == "running"
+
+
 def test_status_override_states():
     """Test dynamic status overrides (cooldown, quota_exhausted, auth_expired)."""
     operator_id = "mini-claude-sonnet-builder"

@@ -108,6 +108,7 @@ import type {
   EventRecord,
   HumanGate,
   NarrativeStep,
+  PlanGovernance,
   ProjectionAction,
   ProjectionData,
   ProjectionResponse,
@@ -902,9 +903,27 @@ function useSessionData(
     "connecting" | "live" | "retrying" | "off"
   >("connecting");
   const selectedSprintRef = useRef(sprintId);
+  // G4 UI-rung run 6: a late poll response landed AFTER a fresher SSE delta
+  // and regressed a node from active back to pending on screen for ~45s
+  // (truthful-states UI_STALE). Projections apply MONOTONICALLY by
+  // generated_at — a stale response is dropped, whatever path it came by.
+  const lastProjectionAtRef = useRef("");
+  const applyProjection = useCallback(
+    (response: ProjectionResponse): boolean => {
+      const at = asString(response.generated_at);
+      if (at && lastProjectionAtRef.current && at < lastProjectionAtRef.current) {
+        return false;
+      }
+      if (at) lastProjectionAtRef.current = at;
+      setProjection(response);
+      return true;
+    },
+    [],
+  );
 
   useEffect(() => {
     selectedSprintRef.current = sprintId;
+    lastProjectionAtRef.current = "";
   }, [sprintId]);
 
   const refresh = useCallback(async () => {
@@ -939,7 +958,7 @@ function useSessionData(
     const results = await Promise.allSettled([
       fetchProjection(sprintId, "fast").then((projectionResponse) => {
         if (!isCurrent()) return;
-        setProjection(projectionResponse);
+        if (!applyProjection(projectionResponse)) return; // stale vs SSE
         cachePatch({ projection: projectionResponse });
         patchProvenance({
           lastProjectionAt:
@@ -1014,6 +1033,7 @@ function useSessionData(
     const cached = sessionDataCache.get(sprintId);
     if (cached) {
       setStatus(cached.status);
+      lastProjectionAtRef.current = asString(cached.projection?.generated_at);
       setProjection(cached.projection);
       setEvents(cached.events);
       setUsage(cached.usage);
@@ -1084,7 +1104,7 @@ function useSessionData(
           generated_at: msg.generated_at,
           schema_version: msg.data?.projection_schema,
         };
-        setProjection(projectionResponse);
+        if (!applyProjection(projectionResponse)) return; // stale frame
         setProvenance((prev) => ({
           ...prev,
           sprintId,
@@ -1278,11 +1298,25 @@ function RunOverview({
     deliverables.find((item) => item.primary);
   const terminal = isTerminalRun(status, phase);
   const stages = pipelineStages(phase, status, isBlocked, terminal, actionType);
+  const governance = (data?.plan_governance || {}) as PlanGovernance;
+  const governanceState = asString(governance.state);
+  const bounces = Number(governance.plan_compile_bounces || 0);
+  const bounceCodes = (governance.compile_error_codes || []).join(", ");
 
   let kicker = "In progress";
   let line = activeNode ? `Working on ${activeNode}` : "Agents are working…";
   let tone: "working" | "blocked" | "complete" | "decision" = "working";
-  if (gate) {
+  if (governanceState === "plan_compile_failed") {
+    // Truthful terminal (G4 §3): bounces exhausted, plan never compiled.
+    kicker = "Plan failed to compile";
+    line = `The plan failed to compile after ${bounces || "several"} attempt${bounces === 1 ? "" : "s"}${bounceCodes ? ` (${bounceCodes})` : ""}.`;
+    tone = "blocked";
+  } else if (governanceState === "plan_certificate_invalid") {
+    // Truthful terminal (G4 §3): certified plan was modified after validation.
+    kicker = "Plan integrity failure";
+    line = "The certified plan was modified after validation.";
+    tone = "blocked";
+  } else if (gate) {
     kicker = "Your decision";
     line = asString(humanAction.title) || gate.title;
     tone = "decision";
@@ -1305,6 +1339,21 @@ function RunOverview({
           {gate && humanAction.detail && (
             <span className="run-state-detail">
               {asString(humanAction.detail)}
+            </span>
+          )}
+          {governanceState === "certified" && (
+            <span className="plan-badge plan-badge-certified" data-testid="plan-badge-certified" title={`Plan certificate PASS${governance.certificate?.validated_at ? ` · ${governance.certificate.validated_at}` : ""}`}>
+              ✓ Certified plan
+            </span>
+          )}
+          {governanceState === "compiling" && (
+            <span className="plan-badge plan-badge-compiling" data-testid="plan-badge-compiling">
+              Plan compiling…
+            </span>
+          )}
+          {bounces > 0 && governanceState !== "plan_compile_failed" && (
+            <span className="plan-badge plan-badge-bounce" data-testid="plan-badge-bounce" title={bounceCodes || undefined}>
+              {bounces} compile bounce{bounces === 1 ? "" : "s"}
             </span>
           )}
         </div>
@@ -1620,13 +1669,23 @@ function PlanFlow({
   const done = nodes.filter(
     (node) => statusTone(asString(node.status)) === "complete",
   ).length;
+  // G4 UI-rung run 5: this meta fell through to "in progress" at TERMINAL —
+  // the main card said DONE while this panel said in progress on the same
+  // screen. Terminal truth wins over the fallthrough.
+  const runStatus = asString(data?.status || data?.sprint?.status);
+  const runPhase = asString(data?.phase || data?.sprint?.phase);
+  const terminal = isTerminalRun(runStatus, runPhase);
   const headMeta = isBlocked
     ? "blocked at a capability gate"
-    : activeId
-      ? `active: ${activeId}`
-      : total
-        ? "in progress"
-        : "";
+    : terminal
+      ? runStatus === "passed" || done === total
+        ? "done"
+        : `ended: ${runStatus || "failed"}`
+      : activeId
+        ? `active: ${activeId}`
+        : total
+          ? "in progress"
+          : "";
 
   return (
     <section className="plan-flow" aria-label="Plan" data-testid="plan-flow">
@@ -3504,7 +3563,9 @@ function TopBar({
             </span>
           )}
           <span className="provenance-chip">{eventCount} events</span>
-          {cache && <span className="provenance-chip">status: {cache}</span>}
+          {cache && (
+            <span className="provenance-chip">status cache: {cache}</span>
+          )}
           {updatedAt && (
             <span className="provenance-chip">
               refreshed {formatDateTime(updatedAt)}
@@ -3666,7 +3727,11 @@ function activityLevel(count: number): number {
 function normalizeCrewPreset(value: string): string {
   const clean = value.trim().toLowerCase().replace(/_/g, "-");
   if (CREW_PRESETS.some((preset) => preset.id === clean)) return clean;
-  if (clean.includes("codex") || clean.includes("openai") || clean.includes("gpt"))
+  if (
+    clean.includes("codex") ||
+    clean.includes("openai") ||
+    clean.includes("gpt")
+  )
     return "all-codex";
   if (clean.includes("fast") || clean.includes("glm")) return "fast";
   if (clean.includes("quality") || clean.includes("opus"))

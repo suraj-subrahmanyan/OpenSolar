@@ -19,10 +19,35 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
-try:
-    import readline  # type: ignore
-except Exception:  # pragma: no cover - readline may be unavailable in minimal Python builds
-    readline = None  # type: ignore
+_READLINE: Any | None = None
+_READLINE_CHECKED = False
+
+
+def _screen_readline() -> Any | None:
+    """Load readline only for interactive screen history.
+
+    Some packaged Python builds can segfault importing ``readline`` when the
+    process inherits an unavailable locale such as ``en_US.UTF-8``. The worker
+    scheduler does not need readline, so keep it off the module import path.
+    """
+    global _READLINE, _READLINE_CHECKED
+    if _READLINE_CHECKED:
+        return _READLINE
+    _READLINE_CHECKED = True
+    if not sys.stdin.isatty():
+        return None
+    try:
+        import locale
+
+        locale.setlocale(locale.LC_CTYPE, "")
+    except Exception:
+        return None
+    try:
+        import readline as readline_module  # type: ignore
+    except Exception:  # pragma: no cover - readline may be unavailable in minimal Python builds
+        return None
+    _READLINE = readline_module
+    return _READLINE
 
 HOME = Path.home()
 HARNESS_DIR = Path(os.environ.get("HARNESS_DIR", HOME / ".solar" / "harness"))
@@ -151,6 +176,13 @@ from graph_scheduler import (  # noqa: E402
     set_node_status,
     write_scope_conflict,
 )
+
+try:  # Lane 3 gate ledger seam (round-4 G3): pool-side node-status writes must
+    # record like every other C4 writer; guarded so a partial install never
+    # breaks the pool. No-op unless SOLAR_GATE_LEDGER=1.
+    from graph_scheduler import _ledger_transition as _gs_ledger_transition
+except Exception:  # pragma: no cover
+    _gs_ledger_transition = None
 
 ACTIVE_TASK_STATUSES = {"queued", "dispatched", "running"}
 TERMINAL_TASK_STATUSES = {"completed", "failed", "failed_missing_handoff", "failed_stale_handoff", "cancelled"}
@@ -2389,6 +2421,23 @@ def active_tasks() -> list[dict[str, Any]]:
     return [row for row in list_task_rows() if str(row.get("effective_status") or row.get("status", "")).lower() in ACTIVE_TASK_STATUSES]
 
 
+def active_task_for_node(sid: str, node_id: str, tasks: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    """Return an active worker row for this exact graph node, if one already exists."""
+    sid = str(sid or "").strip()
+    node_id = str(node_id or "").strip()
+    if not sid or not node_id:
+        return None
+    for task in tasks if tasks is not None else active_tasks():
+        if str(task.get("sprint_id") or "").strip() != sid:
+            continue
+        if str(task.get("node_id") or "").strip() != node_id:
+            continue
+        status = str(task.get("effective_status") or task.get("status") or "").strip().lower()
+        if status in ACTIVE_TASK_STATUSES:
+            return task
+    return None
+
+
 def active_parallel_counts(tasks: list[dict[str, Any]] | None = None) -> dict[str, dict[str, int]]:
     tasks = tasks if tasks is not None else active_tasks()
     by_profile: dict[str, int] = {}
@@ -2726,6 +2775,17 @@ def recover_quota_failed_nodes(graph_path: Path, graph: dict[str, Any]) -> int:
             if isinstance(graph.get("node_results"), dict):
                 graph["node_results"].pop(node_id, None)
             node["status"] = "pending"
+            # Round-4 G3: this terminal->pending reopen (plus the node_results
+            # pop above) changes effective status and must leave a ledger record.
+            if _gs_ledger_transition is not None:
+                try:
+                    _gs_ledger_transition(
+                        graph, node_id, str(current_status or ""), "pending",
+                        "recover_quota_failed_nodes",
+                        note=f"quota_fallback:{profile_name or 'unknown'}->{fallback}",
+                    )
+                except Exception:
+                    pass
             node["updated_at"] = now_iso()
             node.pop("assigned_to", None)
             node.pop("dispatch_id", None)
@@ -3036,6 +3096,47 @@ EOF
 """
 
 
+# Product-env allowlist embedded into generated worker runners (P2 smoke
+# 20260707T180639Z): pool workers execute in tmux windows whose environment
+# comes from the tmux SERVER, so flag-gated product behavior (gate-ledger route
+# records, product mode, provider pinning) silently degrades unless the runner
+# script carries a generation-time snapshot of these values itself.
+_PRODUCT_ENV_ALLOWLIST = (
+    "SOLAR_GATE_LEDGER",
+    "SOLAR_PRODUCT_MODE",
+    "SOLAR_WORKFLOW_ROUTER",
+    "SOLAR_MULTI_TASK_DEFAULT_PROVIDERS",
+    "SOLAR_PM_DEFAULT_PROVIDERS",
+    "HARNESS_SPRINTS_DIR",
+)
+
+
+def _product_env_exports() -> str:
+    lines: list[str] = []
+    for var in _PRODUCT_ENV_ALLOWLIST:
+        value = os.environ.get(var)
+        if value is not None and str(value).strip() != "":
+            lines.append(f"export {var}={shlex.quote(str(value))}")
+    return "\n".join(lines)
+
+
+def _product_env_prefix() -> str:
+    """Inline VAR=value prefix for tmux window commands.
+
+    tmux windows inherit the tmux SERVER's environment, not the spawning
+    process's — on a machine with a long-lived server, flag-gated product
+    behavior silently degrades in anything tmux hosts (and in anything those
+    processes auto-kick, e.g. operatord). Prefixing the command itself makes
+    propagation independent of server state (P2 smoke 20260707T190540Z:
+    second consecutive zero-route-record run)."""
+    parts: list[str] = []
+    for var in _PRODUCT_ENV_ALLOWLIST:
+        value = os.environ.get(var)
+        if value is not None and str(value).strip() != "":
+            parts.append(f"{var}={shlex.quote(str(value))}")
+    return (" ".join(parts) + " ") if parts else ""
+
+
 def runner_script(task_dir: Path, payload: dict[str, Any]) -> Path:
     runner = task_dir / "runner.sh"
     dispatch_file = task_dir / "dispatch.md"
@@ -3063,6 +3164,7 @@ def runner_script(task_dir: Path, payload: dict[str, Any]) -> Path:
         agent_line = f"SOLAR_MULTI_TASK_DISPATCH_FILE=\"$DISPATCH_FILE\" bash -lc {shlex.quote(agent_cmd)}"
     else:
         agent_line = claude_agent_line(model)
+    product_env_exports = _product_env_exports()
     script = f"""#!/usr/bin/env bash
 set -u
 TASK_DIR={shlex.quote(str(task_dir))}
@@ -3088,6 +3190,7 @@ WORK_DIR={shlex.quote(work_dir)}
 export TASK_DIR STATUS_FILE DISPATCH_FILE OUTPUT_LOG RUN_STARTED_MARKER HARNESS_DIR HARNESS_BIN SPRINTS_DIR GRAPH NODE_ID SID ROLE PROFILE BACKEND MODEL PROVIDER CAPABILITY_STATUS HANDOFF HARNESS WORK_DIR
 export PATH="$HARNESS_BIN:$PATH"
 export SOLAR_SAFE_FIND_ROOT="$WORK_DIR"
+{product_env_exports}
 
 pane_title() {{
   local title="$1"
@@ -3226,7 +3329,7 @@ exit "$rc"
 def tmux_start(window: str, runner: Path, cwd: Path, dry_run: bool = False) -> None:
     if dry_run:
         return
-    cmd = f"bash {shlex.quote(str(runner))}; exec ${{SHELL:-/bin/zsh}}"
+    cmd = f"{_product_env_prefix()}bash {shlex.quote(str(runner))}; exec ${{SHELL:-/bin/zsh}}"
     if subprocess.run(["tmux", "has-session", "-t", SESSION], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
         subprocess.check_call(["tmux", "new-window", "-d", "-t", SESSION, "-n", window, "-c", str(cwd), cmd])
     else:
@@ -3247,6 +3350,32 @@ def _operator_submit_eligible(profile: dict[str, Any], dry_run: bool = False) ->
         and not dry_run
         and operator_id not in {"", "N/A"}
     )
+
+
+def _profile_attribution_operator_id(profile: dict[str, Any]) -> str:
+    """Return a durable operator label for status/runstate without changing submit routing.
+
+    Physical-operator dispatch requires a concrete profile["operator_id"]. Command-backed
+    multi-task profiles such as codex-evaluator intentionally lack one, so they should stay on
+    the legacy command/tmux path. Still, recording "N/A" erases provider proof for successful
+    command-backed runs. Use the profile name as a stable attribution label only for command
+    profiles; _operator_submit_eligible continues to use the raw operator_id.
+    """
+    operator_id = str(profile.get("operator_id") or "").strip()
+    if operator_id and operator_id != "N/A":
+        return operator_id
+    if str(profile.get("backend") or "").strip().lower() == "command":
+        name = str(profile.get("name") or "").strip()
+        if name:
+            return name
+    return "N/A"
+
+
+def _profile_dispatch_mode(profile: dict[str, Any]) -> str:
+    backend = str(profile.get("backend") or "").strip().lower()
+    if backend == "command":
+        return "multi_task_command"
+    return "multi_task_tmux"
 
 
 def _operator_result_path(operator_id: str, dispatch_id: str) -> Path:
@@ -3312,6 +3441,8 @@ def _record_node_attribution(sid: str, node_id: str, payload: dict[str, Any], ta
             "operator_id": payload.get("operator_id"),
             "profile": payload.get("profile"),
             "role": payload.get("role"),
+            "dispatch_mode": payload.get("dispatch_mode") or payload.get("submit_mode"),
+            "submit_mode": payload.get("submit_mode"),
             "work_dir": payload.get("work_dir"),
             "status_path": str(status_path(task_dir)),
             "phase": phase or payload.get("status"),
@@ -3323,8 +3454,61 @@ def _record_node_attribution(sid: str, node_id: str, payload: dict[str, Any], ta
         pass
 
 
+def _plan_validator_env_on() -> bool:
+    # G4 default-on: the validator is the runtime default; explicit 0 kills it.
+    return str(os.environ.get("SOLAR_PLAN_VALIDATOR") or "").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _plan_validator_launch_refusal(graph: dict[str, Any]) -> dict[str, Any] | None:
+    """Validator dispatch guard shared by schedule_once and launch_node.
+
+    launch_node() is a public dispatch surface: a direct caller skips the
+    schedule_once guard, so the check must run again BEFORE any dispatch/
+    status/runstate write (G2b fix-round 2 finding 1). Returns a refusal
+    record ({reason, errors}) or None when dispatch may proceed."""
+    try:
+        import plan_validator  # type: ignore
+
+        plan_guard = plan_validator.check_planner_graph_dispatchable(graph)
+    except Exception as guard_exc:
+        if _plan_validator_env_on():
+            return {
+                "reason": "plan_validator_dispatch_refused",
+                "errors": [f"PLAN_VALIDATOR_UNCHECKABLE:{type(guard_exc).__name__}"],
+            }
+        return None
+    if plan_guard.get("ok"):
+        return None
+    try:
+        # G3 fix: a PASS-certified graph refused for hash mismatch is
+        # unrecoverable at dispatch time — terminalize the sprint truthfully
+        # instead of re-refusing every scheduler tick (helper is scoped to
+        # PLAN_CERTIFICATE_HASH_MISMATCH; uncertified refusals untouched).
+        plan_validator.record_certificate_mismatch_refusal(
+            SPRINTS_DIR, graph, plan_guard.get("errors")
+        )
+    except Exception:
+        pass
+    errors = []
+    for error in plan_guard.get("errors") or []:
+        if isinstance(error, dict):
+            errors.append(f"{error.get('code')}:{error.get('node_id', '?')}")
+        else:
+            errors.append(str(error))
+    return {"reason": "plan_validator_dispatch_refused", "errors": errors}
+
+
 def launch_node(graph_path: Path, graph: dict[str, Any], node: dict[str, Any], args: argparse.Namespace,
                 dry_run: bool = False) -> dict[str, Any]:
+    refusal = _plan_validator_launch_refusal(graph)
+    if refusal is not None:
+        return {
+            "status": "plan_validator_dispatch_refused",
+            "graph": str(graph_path),
+            "sprint_id": sprint_id_for(graph, graph_path),
+            "node_id": str(node.get("id") or ""),
+            **refusal,
+        }
     sid = sprint_id_for(graph, graph_path)
     node_id = str(node.get("id") or "")
     profile = select_profile(node, getattr(args, "profile", "") or "", getattr(args, "model", "") or "", getattr(args, "backend", "") or "")
@@ -3356,12 +3540,14 @@ def launch_node(graph_path: Path, graph: dict[str, Any], node: dict[str, Any], a
         "provider": capability.get("provider"),
         "capability_status": capability.get("status"),
         "approval_mode": profile.get("approval_mode"),
-        "operator_id": profile.get("operator_id") or "N/A",
+        "operator_id": _profile_attribution_operator_id(profile),
         "operator_vendor": profile.get("operator_vendor") or capability.get("provider") or "N/A",
         "operator_model": profile.get("operator_model") or profile.get("model") or "N/A",
         "operator_pane": profile.get("operator_pane") or "N/A",
         "operator_quota_refresh_at": profile.get("operator_quota_refresh_at") or "N/A",
         "operator_fallback_reason": profile.get("operator_fallback_reason") or "",
+        "dispatch_mode": _profile_dispatch_mode(profile),
+        "submit_mode": "",
         "quota_fallback_from": profile.get("quota_fallback_from") or node.get("quota_fallback_from") or "",
         "quota_fallback_reason": profile.get("quota_fallback_reason") or node.get("quota_fallback_reason") or "",
         "graph": str(graph_path),
@@ -3389,6 +3575,7 @@ def launch_node(graph_path: Path, graph: dict[str, Any], node: dict[str, Any], a
             result_path = _operator_result_path(operator_id, dispatch_id)
             payload.update(submit_result)
             payload["submit_mode"] = "operatord"
+            payload["dispatch_mode"] = "operatord"
             payload["result_path"] = str(result_path)
             payload["updated_at"] = now_iso()
             json_write(status_path(task_dir), payload)
@@ -3419,6 +3606,8 @@ def launch_node(graph_path: Path, graph: dict[str, Any], node: dict[str, Any], a
             return payload
         except (RuntimeError, ValueError) as exc:
             payload["operator_submit_fallback"] = "legacy"
+            payload["submit_mode"] = ""
+            payload["dispatch_mode"] = _profile_dispatch_mode(profile)
             payload["operator_submit_error"] = str(exc)
             payload["updated_at"] = now_iso()
             json_write(status_path(task_dir), payload)
@@ -3530,6 +3719,23 @@ def _advance_graph(graph_path: Path | str) -> dict[str, Any]:
                         op_id = str(closeout.get("operator_id") or "")
                     if op_id:
                         _record_operator_runtime_failure(op_id, str(r.get("reason") or "closeout"))
+            # Projection sync must NOT be gated on `if reconciled` — when a
+            # concurrent loop (the coordinator's dispatch-ready tick) consumes
+            # the final node's eval first, this reconcile is empty and the
+            # parent projection would never converge (P3 run 4: status.json
+            # froze at active with a fully-passed graph until wrapper timeout).
+            # The sync is idempotent; run it every advance tick.
+            try:
+                import graph_scheduler
+
+                summary["status_sync"] = graph_scheduler.sync_status_cache_from_graph(
+                    graph,
+                    str(graph_path),
+                    actor="multi_task_runner",
+                    event="multi_task_auto_advance_reconciled",
+                )
+            except Exception as sync_exc:
+                summary["status_sync_error"] = f"{type(sync_exc).__name__}: {sync_exc}"
         except Exception as exc:
             summary["reconcile_error"] = f"{type(exc).__name__}: {exc}"
     except Exception as exc:
@@ -3596,13 +3802,28 @@ def schedule_once(args: argparse.Namespace) -> dict[str, Any]:
         try:
             graph = load_graph(graph_path)
             summaries.append(status_summary_for_graph(graph_path))
+            refusal = _plan_validator_launch_refusal(graph)
+            if refusal is not None:
+                skipped.append({"graph": str(graph_path), **refusal})
+                continue
             candidates = ready_nodes(graph)
         except Exception as exc:
             skipped.append({"graph": str(graph_path), "reason": "graph_error", "error": str(exc)})
             continue
+        sid = sprint_id_for(graph, graph_path)
         for node in candidates:
             if slots <= 0 and not args.dry_run:
                 break
+            already_active = active_task_for_node(sid, str(node.get("id") or ""), active_rows)
+            if already_active:
+                skipped.append({
+                    "graph": str(graph_path),
+                    "node": node.get("id"),
+                    "reason": "node_already_active",
+                    "task": already_active.get("id"),
+                    "status": already_active.get("effective_status") or already_active.get("status"),
+                })
+                continue
             if scope_conflicts_with_active(node):
                 skipped.append({"graph": str(graph_path), "node": node.get("id"), "reason": "write_scope_conflict_with_active"})
                 continue
@@ -4388,6 +4609,7 @@ def command_log_path() -> Path:
 
 
 def load_screen_history() -> None:
+    readline = _screen_readline()
     if readline is None:
         return
     try:
@@ -4400,6 +4622,7 @@ def load_screen_history() -> None:
 
 
 def save_screen_history() -> None:
+    readline = _screen_readline()
     if readline is None:
         return
     try:
@@ -4414,6 +4637,7 @@ def remember_screen_input(text: str) -> None:
     raw = text.strip()
     if not raw:
         return
+    readline = _screen_readline()
     if readline is not None:
         try:
             last = readline.get_history_item(readline.get_current_history_length()) or ""

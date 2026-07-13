@@ -131,6 +131,27 @@ solar harness models show
 solar harness models set-main opus --apply
 ```
 
+### Governed Planning (default on)
+
+Free-prompt tasks submitted through intake run under the governed generic
+path by default: the planner's task graph is compile-checked and stamped
+with a plan certificate before any builder runs, gate results are recorded
+in a per-sprint gate ledger, and node completion claims are verified
+against real artifacts. No configuration is needed — a fresh install is
+governed out of the box.
+
+To inspect the resolved state on any machine:
+
+```bash
+python3 ~/.solar/harness/lib/plan_validator.py env-status
+```
+
+An explicit `SOLAR_PLAN_VALIDATOR=0` or `SOLAR_GATE_LEDGER=0` in the
+environment disables the corresponding layer (supported but discouraged —
+it removes the evidence checks). Hand-authored task graphs and pre-existing
+workflows without the intake birth marker are grandfathered and keep their
+legacy behavior.
+
 ## Install Details
 
 See:

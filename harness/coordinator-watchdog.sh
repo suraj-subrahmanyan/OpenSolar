@@ -179,6 +179,16 @@ do_check() {
     fi
   done
 
+  # Lane 0 PR-3 (F4 / AC-R7.4, M1 rule): a run-terminal marker from the process
+  # registry suppresses respawn — check the resolved sprint's marker when one
+  # resolves, else the harness-global marker; fail-open (respawn) when neither
+  # exists. Defeats the watchdog-respawns-coordinator-past-teardown class (F-043).
+  local _prt="$HARNESS_DIR/run/process-registry"
+  if [[ -f "$_prt/harness.terminal" ]] || { [[ -n "$active_sid" ]] && [[ -f "$_prt/${active_sid}.terminal" ]]; }; then
+    log "Coordinator respawn suppressed: run-terminal marker present (process registry)"
+    return 0
+  fi
+
   bash "$HARNESS_DIR/coordinator.sh" >> "$HARNESS_DIR/.coordinator.log" 2>&1 &
   log "Coordinator 重启已触发 (spawn PID: $!, pidfile 由 coordinator 接管)"
 
@@ -342,6 +352,11 @@ _load_layout_panes
 
 ensure_tmux_sessions() {
   local missing=0
+
+  # G3 zombie-factory fix: never rebuild sessions for a terminal run.
+  if [[ -f "$HARNESS_DIR/run/process-registry/harness.terminal" ]]; then
+    return 0
+  fi
 
   if ! tmux has-session -t "$SESSION_NAME" &>/dev/null; then
     warn "tmux session missing: ${SESSION_NAME}; rebuilding Product Delivery"
@@ -631,6 +646,18 @@ run_watchdog() {
   local pane_ticks=0
 
   while true; do
+    # G3 zombie-factory fix: a run-terminal marker means this run is OVER —
+    # the watchdog itself exits instead of merely suppressing coordinator
+    # respawn (F-043 covered respawn only; 18 marker-less watchdogs from
+    # completed e2e sandboxes kept rebuilding sessions and re-running
+    # harness startup for up to 30h, and their stale-code status-server
+    # sweeps killed live runs' servers).
+    if [[ -f "$HARNESS_DIR/run/process-registry/harness.terminal" ]]; then
+      log "run-terminal marker present — watchdog exiting"
+      rm -f "$WATCHDOG_PID_FILE"
+      break
+    fi
+
     # Coordinator 检查 (每 CHECK_INTERVAL)
     if (( coord_ticks >= CHECK_INTERVAL )); then
       do_check || {
@@ -666,6 +693,12 @@ case "${1:-help}" in
       rm -f "$WATCHDOG_PID_FILE"
     fi
     log "启动 Watchdog..."
+    # A stale terminal marker would make the freshly spawned daemon exit on
+    # its first tick and refuse its registration — clear it: starting the
+    # watchdog IS the new run's birth.
+    if [[ -f "$HARNESS_DIR/lib/run_process_registry.py" && -f "$HARNESS_DIR/run/process-registry/harness.terminal" ]]; then
+      python3 "$HARNESS_DIR/lib/run_process_registry.py" clear-terminal --run-id harness >/dev/null 2>&1 || true
+    fi
     if [[ "$(uname -s)" == "Darwin" && "${SOLAR_WATCHDOG_NO_LAUNCHD:-0}" != "1" ]] && command -v launchctl >/dev/null 2>&1; then
       if start_launchd_watchdog; then
         exit 0
@@ -816,6 +849,16 @@ case "${1:-help}" in
     daemon_loop_count=0
 
     while true; do
+      # G3 zombie-factory fix: a run-terminal marker means this run is OVER —
+      # the watchdog exits instead of merely suppressing coordinator respawn
+      # (F-043 covered respawn only; marker-less/suppression-only watchdogs
+      # from completed e2e sandboxes kept rebuilding sessions for 30+ hours
+      # and their stale-code status-server sweeps killed live runs' servers).
+      if [[ -f "$HARNESS_DIR/run/process-registry/harness.terminal" ]]; then
+        log "run-terminal marker present — watchdog exiting"
+        rm -f "$WATCHDOG_PID_FILE"
+        exit 0
+      fi
       if (( coord_ticks >= CHECK_INTERVAL )); then
         do_check || {
           err "Watchdog daemon 因熔断退出"

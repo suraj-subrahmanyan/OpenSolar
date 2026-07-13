@@ -166,6 +166,15 @@ def enrich_graph(graph: dict[str, Any], source_text: str = "",
     if not isinstance(nodes, list):
         raise ValueError("task_graph.nodes must be a list")
 
+    if isinstance(graph.get("plan_certificate"), dict) and graph.get("plan_certificate"):
+        # G3 live rung (p5-g3-live-rung-20260709T161420Z): enrichment injected
+        # required_capabilities=[] into a CERTIFIED graph's nodes;
+        # required_capabilities is certificate-governed, so the write changed
+        # the governed hash and the dispatch guard refused the graph
+        # (PLAN_CERTIFICATE_HASH_MISMATCH). A PASS-stamped graph's governed
+        # content is frozen: inference may run before stamping, never after.
+        return graph
+
     changed_nodes: list[str] = []
     for node in nodes:
         if not isinstance(node, dict):

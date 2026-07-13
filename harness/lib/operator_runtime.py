@@ -19,8 +19,53 @@ from typing import Any, Dict, List, Optional
 
 from operator_persona import resolve_persona
 
+try:  # Lane 3 gate ledger (R5/AC-R5.1): route records at the operatord seam (F7)
+    import gate_ledger as _gate_ledger
+except Exception:  # pragma: no cover
+    _gate_ledger = None
+
+
+def _route_sprints_dir() -> Path:
+    """Single shared sprints-dir resolution for route records (round-4 G7).
+
+    The ledger the route writer appends to must be the ledger the gates read —
+    gate_ledger.default_sprints_dir() (HARNESS_SPRINTS_DIR > HARNESS_DIR >
+    SOLAR_HARNESS_DIR > install default) is that shared rule."""
+    if _gate_ledger is not None:
+        try:
+            return Path(_gate_ledger.default_sprints_dir())
+        except Exception:
+            pass
+    return HARNESS_DIR / "sprints"
+
+
+def _ledger_route(sprint_id: str, node_id: str, task_id: str, phase: str,
+                  route: Dict[str, Any]) -> None:
+    """Append a route record to the sprint's gate ledger.
+
+    No-op unless SOLAR_GATE_LEDGER=1; best-effort — route evidence must never
+    break the operator hot path."""
+    if _gate_ledger is None:
+        return
+    try:
+        if not _gate_ledger.enabled():
+            return
+        _gate_ledger.append_route_record(
+            _route_sprints_dir(), sprint_id,
+            node_id=node_id, task_id=task_id, phase=phase, route=route,
+        )
+    except Exception:
+        pass
+
 HOME = Path.home()
-HARNESS_DIR = Path(os.environ.get("HARNESS_DIR", HOME / ".solar" / "harness"))
+# HARNESS_DIR > SOLAR_HARNESS_DIR > install default — the graph_scheduler rule
+# (round-4 G7: operator_runtime ignored SOLAR_HARNESS_DIR and could land run
+# state in the live ~/.solar/harness during sandboxed runs).
+HARNESS_DIR = Path(
+    os.environ.get("HARNESS_DIR")
+    or os.environ.get("SOLAR_HARNESS_DIR")
+    or HOME / ".solar" / "harness"
+)
 OPERATOR_LEASE_DIR = HARNESS_DIR / "run" / "operator-leases"
 OPERATOR_STATUS_DIR = HARNESS_DIR / "run" / "operator-status"
 OPERATOR_INBOX_DIR = HARNESS_DIR / "run" / "operator-inbox"
@@ -100,11 +145,37 @@ def _active_record_processes_dead(record: Dict[str, Any]) -> bool:
     return bool(pids) and all(not _pid_exists(pid) for pid in pids)
 
 
+def _active_status_without_process_stale(record: Dict[str, Any]) -> bool:
+    """True when an active status has no process evidence and its heartbeat is stale."""
+    if str(record.get("runtime_state") or record.get("state") or "") not in {"leased", "running", "draining"}:
+        return False
+    if _coerce_pid(record.get("worker_pid")) is not None or _coerce_pid(record.get("daemon_pid")) is not None:
+        return False
+    observed_at = _parse_utc(
+        str(
+            record.get("heartbeat_at")
+            or record.get("updated_at")
+            or record.get("started_at")
+            or record.get("leased_at")
+            or ""
+        )
+    )
+    if observed_at is None:
+        return True
+    try:
+        stale_seconds = int(os.environ.get("SOLAR_OPERATOR_ACTIVE_STATUS_STALE_SECONDS", "900") or "900")
+    except Exception:
+        stale_seconds = 900
+    return (datetime.datetime.now(datetime.timezone.utc) - observed_at).total_seconds() >= max(1, stale_seconds)
+
+
 def _clear_stale_active_status(operator_id: str) -> bool:
     status = get_operator_status(operator_id)
     if not status:
         return False
-    if status.get("runtime_state") in {"leased", "running"} and _active_record_processes_dead(status):
+    if status.get("runtime_state") in {"leased", "running", "draining"} and (
+        _active_record_processes_dead(status) or _active_status_without_process_stale(status)
+    ):
         clear_operator_status(operator_id)
         return True
     return False
@@ -397,7 +468,9 @@ def get_operator_runtime_state(operator_id: str) -> str:
     status = get_operator_status(operator_id)
     if status:
         r_state = status.get("runtime_state")
-        if r_state in {"leased", "running"} and _active_record_processes_dead(status):
+        if r_state in {"leased", "running", "draining"} and (
+            _active_record_processes_dead(status) or _active_status_without_process_stale(status)
+        ):
             clear_operator_status(operator_id)
             r_state = ""
         if r_state in VALID_STATES:
@@ -582,6 +655,19 @@ def submit(task_envelope: Dict[str, Any]) -> Dict[str, Any]:
                 f"Operator '{operator_id}' submit bootstrap failed: unable to start operatord --once: {exc}"
             ) from exc
 
+    # AC-R5.1: the envelope write IS the stage-start route evidence — a run
+    # killed before any result still proves what was routed where. Recorded
+    # AFTER the auto-kick block (round-4 G8): a bootstrap failure rolls the
+    # envelope+lease back, so a 'submitted' record for a stage that never ran
+    # would be untruthful.
+    _ledger_route(sprint_id, node_id, task_id, "submitted", {
+        "provider": str((config or {}).get("provider") or ""),
+        "model": str((config or {}).get("model") or ""),
+        "operator_id": operator_id,
+        "backend": str((config or {}).get("backend") or ""),
+        "started_at": submitted_at,
+    })
+
     result = {
         "task_id": task_id,
         "operator_id": operator_id,
@@ -750,6 +836,23 @@ def write_result(
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2)
     os.replace(tmp_path, str(result_path))
+
+    route = dict(model_route or {})
+    try:
+        config = get_operator_config(operator_id) or {}
+    except Exception:
+        config = {}
+    _ledger_route(sprint_id, node_id, task_id, "completed", {
+        "provider": str(route.get("effective_provider") or config.get("provider") or ""),
+        "model": str(route.get("effective_model") or route.get("routing_model")
+                     or route.get("requested_model") or config.get("model") or ""),
+        "operator_id": operator_id,
+        "backend": str(config.get("backend") or ""),
+        "exit_code": exit_code,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "result_status": status,
+    })
     return result_path
 
 

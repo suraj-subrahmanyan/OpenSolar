@@ -35,6 +35,19 @@ from typing import Any
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+# The tools dir is sys.path[0] when this file runs as a script, and it shadows
+# ~150 shared-name lib modules with stale copies. An inherited PYTHONPATH that
+# merely CONTAINS harness/lib (the live-e2e sandbox env) satisfies the usual
+# 'if lib not in sys.path' guard without granting PRECEDENCE, so
+# `import operator_runtime` still resolved the tools copy — the one without
+# the Lane 3 route-record hooks (P2 smoke-4: zero route records while every
+# other ledger kind landed). Force this script's sibling lib to the front.
+_PM_LIB_DIR = str(Path(__file__).resolve().parents[1] / "lib")
+if sys.path and sys.path[0] != _PM_LIB_DIR:
+    while _PM_LIB_DIR in sys.path:
+        sys.path.remove(_PM_LIB_DIR)
+    sys.path.insert(0, _PM_LIB_DIR)
+
 HOME = Path.home()
 HARNESS_DIR = Path(
     os.environ.get("HARNESS_DIR")
@@ -822,6 +835,14 @@ EVALUATOR_VERIFICATION_TASK_TYPES = {
     "acceptance",
 }
 VERIFICATION_CAPSULE_ID = "cap.requirement-compiler-verification"
+IMPLEMENTATION_CAPSULE_ID = "cap.requirement-compiler-implementation"
+IMPLEMENTATION_CAPSULE_TASK_TYPE_ALIASES = {
+    "test": "implementation",
+    "tests": "implementation",
+    "test_gen": "implementation",
+    "test_generation": "implementation",
+    "test_authoring": "implementation",
+}
 AUDIT_CAPSULE_ID = "cap.requirement-compiler-audit"
 AUDIT_CAPSULE_TASK_TYPE_ALIASES = {
     "": "audit_inventory",
@@ -843,6 +864,8 @@ AUDIT_CAPSULE_TASK_TYPE_ALIASES = {
 def _canonicalize_capsule_task_type(capsule_submit: dict[str, Any], task_type: str) -> str:
     capsule_id = str(capsule_submit.get("capability_capsule_id") or "").strip()
     value = str(task_type or "").strip().lower()
+    if capsule_id == IMPLEMENTATION_CAPSULE_ID:
+        return IMPLEMENTATION_CAPSULE_TASK_TYPE_ALIASES.get(value, value or "implementation")
     if capsule_id == AUDIT_CAPSULE_ID:
         return AUDIT_CAPSULE_TASK_TYPE_ALIASES.get(value, value or "audit_inventory")
     return value
@@ -1588,6 +1611,26 @@ def _builder_ready_nodes_for_sprint(sprint_id: str) -> tuple[list[dict[str, Any]
     try:
         graph_scheduler.SPRINTS_DIR = SPRINTS_DIR
         graph = graph_scheduler.load_graph(graph_path)
+        try:
+            import plan_validator  # type: ignore
+
+            plan_guard = plan_validator.check_planner_graph_dispatchable(graph)
+        except Exception as guard_exc:
+            if str(os.environ.get("SOLAR_PLAN_VALIDATOR") or "").strip().lower() not in {"0", "false", "no", "off"}:
+                return [], {
+                    "ok": False,
+                    "reason": "plan_validator_dispatch_refused",
+                    "errors": [f"PLAN_VALIDATOR_UNCHECKABLE:{type(guard_exc).__name__}"],
+                    "graph": str(graph_path),
+                }
+            plan_guard = {"ok": True}
+        if not plan_guard.get("ok"):
+            return [], {
+                "ok": False,
+                "reason": "plan_validator_dispatch_refused",
+                "errors": plan_guard.get("errors") or [],
+                "graph": str(graph_path),
+            }
         ready = graph_scheduler.ready_nodes(graph)
     except Exception as exc:
         return [], {"ok": False, "reason": f"ready_nodes_failed:{type(exc).__name__}", "error": str(exc), "graph": str(graph_path)}
@@ -1655,14 +1698,100 @@ def _pm_expected_artifacts(record: dict[str, Any]) -> list[Path]:
     return []
 
 
+def _pm_recover_missing_artifact(expected: Path, sprint_id: str) -> dict[str, str] | None:
+    """Deterministic closeout recovery for the nested-write failure class.
+
+    Workers are given the flat sprints path, but a path transcription slip can
+    land the artifact — exact expected basename, non-empty — inside the
+    sprint's own directory tree instead (P2 smoke-5: the S2 builder wrote
+    sprints/<sid>/<basename> and then failed contract closeout with the file
+    sitting right there). If EXACTLY ONE such candidate exists under
+    SPRINTS_DIR/<sid>/, copy it to the canonical path and report the recovery;
+    zero or multiple matches keep the failure, and files outside the sprint
+    tree are never adopted. Only ever fires where the closeout would otherwise
+    FAIL. Kill-switch: SOLAR_PM_CLOSEOUT_RECOVERY=0."""
+    flag = str(os.environ.get("SOLAR_PM_CLOSEOUT_RECOVERY", "1")).strip().lower()
+    if flag in {"0", "false", "no", "off"}:
+        return None
+    sprint_tree = SPRINTS_DIR / sprint_id
+    if not sprint_id or not sprint_tree.is_dir():
+        return None
+    try:
+        matches = [
+            path for path in sprint_tree.rglob(expected.name)
+            if path.is_file() and path.stat().st_size > 0
+        ]
+    except Exception:
+        return None
+    if len(matches) != 1:
+        return None
+    try:
+        shutil.copy2(matches[0], expected)
+    except Exception:
+        return None
+    return {"artifact": str(expected), "recovered_from": str(matches[0])}
+
+
+def _pm_repair_archived_artifact(expected: Path, record: dict[str, Any]) -> dict[str, str] | None:
+    """G4 UI-rung run 3 trigger (also G3 run 12's failed_contract_closeout):
+    the worker DID deliver the artifact — the gate consumed it and the repair
+    flow ARCHIVED it to <stem>.repair*.<ts><suffix> seconds before this
+    closeout check ran — and the closeout jailed the only builder for 900s
+    (completed_without_required_artifacts), starving the pool. A non-empty
+    repair-archived copy, no older than this task's submission, IS proof of
+    delivery. It is acknowledged, never copied back: the repair flow archived
+    it deliberately, and resurrecting the canonical file would confuse the
+    repair-generation machinery. Shares the SOLAR_PM_CLOSEOUT_RECOVERY kill
+    switch with the nested-write net above."""
+    flag = str(os.environ.get("SOLAR_PM_CLOSEOUT_RECOVERY", "1")).strip().lower()
+    if flag in {"0", "false", "no", "off"}:
+        return None
+    try:
+        candidates = sorted(expected.parent.glob(f"{expected.stem}.repair*{expected.suffix}"))
+    except Exception:
+        return None
+    submitted = _parse_utc(str(record.get("submitted_at") or ""))
+    for candidate in reversed(candidates):
+        try:
+            if not candidate.is_file() or candidate.stat().st_size <= 0:
+                continue
+            if submitted is not None:
+                mtime = datetime.datetime.fromtimestamp(
+                    candidate.stat().st_mtime, tz=datetime.timezone.utc
+                )
+                if mtime < submitted:
+                    continue
+            return {"artifact": str(expected), "archived_by_repair": str(candidate)}
+        except Exception:
+            continue
+    return None
+
+
 def _pm_closeout_status(record: dict[str, Any]) -> dict[str, Any]:
     expected = _pm_expected_artifacts(record)
-    missing = [str(path) for path in expected if not path.exists() or path.stat().st_size <= 0]
-    return {
+    sprint_id = str(record.get("sprint_id") or "").strip()
+    missing: list[str] = []
+    recovered: list[dict[str, str]] = []
+    for path in expected:
+        if path.exists() and path.stat().st_size > 0:
+            continue
+        recovery = _pm_recover_missing_artifact(path, sprint_id)
+        if recovery:
+            recovered.append(recovery)
+            continue
+        archived = _pm_repair_archived_artifact(path, record)
+        if archived:
+            recovered.append(archived)
+            continue
+        missing.append(str(path))
+    closeout: dict[str, Any] = {
         "ok": not missing,
         "expected_artifacts": [str(path) for path in expected],
         "missing_artifacts": missing,
     }
+    if recovered:
+        closeout["recovered_artifacts"] = recovered
+    return closeout
 
 
 def _record_age_minutes(record: dict[str, Any], path: Path) -> float:
@@ -1745,7 +1874,7 @@ def ensure_compiled_sprint_status(sprint_id: str, title: str, summary: str) -> P
 
 def _planner_objective_for_compiled_sprint(sprint_id: str) -> str:
     base = str(SPRINTS_DIR / sprint_id)
-    return textwrap.dedent(
+    objective = textwrap.dedent(
         f"""\
         请接手 {sprint_id}：Requirement Compiler 已生成首版需求编译包。
 
@@ -1764,6 +1893,19 @@ def _planner_objective_for_compiled_sprint(sprint_id: str) -> str:
         4. 如果 compiled package 缺失关键字段，先写明 blocker 和修正建议。
         """
     ).strip()
+    # P5 G2: teach the planner the compile rules it will be checked against
+    # (env-gated inside the helper; "" when SOLAR_PLAN_VALIDATOR is off, so
+    # legacy prompts stay byte-identical). Prompt enrichment must never break
+    # dispatch — enforcement lives at the compile/dispatch seams.
+    try:
+        import plan_validator  # type: ignore
+
+        policy_block = plan_validator.planner_compile_policy_block(SPRINTS_DIR, sprint_id)
+    except Exception:
+        policy_block = ""
+    if policy_block:
+        objective = f"{objective}\n\n{policy_block}"
+    return objective
 
 
 def cmd_compile_request(args: argparse.Namespace) -> int:
@@ -1860,6 +2002,26 @@ def cmd_compile_request(args: argparse.Namespace) -> int:
 
 # ── 核心 submit 逻辑 ──────────────────────────────────────────────────────────
 
+def _with_planner_compile_policy(objective: str, sprint_id: str) -> str:
+    """P5 G2b: the submit choke point every role-pool planner dispatch flows
+    through. The G2b battery proved objective-builder-level injection misses
+    live paths (the autopilot role-handoff objective reached the planner with
+    no policy block); enriching HERE covers every caller. Env-gated inside
+    the helper ("" when SOLAR_PLAN_VALIDATOR is off); idempotent so an
+    already-enriched objective (intent_consumer) is not double-appended."""
+    if "## Plan compile policy" in objective:
+        return objective
+    try:
+        import plan_validator  # type: ignore
+
+        policy_block = plan_validator.planner_compile_policy_block(SPRINTS_DIR, sprint_id)
+    except Exception:
+        policy_block = ""
+    if policy_block:
+        return f"{objective}\n\n{policy_block}"
+    return objective
+
+
 def cmd_submit(args: argparse.Namespace) -> int:
     role = str(args.role or "builder")
     objective = str(args.objective or "").strip()
@@ -1891,6 +2053,8 @@ def cmd_submit(args: argparse.Namespace) -> int:
     task_type = str(args.task_type or "")
     dry_run: bool = bool(args.dry_run)
     context = str(args.context or "")
+    if normalize_role(role) == "planner":
+        objective = _with_planner_compile_policy(objective, sprint_id)
     task_graph_node = load_task_graph_node(sprint_id, node_id)
     capsule_submit = _capsule_submit_metadata(task_graph_node)
     logical_operator = str(capsule_submit.get("logical_operator") or (task_graph_node or {}).get("logical_operator") or "")
@@ -2452,6 +2616,26 @@ def cmd_drain_builder_ready(args: argparse.Namespace) -> int:
 
     if requested_sprint:
         nodes, meta = _builder_ready_nodes_for_sprint(requested_sprint)
+        if not meta.get("ok"):
+            payload = {
+                "ok": False,
+                "dry_run": dry_run,
+                "max_items": max_items,
+                "sprint": requested_sprint,
+                "latent_builder_ready": 0,
+                "submitted": [],
+                "marked": [],
+                "skipped": [{**meta, "sprint_id": requested_sprint}],
+            }
+            if json_mode:
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                print(
+                    "drain_builder_ready "
+                    f"dry_run={dry_run} latent=0 submitted=0 marked=0 skipped=1"
+                )
+                print(f"  - {requested_sprint} reason={meta.get('reason')}")
+            return 1
         items = [
             {
                 "sprint_id": requested_sprint,
