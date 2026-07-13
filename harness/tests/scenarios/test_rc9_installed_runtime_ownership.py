@@ -106,6 +106,56 @@ def test_watchdog_session_probe_rejects_tmux_prefix_match(tmp_path: Path):
         )
 
 
+def test_harness_status_rejects_tmux_prefix_match(tmp_path: Path):
+    """A dashboard session must not impersonate the main cockpit session."""
+    tmux_tmp = tmp_path / "tmux"
+    tmux_tmp.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "HARNESS_DIR": str(_HARNESS),
+        "SOLAR_HARNESS_SESSION": "solar-harness",
+        "SOLAR_HARNESS_LAB_SESSION": "solar-harness-lab",
+        "TMUX_TMPDIR": str(tmux_tmp),
+    }
+    subprocess.run(
+        [
+            "tmux",
+            "new-session",
+            "-d",
+            "-s",
+            "solar-harness-status-server-fixture",
+            "sleep 60",
+        ],
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    try:
+        result = subprocess.run(
+            ["bash", str(_SOLAR_HARNESS), "status"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "Solar Harness 未运行" in result.stdout, result.stdout
+        assert "Product Delivery 运行中" not in result.stdout, result.stdout
+    finally:
+        subprocess.run(
+            ["tmux", "kill-server"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+
 def test_product_mode_watchdog_does_not_launch_intentionally_idle_persona_panes(tmp_path: Path):
     harness = tmp_path / "harness"
     (harness / "run").mkdir(parents=True)

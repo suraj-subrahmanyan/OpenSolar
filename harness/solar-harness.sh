@@ -113,6 +113,15 @@ human_prefix() {
 
 ensure_dirs() { mkdir -p "$SPRINTS_DIR" "$HARNESS_DIR/personas" "$HARNESS_DIR/templates"; }
 
+# tmux treats a unique session-name prefix as a valid target.  Solar owns
+# several sessions whose names begin with "solar-harness" (dashboard, lab,
+# background work), so a prefix probe can mistake one of those for the main
+# cockpit.  Enumerating names makes every ownership check exact.
+tmux_has_exact_session() {
+  local wanted="$1"
+  tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -Fxq -- "$wanted"
+}
+
 # Fix 4 (clean-cockpit-start): reset stale runtime coordination state that otherwise
 # carries across restarts and walls fresh runs — a needs_respawn hygiene latch, stale
 # pane leases, stale pane assignments, and the fire-once drafting/builder dispatch
@@ -430,7 +439,7 @@ PY
       _penv+="$_pvar=$(printf '%q' "${!_pvar}") "
     fi
   done
-  if tmux has-session -t "$BG_SESSION_NAME" 2>/dev/null; then
+  if tmux_has_exact_session "$BG_SESSION_NAME"; then
     tmux new-window -d -t "$BG_SESSION_NAME" -n "$window" -c "$work_dir" "${_penv}bash $(printf '%q' "$runner"); exec \${SHELL:-/bin/zsh}"
   else
     tmux new-session -d -s "$BG_SESSION_NAME" -n "$window" -c "$work_dir" "${_penv}bash $(printf '%q' "$runner"); exec \${SHELL:-/bin/zsh}"
@@ -442,7 +451,7 @@ PY
 }
 
 cleanup_legacy_sessions() {
-  if ! tmux has-session -t "$LEGACY_LAB_SESSION_NAME" 2>/dev/null; then
+  if ! tmux_has_exact_session "$LEGACY_LAB_SESSION_NAME"; then
     return 0
   fi
 
@@ -574,7 +583,7 @@ pane_footer_label() {
 }
 
 configure_product_delivery_labels() {
-  tmux has-session -t "$SESSION_NAME" 2>/dev/null || return 0
+  tmux_has_exact_session "$SESSION_NAME" || return 0
   tmux rename-window -t "$SESSION_NAME:0" "Product Delivery" 2>/dev/null || true
   configure_role_footer_style "$SESSION_NAME" "#89b4fa"
   tmux select-pane -t "$SESSION_NAME:0.0" -T "$(pane_footer_label pm "PM 产品经理")" 2>/dev/null || true
@@ -584,12 +593,12 @@ configure_product_delivery_labels() {
 }
 
 product_delivery_pane_count() {
-  tmux has-session -t "$SESSION_NAME" 2>/dev/null || { printf '0\n'; return 1; }
+  tmux_has_exact_session "$SESSION_NAME" || { printf '0\n'; return 1; }
   tmux list-panes -t "$SESSION_NAME:Product Delivery" 2>/dev/null | wc -l | tr -d ' '
 }
 
 warn_if_product_delivery_layout_incomplete() {
-  tmux has-session -t "$SESSION_NAME" 2>/dev/null || return 0
+  tmux_has_exact_session "$SESSION_NAME" || return 0
   local panes_count
   panes_count="$(product_delivery_pane_count 2>/dev/null || printf '0')"
   if [[ "$panes_count" != "$EXPECTED_PRODUCT_DELIVERY_PANES" ]]; then
@@ -601,7 +610,7 @@ warn_if_product_delivery_layout_incomplete() {
 }
 
 apply_product_delivery_models() {
-  tmux has-session -t "$SESSION_NAME" 2>/dev/null || { warn "主屏未运行: $SESSION_NAME"; return 0; }
+  tmux_has_exact_session "$SESSION_NAME" || { warn "主屏未运行: $SESSION_NAME"; return 0; }
   local personas=(pm planner builder evaluator)
   local panes=("$SESSION_NAME:Product Delivery.0" "$SESSION_NAME:Product Delivery.1" "$SESSION_NAME:Product Delivery.2" "$SESSION_NAME:Product Delivery.3")
   local i target persona pane_id work_dir _esc_harness _esc_work
@@ -628,7 +637,7 @@ apply_product_delivery_models() {
 }
 
 configure_builder_lab_labels() {
-  tmux has-session -t "$LAB_SESSION_NAME" 2>/dev/null || return 0
+  tmux_has_exact_session "$LAB_SESSION_NAME" || return 0
   configure_role_footer_style "$LAB_SESSION_NAME" "#f9e2af"
   tmux select-pane -t "$LAB_SESSION_NAME:Builder Lab.0" -T "$(pane_footer_label lab-builder "Builder 1" "lab-builder-1")" 2>/dev/null || true
   tmux select-pane -t "$LAB_SESSION_NAME:Builder Lab.1" -T "$(pane_footer_label lab-builder "Builder 2" "lab-builder-2")" 2>/dev/null || true
@@ -1031,7 +1040,7 @@ start_harness() {
   command -v tmux &>/dev/null || { err "tmux 未安装: brew install tmux"; exit 1; }
   pane_runtime_cli_path >/dev/null || { err "${SOLAR_PANE_RUNTIME} runtime CLI 未安装或不在 PATH"; exit 1; }
 
-  if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+  if tmux_has_exact_session "$SESSION_NAME"; then
     # 安全优先: pane_current_command 经常是 bash/zsh，因为 Claude TUI 是子进程。
     # 旧逻辑只数 current_command=claude，容易把真实运行中的 session 误判为死
     # session 并 kill 掉用户现场。已有 session 一律复用/attach，不自动销毁。
@@ -1192,12 +1201,12 @@ start_harness() {
 show_status() {
   cleanup_legacy_sessions
   echo ""
-  if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+  if tmux_has_exact_session "$SESSION_NAME"; then
     ok "Solar Harness Product Delivery 运行中 ($SESSION_NAME)"
     echo ""
     tmux list-windows -t "$SESSION_NAME" 2>/dev/null | sed 's/^/  /'
     echo ""
-    if tmux has-session -t "$LAB_SESSION_NAME" 2>/dev/null; then
+    if tmux_has_exact_session "$LAB_SESSION_NAME"; then
       ok "Solar Harness Parallel Builder Lab 运行中 ($LAB_SESSION_NAME)"
       echo ""
       tmux list-windows -t "$LAB_SESSION_NAME" 2>/dev/null | sed 's/^/  /'
@@ -1219,7 +1228,7 @@ show_status() {
       fi
     done
   else
-    if tmux has-session -t "$LAB_SESSION_NAME" 2>/dev/null; then
+    if tmux_has_exact_session "$LAB_SESSION_NAME"; then
       ok "Solar Harness Parallel Builder Lab 运行中 ($LAB_SESSION_NAME)"
       echo ""
       tmux list-windows -t "$LAB_SESSION_NAME" 2>/dev/null | sed 's/^/  /'
@@ -1245,7 +1254,7 @@ kill_harness() {
   if [[ -f "$HARNESS_DIR/lib/run_process_registry.py" ]]; then
     python3 "$HARNESS_DIR/lib/run_process_registry.py" teardown --run-id harness --grace 5 >/dev/null 2>&1 || true
   fi
-  if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+  if tmux_has_exact_session "$SESSION_NAME"; then
     log "关闭..."
     # Mark active sprints as interrupted
     for f in "$SPRINTS_DIR"/*.status.json; do
@@ -1268,7 +1277,7 @@ PY
     tmux kill-session -t "$SESSION_NAME"
     killed=1
   fi
-  if tmux has-session -t "$LAB_SESSION_NAME" 2>/dev/null; then
+  if tmux_has_exact_session "$LAB_SESSION_NAME"; then
     tmux kill-session -t "$LAB_SESSION_NAME"
     killed=1
   fi
@@ -1314,7 +1323,7 @@ pane_process_persona_simple() {
 
 detect_pane_by_persona_simple() {
   local session="$1" window="$2" persona="$3" fallback="$4"
-  tmux has-session -t "$session" 2>/dev/null || { echo "$fallback"; return 0; }
+  tmux_has_exact_session "$session" || { echo "$fallback"; return 0; }
   local idx target proc_persona content
   while IFS= read -r idx; do
     [[ -z "$idx" ]] && continue
@@ -1348,7 +1357,7 @@ write_parallel_lab_state() {
 
 ensure_parallel_builder_lab() {
   local work_dir="${1:-$(pwd)}"
-  tmux has-session -t "$LAB_SESSION_NAME" 2>/dev/null || return 0
+  tmux_has_exact_session "$LAB_SESSION_NAME" || return 0
   local state_file="$HARNESS_DIR/state/parallel-builder-lab.env"
   local desired_matrix matrix_label
   desired_matrix="$(solar_lab_builder_matrix)"
@@ -1408,7 +1417,7 @@ start_extension() {
 
   # 第二屏必须是独立 session。不要做成同一 session 的 window，否则两个终端
   # attach 同一 session 时会互相切 window，看起来像镜像。
-  if tmux has-session -t "$LAB_SESSION_NAME" 2>/dev/null; then
+  if tmux_has_exact_session "$LAB_SESSION_NAME"; then
     ensure_parallel_builder_lab "$work_dir"
     ok "Parallel Builder Lab 已在独立 session 运行 ($LAB_SESSION_NAME)"
     attach_or_print "$LAB_SESSION_NAME"
@@ -2011,7 +2020,7 @@ wake_sprint() {
   log "恢复 Sprint: ${sid} (当前状态: ${st})"
 
   # Step 1: 确保 tmux session 存在
-  if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+  if ! tmux_has_exact_session "$SESSION_NAME"; then
     warn "tmux session 不存在，重建..."
     # 用当前目录启动 (不 attach)
     local work_dir
@@ -3089,7 +3098,7 @@ models_live_route_check() {
     printf 'skipped: tmux unavailable\n'
     return 2
   fi
-  if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+  if ! tmux_has_exact_session "$SESSION_NAME"; then
     printf 'skipped: session %s unavailable\n' "$SESSION_NAME"
     return 2
   fi
@@ -3471,7 +3480,7 @@ print(json.dumps({
     intake_request --no-dispatch "$@"
     ;;
   attach)
-    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+    if tmux_has_exact_session "$SESSION_NAME"; then
       attach_or_print
     else
       err "未运行"
@@ -3481,7 +3490,7 @@ print(json.dumps({
     shift || true
     if [[ "${1:-}" == "tui" ]]; then
       shift || true
-      if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+      if ! tmux_has_exact_session "$SESSION_NAME"; then
         err "Harness 未运行，先启动: $0"
         exit 1
       fi
@@ -3585,9 +3594,9 @@ print(json.dumps({
     case "${2:-start}" in
       start)
         _live_pids="$(_status_server_live_pids || true)"
-        if tmux has-session -t "$_SS_TMUX_SESSION" 2>/dev/null; then
+        if tmux_has_exact_session "$_SS_TMUX_SESSION"; then
           ok "Status server 已在运行 (tmux: $_SS_TMUX_SESSION, port: $(cat "$_SS_PORT_FILE" 2>/dev/null || echo '?'))"
-        elif tmux has-session -t "$_SS_TMUX_LEGACY_SESSION" 2>/dev/null && _ss_tmux_session_owned "$_SS_TMUX_LEGACY_SESSION"; then
+        elif tmux_has_exact_session "$_SS_TMUX_LEGACY_SESSION" && _ss_tmux_session_owned "$_SS_TMUX_LEGACY_SESSION"; then
           ok "Status server 已在运行 (tmux: $_SS_TMUX_LEGACY_SESSION, port: $(cat "$_SS_PORT_FILE" 2>/dev/null || echo '?'))"
         elif [[ -f "$_SS_PID" ]] && kill -0 "$(cat "$_SS_PID")" 2>/dev/null; then
           ok "Status server 已在运行 (PID: $(cat "$_SS_PID"), port: $(cat "$_SS_PORT_FILE" 2>/dev/null || echo '?'))"
@@ -3622,10 +3631,10 @@ print(json.dumps({
         _recorded_port="$(cat "$_SS_PORT_FILE" 2>/dev/null || true)"
         _live_pids="$(_status_server_live_pids || true)"
         _live_ports="$(_status_server_live_ports || true)"
-        if tmux has-session -t "$_SS_TMUX_SESSION" 2>/dev/null; then
+        if tmux_has_exact_session "$_SS_TMUX_SESSION"; then
           tmux kill-session -t "$_SS_TMUX_SESSION" 2>/dev/null || true
           _stopped=1
-        elif tmux has-session -t "$_SS_TMUX_LEGACY_SESSION" 2>/dev/null && _ss_tmux_session_owned "$_SS_TMUX_LEGACY_SESSION"; then
+        elif tmux_has_exact_session "$_SS_TMUX_LEGACY_SESSION" && _ss_tmux_session_owned "$_SS_TMUX_LEGACY_SESSION"; then
           # Pre-scoping servers of THIS harness live under the legacy fixed
           # name; another harness's server under that name is not ours to
           # kill (G3 run-2 fix).
@@ -3678,11 +3687,11 @@ print(json.dumps({
         ;;
       status)
         _live_pids="$(_status_server_live_pids || true)"
-        if tmux has-session -t "$_SS_TMUX_SESSION" 2>/dev/null; then
+        if tmux_has_exact_session "$_SS_TMUX_SESSION"; then
           _port=$(cat "$_SS_PORT_FILE" 2>/dev/null || echo "8765")
           ok "运行中 (tmux: $_SS_TMUX_SESSION, port: $_port)"
           curl -s "http://127.0.0.1:$_port/healthz" 2>/dev/null && echo || true
-        elif tmux has-session -t "$_SS_TMUX_LEGACY_SESSION" 2>/dev/null && _ss_tmux_session_owned "$_SS_TMUX_LEGACY_SESSION"; then
+        elif tmux_has_exact_session "$_SS_TMUX_LEGACY_SESSION" && _ss_tmux_session_owned "$_SS_TMUX_LEGACY_SESSION"; then
           _port=$(cat "$_SS_PORT_FILE" 2>/dev/null || echo "8765")
           ok "运行中 (tmux: $_SS_TMUX_LEGACY_SESSION, port: $_port)"
           curl -s "http://127.0.0.1:$_port/healthz" 2>/dev/null && echo || true
@@ -4400,7 +4409,7 @@ PY
     ;;
   reload)
     # Sprint 20260423-062851 D3: 热加载 coordinator (kill + watchdog 拉新)
-    if ! tmux has-session -t solar-harness 2>/dev/null; then
+    if ! tmux_has_exact_session "solar-harness"; then
       err "tmux session solar-harness 不存在, 无法 reload"
       exit 1
     fi
@@ -4855,7 +4864,7 @@ PY
         case "${1:-status}" in
           start)
             _interval="${2:-60}"
-            if tmux has-session -t "$_reingest_session" 2>/dev/null; then
+            if tmux_has_exact_session "$_reingest_session"; then
               ok "wiki reingest scheduler already running ($_reingest_session)"
             else
               _reingest_panes="${SOLAR_REINGEST_PANES:-}"
@@ -4875,7 +4884,7 @@ PY
             "$_reingest_scheduler" run-once
             ;;
           status)
-            if tmux has-session -t "$_reingest_session" 2>/dev/null; then
+            if tmux_has_exact_session "$_reingest_session"; then
               ok "wiki reingest scheduler running ($_reingest_session)"
             else
               warn "wiki reingest scheduler not running ($_reingest_session)"
@@ -4956,7 +4965,7 @@ PY
         _qmd_proxy_start() {
           [[ -f "$_QMD_PROXY" ]] || { err "qmd IPv4 proxy missing: $_QMD_PROXY"; return 1; }
           mkdir -p "$HARNESS_DIR/run"
-          if tmux has-session -t "$_QMD_PROXY_SESSION" 2>/dev/null; then
+          if tmux_has_exact_session "$_QMD_PROXY_SESSION"; then
             return 0
           fi
           if [[ -f "$_QMD_PROXY_PID" ]]; then
