@@ -78,6 +78,34 @@ while IFS= read -r line; do
 done < <(git ls-files -s -- 'scripts/*.sh')
 [ "$BAD_MODE" -eq 0 ] && ok "all shebang scripts executable"
 
+# ---- check 3b: every tracked shell file parses -----------------------------
+# The harness component and desktop packages copy broad source trees, not only
+# scripts/.  A dormant shell file is therefore still shipped code.  Parse the
+# complete tracked shell surface so an unreferenced legacy helper cannot evade
+# the release gate and land broken in an install.
+log "check 3b: all tracked shell files pass bash -n"
+BAD_SYNTAX=0
+while IFS= read -r path; do
+    # A deliberate deletion remains in `git ls-files` until it is staged.  The
+    # release tree cannot contain a missing file, so skip that pre-commit state
+    # and parse every tracked shell file that will actually remain.
+    [ -f "$path" ] || continue
+    if ! syntax_error="$(bash -n "$path" 2>&1)"; then
+        fail "$path does not parse: $(printf '%s' "$syntax_error" | head -n 1)"
+        BAD_SYNTAX=1
+    fi
+done < <(git ls-files '*.sh')
+[ "$BAD_SYNTAX" -eq 0 ] && ok "all tracked shell files parse"
+
+# ---- check 3c: shipped runtime cannot contain placeholder proof ------------
+log "check 3c: shipped runtime contains no placeholder verification command"
+PLACEHOLDER_PROOF="$(git grep -nF 'echo placeholder' -- bin core harness components.d 2>/dev/null || true)"
+if [ -n "$PLACEHOLDER_PROOF" ]; then
+    fail "placeholder proof command found in shipped runtime: $(printf '%s' "$PLACEHOLDER_PROOF" | head -n 1)"
+else
+    ok "no placeholder proof command in shipped runtime"
+fi
+
 # ---- check 4: intra-repo script references exist (PKG-004) ----------------
 log "check 4: scripts/ referenced paths exist"
 BAD_REF=0
