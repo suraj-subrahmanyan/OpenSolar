@@ -106,6 +106,43 @@ def test_watchdog_session_probe_rejects_tmux_prefix_match(tmp_path: Path):
         )
 
 
+def test_product_mode_watchdog_does_not_launch_intentionally_idle_persona_panes(tmp_path: Path):
+    harness = tmp_path / "harness"
+    (harness / "run").mkdir(parents=True)
+    (harness / "sprints").mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    tmux_log = tmp_path / "tmux.log"
+    fake_tmux = fake_bin / "tmux"
+    fake_tmux.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\\n' \"$*\" >> \"$TMUX_LOG\"\n"
+        "if [[ \"${1:-}\" == list-sessions ]]; then\n"
+        "  printf '%s\\n' \"$SOLAR_HARNESS_SESSION\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    fake_tmux.chmod(0o755)
+
+    result = _source_watchdog(
+        'check_panes; cat "$TMUX_LOG"',
+        env={
+            "HARNESS_DIR": str(harness),
+            "SOLAR_PRODUCT_MODE": "1",
+            "SOLAR_HARNESS_SESSION": "solar-rc9-installed-e2e",
+            "SOLAR_HARNESS_LAB_SESSION": "solar-rc9-installed-e2e-lab",
+            "TMUX_LOG": str(tmux_log),
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = result.stdout.splitlines()
+    assert calls == ["list-sessions -F #{session_name}"], calls
+
+
 def _tmp_harness(tmp_path: Path) -> Path:
     harness = tmp_path / "harness"
     (harness / "run").mkdir(parents=True)

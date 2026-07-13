@@ -399,6 +399,14 @@ check_panes() {
 
   ensure_tmux_sessions
 
+  # Product mode deliberately leaves the four persona panes as viewers while
+  # the governed operator pool executes work.  Treating those idle shells as
+  # crashed personas silently launches a second execution path, spends quota,
+  # and can race the operator pool.
+  case "${SOLAR_PRODUCT_MODE:-0}" in
+    1|true|yes|on) return 0 ;;
+  esac
+
   if [[ -f "$SESSION_RECOVERY_MARKER" ]]; then
     local recovered_at grace_elapsed
     recovered_at=$(cat "$SESSION_RECOVERY_MARKER" 2>/dev/null || echo 0)
