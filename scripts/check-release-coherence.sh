@@ -110,6 +110,22 @@ else
     fail "bin/solar has no version-compare guard (updates cannot refuse downgrades)"
 fi
 
+# ---- check 6: receipt.sh channel fallback derives from VERSION ------------
+# PKG-001 sibling found by real-machine install verification (2026-07-13): a
+# direct install.sh run (dev tree, desktop-bundled Resources/harness) recorded
+# channel v1.0.0-rc.6 from a hardcoded fallback in receipt.sh, so the very
+# first `solar update` hit the downgrade guard. The fallback must be derived
+# from the VERSION file, never a literal tag that goes stale at the next cut.
+log "check 6: receipt.sh channel fallback derives from VERSION (PKG-001 sibling)"
+RECEIPT=lib/installer/receipt.sh
+if grep -Eq 'SOLAR_CHANNEL"\) or "v[0-9]' "$RECEIPT"; then
+    fail "receipt.sh hardcodes a channel fallback tag (grep: 'or \"v<digit>'); derive it from VERSION instead"
+elif ! grep -q 'channel_fallback' "$RECEIPT"; then
+    fail "receipt.sh has no channel_fallback derivation (channel fallback must come from the VERSION file)"
+else
+    ok "receipt channel fallback is VERSION-derived"
+fi
+
 if [ "$FAIL" -eq 0 ]; then
     log "release-coherence: PASS"
     exit 0
