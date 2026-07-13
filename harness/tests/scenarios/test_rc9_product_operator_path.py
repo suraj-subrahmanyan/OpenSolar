@@ -14,6 +14,7 @@ evaluators.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -86,6 +87,22 @@ def test_dispatcher_honors_explicit_product_pool_kill_switch(monkeypatch: pytest
     monkeypatch.setenv("SOLAR_PRODUCT_MODE", "1")
     monkeypatch.setenv("SOLAR_GRAPH_BUILDER_OPERATOR_POOL", "0")
     assert gnd._builder_operator_pool_enabled() is False
+
+
+def test_product_pool_slots_use_provider_policy_available_count(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Forbidden-provider idle workers must not become virtual DAG slots."""
+
+    monkeypatch.setattr(gnd, "_builder_operator_pool_enabled", lambda: True)
+
+    class Completed:
+        returncode = 0
+        stdout = json.dumps({"total_available": 2, "total_policy_available": 0})
+
+    monkeypatch.setattr(gnd.subprocess, "run", lambda *args, **kwargs: Completed())
+
+    assert gnd._builder_operator_pool_available_count() == 0
 
 
 def _stub_direct_pane_discovery(monkeypatch: pytest.MonkeyPatch) -> None:

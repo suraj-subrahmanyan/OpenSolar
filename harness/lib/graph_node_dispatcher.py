@@ -7005,11 +7005,16 @@ def _builder_operator_pool_available_count() -> int:
         data = json.loads(completed.stdout)
     except Exception:
         return 0
+    policy_count_present = "total_policy_available" in data
+    capacity_key = "total_policy_available" if policy_count_present else "total_available"
     try:
-        available = int(data.get("total_available") or 0)
+        available = int(data.get(capacity_key) or 0)
     except Exception:
         available = 0
-    if available <= 0:
+    # Older pm_dispatch payloads have no policy-aware total, so retain their
+    # group fallback.  A present policy-aware zero is authoritative: falling
+    # back to all-provider groups would recreate phantom product capacity.
+    if available <= 0 and not policy_count_present:
         groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
         for group in groups.values():
             if not isinstance(group, dict):

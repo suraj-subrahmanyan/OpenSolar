@@ -2355,6 +2355,7 @@ def builder_pool_snapshot(recover: bool = False) -> dict[str, Any]:
     groups: dict[str, dict[str, Any]] = {}
     rows: list[dict[str, Any]] = []
     recovery_actions: list[dict[str, Any]] = []
+    total_policy_available = 0
     for group, spec in groups_cfg.items():
         groups[group] = {
             "desired": int(policy_mod.pool_group_desired(group, policy) or (spec or {}).get("desired", 0)),
@@ -2375,6 +2376,7 @@ def builder_pool_snapshot(recover: bool = False) -> dict[str, Any]:
         op = {"operator_id": op_id, **dict(spec)}
         if not policy_mod.is_pool_member(op):
             continue
+        provider_policy_eligible = _operator_matches_provider_policy(op)
         group = policy_mod.infer_builder_group(op) or "unknown"
         groups.setdefault(
             group,
@@ -2402,6 +2404,8 @@ def builder_pool_snapshot(recover: bool = False) -> dict[str, Any]:
         block_type = str(block_info.get("block_type") or "none")
         if ok:
             groups[group]["available"] += 1
+            if provider_policy_eligible:
+                total_policy_available += 1
         else:
             groups[group]["blocked"] += 1
             if block_type in {"cooldown", "quota_exhausted", "auth_expired", "health", "busy", "disabled"}:
@@ -2429,6 +2433,7 @@ def builder_pool_snapshot(recover: bool = False) -> dict[str, Any]:
                 "enabled": bool(spec.get("enabled", False)),
                 "runtime_state": state,
                 "available": ok,
+                "provider_policy_eligible": provider_policy_eligible,
                 "reason": reason or "ok",
                 **block_info,
             }
@@ -2459,6 +2464,12 @@ def builder_pool_snapshot(recover: bool = False) -> dict[str, Any]:
         "total_desired": total_desired,
         "total_configured": total_configured,
         "total_available": total_available,
+        # Keep total_available as an all-provider health view, but expose the
+        # capacity the current dispatch policy can actually use.  Product DAG
+        # scheduling must not create virtual slots from an idle forbidden
+        # provider while its sole eligible builder is busy.
+        "total_policy_available": total_policy_available,
+        "provider_policy": _provider_policy_label(),
         "available_ratio": round(ratio, 3),
         "recommended_action": recommended_action,
         "recovery_actions": recovery_actions,
