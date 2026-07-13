@@ -713,6 +713,16 @@ DEEPRESEARCH_GATE_ARTIFACT_RE = re.compile(
     r"research_eval|report_ast|final\.md|final_report|evidence\.jsonl|claims\.jsonl",
     re.I,
 )
+# P7 R1: source-pack artifacts vs report/claim artifacts. A node whose
+# declarations are ONLY source-pack files is judged by the retrieval
+# closeout (pack integrity), never by the final-report closeout it could
+# not truthfully satisfy. Declaration-keyed: writing undeclared report
+# files does not dodge the report gate, declaring them opts back in.
+RETRIEVAL_PACK_ARTIFACT_RE = re.compile(r"sources\.jsonl|evidence\.jsonl", re.I)
+REPORT_ARTIFACT_RE = re.compile(
+    r"research_eval|report_ast|final\.md|final_report|claims\.jsonl",
+    re.I,
+)
 
 
 def _node_capabilities(node: dict[str, Any]) -> set[str]:
@@ -735,17 +745,7 @@ def _node_requires_human_search(node: dict[str, Any]) -> bool:
     return bool(re.search(r"external[_ -]?search|web[_ -]?search|academic[_ -]?search|source[_ -]?search|contradiction[_ -]?search", haystack))
 
 
-def _node_requires_deepresearch_quality_gate(node: dict[str, Any]) -> bool:
-    explicit = node.get("research_quality_gate_required")
-    if explicit is False:
-        return False
-    if explicit is True:
-        return True
-    caps = _node_capabilities(node)
-    if caps & DEEPRESEARCH_GATE_CAPABILITIES:
-        return True
-    if any(DEEPRESEARCH_GATE_CAPABILITY_RE.match(cap) for cap in caps):
-        return True
+def _node_research_artifact_text(node: dict[str, Any]) -> str:
     artifact_values: list[str] = []
     artifacts = node.get("artifacts") if isinstance(node.get("artifacts"), dict) else {}
     artifact_values.extend(str(value) for value in artifacts.values())
@@ -764,12 +764,33 @@ def _node_requires_deepresearch_quality_gate(node: dict[str, Any]) -> bool:
         artifact_values.append(raw_scope)
     elif isinstance(raw_scope, list):
         artifact_values.extend(str(item) for item in raw_scope)
-    artifact_text = " ".join(artifact_values).lower()
-    return bool(DEEPRESEARCH_GATE_ARTIFACT_RE.search(artifact_text))
+    return " ".join(artifact_values).lower()
+
+
+def _node_requires_deepresearch_quality_gate(node: dict[str, Any]) -> bool:
+    explicit = node.get("research_quality_gate_required")
+    if explicit is False:
+        return False
+    if explicit is True:
+        return True
+    caps = _node_capabilities(node)
+    if caps & DEEPRESEARCH_GATE_CAPABILITIES:
+        return True
+    if any(DEEPRESEARCH_GATE_CAPABILITY_RE.match(cap) for cap in caps):
+        return True
+    return bool(DEEPRESEARCH_GATE_ARTIFACT_RE.search(_node_research_artifact_text(node)))
+
+
+def _node_declares_retrieval_only(node: dict[str, Any]) -> bool:
+    text = _node_research_artifact_text(node)
+    return bool(RETRIEVAL_PACK_ARTIFACT_RE.search(text)) and not REPORT_ARTIFACT_RE.search(text)
 
 
 def _deepresearch_quality_gate_eval_instruction(node: dict[str, Any], eval_json: str | Path) -> str:
     if _node_requires_deepresearch_quality_gate(node):
+        if _node_declares_retrieval_only(node):
+            return """- 本 node 是 retrieval-only（只产出 source pack：sources.jsonl + evidence.jsonl + extracts/）。不要运行 `solar-harness research eval-artifacts`，也不要因为缺少 research_eval.json / report_ast / final.md 而 FAIL 本 node。
+  deterministic retrieval closeout 会在 review 阶段自动运行（完整性检查：每个 source 的 extract 在盘、content_sha256 校验通过、evidence 的 source_id 可解析）。Leave `research_quality_gate` empty — 由 review 阶段写入。"""
         return f"""- 本 node 明确涉及 DeepResearch artifacts / research evidence ledger / claim ledger / citation verification / research report compiler，必须先运行 deterministic artifact gate：
   ```bash
   solar-harness research eval-artifacts --eval-json "<path-to-research_eval.json>" --json
@@ -1211,12 +1232,53 @@ def _discover_deepresearch_artifacts(sid: str, node: dict[str, Any], eval_json: 
     return artifacts
 
 
+def _retrieval_pack_dir(sid: str, node: dict[str, Any], eval_json: str | Path) -> Path:
+    """Resolve the directory a retrieval-only node's declared pack lives in.
+
+    Declared sources.jsonl/evidence.jsonl paths resolve against the sprint
+    workdir first (where write_scope paths land), then the sprint dir and
+    the eval json's directory. When nothing exists on disk yet, return the
+    best-existing base so the retrieval closeout reports the missing pack
+    truthfully instead of erroring."""
+    values: list[str] = []
+    artifacts = node.get("artifacts") if isinstance(node.get("artifacts"), dict) else {}
+    values.extend(str(v) for v in artifacts.values())
+    raw_scope = node.get("write_scope", [])
+    if isinstance(raw_scope, str):
+        values.append(raw_scope)
+    elif isinstance(raw_scope, list):
+        values.extend(str(item) for item in raw_scope)
+    eval_path = Path(eval_json).expanduser()
+    bases = [SPRINTS_DIR / sid / "workdir", SPRINTS_DIR / sid]
+    if str(eval_path):
+        bases.append(eval_path.parent)
+    rel_candidates: list[Path] = []
+    for value in values:
+        if value.lower().endswith(("sources.jsonl", "evidence.jsonl")):
+            rel_candidates.append(Path(value).parent)
+        else:
+            rel_candidates.append(Path(value))
+    for rel in rel_candidates:
+        for base in bases:
+            candidate = rel if rel.is_absolute() else base / rel
+            if (candidate / "sources.jsonl").is_file():
+                return candidate
+    for base in bases:
+        if (base / "sources.jsonl").is_file():
+            return base
+    for base in bases:
+        if base.is_dir():
+            return base
+    return eval_path.parent
+
+
 def _deepresearch_quality_gate_auto_run(sid: str, node: dict[str, Any], eval_json: str | Path) -> dict[str, Any]:
     """Run deterministic DeepResearch gate during closeout when evaluator omitted it."""
     try:
-        from research.evaluator import evaluate_final_closeout
+        from research.evaluator import evaluate_final_closeout, evaluate_retrieval_closeout
     except ImportError:
         evaluate_final_closeout = None
+        evaluate_retrieval_closeout = None
 
     if evaluate_final_closeout is None:
         return {
@@ -1228,6 +1290,28 @@ def _deepresearch_quality_gate_auto_run(sid: str, node: dict[str, Any], eval_jso
                 "verdict": "FAIL",
                 "errors": ["research_evaluator_unavailable"],
             },
+        }
+
+    # P7 R1: a retrieval-only node is judged on source-pack integrity —
+    # the final-report closeout would hard-fail it on artifacts it never
+    # declared (research_eval_json_missing), making governed retrieval
+    # untruthfully unbuildable.
+    if _node_declares_retrieval_only(node):
+        pack_dir = _retrieval_pack_dir(sid, node, eval_json)
+        closeout = evaluate_retrieval_closeout(pack_dir)
+        gate = {
+            "ok": bool(closeout.get("ok")),
+            "verdict": "PASS" if closeout.get("ok") else "FAIL",
+            "closeout_verdict": closeout.get("verdict", "hard_fail"),
+            "errors": closeout.get("issues") or [],
+            "retrieval_only": True,
+            "pack_dir": str(pack_dir),
+        }
+        return {
+            "present": True,
+            "ok": gate["ok"],
+            "auto_run": True,
+            "gate": gate,
         }
 
     artifacts = _discover_deepresearch_artifacts(sid, node, eval_json)
