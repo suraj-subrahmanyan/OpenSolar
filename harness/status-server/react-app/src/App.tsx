@@ -80,6 +80,7 @@ import {
 } from "./api";
 import type { AuthLoginStatus, AuthStatus } from "./api";
 import type { AgentRole } from "./format";
+import { nodeActor } from "./nodeActor";
 import {
   ROLE_META,
   ROLE_ORDER,
@@ -3395,28 +3396,12 @@ function processStepFromEvent(
   };
 }
 
-// Infer which agent a DAG node belongs to (node-based steps have no event actor),
-// so node logs attach the right artifacts (build->Builder, review->Evaluator, ...).
-function nodeActor(node: { [key: string]: unknown }): string {
-  const caps = (
-    Array.isArray(node.required_capabilities) ? node.required_capabilities : []
-  )
-    .map((cap) => asString(cap).toLowerCase())
-    .join(" ");
-  const text = `${asString(nodeId(node)).toLowerCase()} ${caps}`;
-  if (/eval|review|verdict|gate|accept/.test(text)) return "Evaluator";
-  if (/build|impl|code|frontend|backend|server|handoff/.test(text))
-    return "Builder";
-  if (/plan|design|dag|rout/.test(text)) return "Planner";
-  if (/spec|prd|intake|scope|product/.test(text)) return "PM";
-  return "Planner";
-}
-
 function processStepFromNode(
   node: { [key: string]: unknown },
   latest: boolean,
   phase: string,
 ): ProcessStep {
+  const actor = nodeActor(node);
   const status = asString(node.status, "pending");
   const tone = statusTone(status);
   const state: ProcessStepState =
@@ -3429,11 +3414,11 @@ function processStepFromNode(
           : "pending";
   return {
     id: `node-${nodeId(node)}`,
-    actor: nodeActor(node),
+    actor,
     node: nodeId(node),
     title: `${nodeId(node)} is ${status.replace(/_/g, " ")}`,
     summary: nodeTitle(node),
-    detail: `Planner DAG node ${nodeId(node)} is currently ${status.replace(/_/g, " ")}.`,
+    detail: `${actor} DAG node ${nodeId(node)} is currently ${status.replace(/_/g, " ")}.`,
     timestamp: "",
     state,
     tone:
