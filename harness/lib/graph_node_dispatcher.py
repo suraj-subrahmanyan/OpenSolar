@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Iterable
@@ -87,6 +88,11 @@ try:  # Lane 3 artifact manifest (R6); optional like the ledger
     import artifact_manifest as _artifact_manifest
 except Exception:  # pragma: no cover
     _artifact_manifest = None
+
+try:  # rc.9 user-workspace authority; optional for partial/legacy installs
+    import workspace_binding as _workspace_binding
+except Exception:  # pragma: no cover
+    _workspace_binding = None
 
 
 def _workflow_contract_guard(graph: dict[str, Any]) -> dict[str, Any] | None:
@@ -301,6 +307,93 @@ def _manifest_anchor(
                 break
         scope.append(text)
     return workdir, {"canonical": "workspace/"}, scope
+
+
+def _publish_verified_node_outputs(
+    sid: str,
+    node: dict[str, Any],
+    graph: dict[str, Any],
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Publish a certified-generic node's verified outputs to its user project.
+
+    The active cockpit binding makes this behavior opt-in for new/freshly
+    started runtimes while leaving legacy fixture graphs byte-compatible.  Once
+    a binding exists, sprint-captured context must agree with it; disagreement
+    fails closed so an old or foreign sprint cannot write into the current
+    project.
+    """
+    if not _graph_is_certified_generic(graph):
+        return {"required": False, "ok": True, "skipped": "not_certified_generic"}
+    if _artifact_manifest is None or _workspace_binding is None:
+        return {
+            "required": True,
+            "ok": False,
+            "reason": "workspace_publish_modules_unavailable",
+        }
+    active = _workspace_binding.read_active_workspace(HARNESS_DIR)
+    if active is None:
+        return {"required": False, "ok": True, "skipped": "no_active_workspace_binding"}
+
+    node_id = str(node.get("id") or "").strip()
+    workspace = _workspace_binding.sprint_workspace_root(
+        SPRINTS_DIR,
+        sid,
+        harness_dir=HARNESS_DIR,
+    )
+    if workspace is None:
+        return {
+            "required": True,
+            "ok": False,
+            "reason": "workspace_binding_mismatch",
+            "active_workspace": str(active),
+        }
+    manifest = _artifact_manifest.read_manifest(SPRINTS_DIR, sid, node_id)
+    rows = manifest.get("rows") if isinstance(manifest.get("rows"), list) else []
+    if not rows:
+        return {"required": False, "ok": True, "skipped": "no_declared_outputs"}
+    if dry_run:
+        return {
+            "required": True,
+            "ok": True,
+            "dry_run": True,
+            "workspace_root": str(workspace),
+            "published": [],
+        }
+
+    publish = _artifact_manifest.publish_workspace_outputs(manifest, workspace)
+    payload = {
+        "schema": "solar.workspace_publish.v1",
+        "sid": sid,
+        "node_id": node_id,
+        "published_at": _utc_now(),
+        "required": True,
+        **publish,
+    }
+    sidecar = SPRINTS_DIR / f"{sid}.{_safe_node_id(node_id)}-publish.json"
+    try:
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary_name = tempfile.mkstemp(prefix=f".{sidecar.name}.", dir=sidecar.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_name, sidecar)
+        finally:
+            try:
+                Path(temporary_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+    except Exception as exc:
+        payload["ok"] = False
+        payload["reason"] = "workspace_publish_sidecar_write_failed"
+        payload.setdefault("errors", []).append(f"{type(exc).__name__}: {exc}")
+        return payload
+    payload["sidecar"] = str(sidecar)
+    return payload
 
 
 MULTI_TASK_RUN_DIR = HARNESS_DIR / "run" / "multi-task"
@@ -1690,13 +1783,13 @@ def _canonical_output_paths_block(node: dict[str, Any]) -> str:
     if not rows:
         return (
             "## Canonical Output Paths\n\n"
-            "- No sprint artifact outputs declared. For source-code files, use the current repository/worktree path."
+            "- No separate sprint sidecar paths are declared here. Obey the active output root below; "
+            "never invent a second output location."
         )
     return (
         "## Canonical Output Paths\n\n"
-        "Builder panes may run from an isolated role worktree. For sprint artifacts, do not rely on "
-        "relative `harness/sprints/...` paths; write to the canonical absolute paths below so the "
-        "scheduler and evaluator can find them:\n\n"
+        "The paths below are governance sidecars stored beside the sprint. They do not create a "
+        "second root for source-code outputs. Write each listed sidecar to its exact absolute path:\n\n"
         + "\n".join(rows)
     )
 
@@ -1715,10 +1808,12 @@ def _generic_workdir_block(sid: str, graph: dict[str, Any]) -> str:
     workdir = SPRINTS_DIR / sid / "workdir"
     return (
         "## Sprint Workdir\n\n"
-        f"Your working directory is the sprint workdir: `{workdir}`\n"
+        f"The sole staging write root for declared product outputs is: `{workdir}`\n"
         "(a DIRECTORY under the sprint id — `" + sid + "/workdir`).\n"
-        "Write every declared output RELATIVE to it (e.g. `workspace/<file>`), or use\n"
-        "the absolute form above. NEVER construct a `sprints/" + sid + ".workdir`\n"
+        "Write every declared product output RELATIVE to it (for example, `workspace/<file>`).\n"
+        "Do not mirror product outputs into the pane's launch repository or any other workspace.\n"
+        "After independent gates pass, Solar publishes the verified `workspace/...` files once\n"
+        "into the user workspace. NEVER construct a `sprints/" + sid + ".workdir`\n"
         "path: sprint FILES use dot-suffixed names (`" + sid + ".plan.md`),\n"
         "but the workdir is the `" + sid + "/workdir` directory."
     )
@@ -2868,6 +2963,44 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
                         }
                     )
                     continue
+            workspace_publish: dict[str, Any] = {"required": False}
+            if eval_verdict == "PASS":
+                workspace_publish = _publish_verified_node_outputs(sid, node, graph)
+                if workspace_publish.get("required") and not workspace_publish.get("ok"):
+                    _ledger_record(
+                        sid,
+                        node_id=node_id,
+                        kind="gate_check",
+                        author={"type": "policy"},
+                        verdict="block",
+                        note="workspace_publish_failed",
+                    )
+                    _ledger_transition(
+                        sid,
+                        node_id,
+                        status,
+                        "needs_human_review",
+                        "_reconcile_existing_dispatches",
+                        note=str(workspace_publish.get("reason") or "workspace_publish_failed"),
+                    )
+                    set_node_status(graph, node_id, "needs_human_review")
+                    node["workspace_publish"] = workspace_publish
+                    node["next_action"] = (
+                        "Restore the sprint-to-workspace binding or repair the unsafe manifest, "
+                        "then re-run reconciliation."
+                    )
+                    node["updated_at"] = _utc_now()
+                    repaired.append(
+                        {
+                            "node": node_id,
+                            "status": "needs_human_review",
+                            "reason": "workspace_publish_failed",
+                            "workspace_publish": workspace_publish,
+                        }
+                    )
+                    continue
+                if workspace_publish.get("required"):
+                    node["workspace_publish"] = workspace_publish
             node.pop("assigned_to", None)
             node.pop("dispatch_id", None)
             verdict_status = "passed" if eval_verdict == "PASS" else "failed"
@@ -3897,6 +4030,16 @@ def _emit_guard_resource_sidecars(sid: str, node: dict[str, Any]) -> dict[str, A
     targets = _collect_guard_scan_targets(sid, node)
     scanned = [str(t) for t in targets]
     matches = _scan_paths_for_secrets(targets)
+    user_workspace = None
+    if _workspace_binding is not None:
+        try:
+            user_workspace = _workspace_binding.sprint_workspace_root(
+                SPRINTS_DIR,
+                sid,
+                harness_dir=HARNESS_DIR,
+            )
+        except Exception:
+            user_workspace = None
     guard = {
         "node_id": node_id,
         "decision": "block" if matches else "allow",
@@ -3908,11 +4051,12 @@ def _emit_guard_resource_sidecars(sid: str, node: dict[str, Any]) -> dict[str, A
     resource = {
         "node_id": node_id,
         "resource": "resource.repo-workspace",
-        "workspace_root": str(HARNESS_DIR),
+        "workspace_root": str(user_workspace or ""),
+        "staging_root": str(SPRINTS_DIR / sid / "workdir"),
         "write_scope": [str(x) for x in (node.get("write_scope") or [])],
         "scanned_paths": scanned,
-        "in_scope": True,
-        "bound": True,
+        "in_scope": bool(user_workspace),
+        "bound": bool(user_workspace),
         "checked_at": _utc_now(),
     }
     try:
@@ -9333,6 +9477,30 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
             "eval_json": str(eval_json or _eval_json_file(sid, node_id)),
             "handoff_md": str(self_graded_handoff),
         }
+    workspace_publish: dict[str, Any] = {"required": False}
+    if status == "passed":
+        workspace_publish = _publish_verified_node_outputs(
+            sid,
+            node,
+            graph,
+            dry_run=dry_run,
+        )
+        if workspace_publish.get("required") and not workspace_publish.get("ok"):
+            _ledger_record(
+                sid,
+                node_id=node_id,
+                kind="gate_check",
+                author={"type": "policy"},
+                verdict="block",
+                note="workspace_publish_failed",
+            )
+            return {
+                "ok": False,
+                "reason": "workspace_publish_failed",
+                "node": node_id,
+                "status": "blocked",
+                "workspace_publish": workspace_publish,
+            }
     parent = mark_node_result(graph, node_id, status, gate_status=status, note="; ".join(note_parts) or None)
     node["status"] = status
     node["updated_at"] = _utc_now()
@@ -9342,6 +9510,8 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
         node["proof_gate"] = proof_gate
     if research_quality_gate.get("required"):
         node["research_quality_gate"] = research_quality_gate.get("gate") or research_quality_gate
+    if workspace_publish.get("required"):
+        node["workspace_publish"] = workspace_publish
     worker_pane = str(node.get("assigned_to") or "")
     worker_dispatch_id = str(node.get("dispatch_id") or "")
     effect_result: dict[str, Any] = {}
@@ -9405,6 +9575,7 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
         "capability_effect": effect_result,
         "proof_gate": proof_gate,
         "research_quality_gate": research_quality_gate,
+        "workspace_publish": workspace_publish,
         "coverage_refresh": coverage_refresh,
     }
 

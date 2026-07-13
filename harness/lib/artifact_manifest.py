@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -287,3 +288,182 @@ def publish_canonical(manifest: Dict[str, Any], canonical_root: Any) -> List[Dic
     except Exception:
         pass
     return copies
+
+
+def _workspace_relative_path(row: Dict[str, Any]) -> Path:
+    """Map a staged ``workspace/...`` declaration into the user's root.
+
+    The explicit prefix is an authority boundary, not a directory to recreate
+    in the user's project.  Rejecting every ambiguous spelling keeps a
+    manifest from turning into an arbitrary filesystem-copy instruction.
+    """
+    raw = str(row.get("rel_path") or row.get("declared") or "").strip()
+    normalized = raw.replace("\\", "/").rstrip("/")
+    if not normalized or normalized.startswith("/") or re.match(r"^[A-Za-z]:/", normalized):
+        raise ValueError(f"output path must be relative: {raw!r}")
+    parts = normalized.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ValueError(f"output path contains an unsafe segment: {raw!r}")
+    if parts[0] != "workspace" or len(parts) < 2:
+        raise ValueError(f"output path must start with workspace/: {raw!r}")
+    return Path(*parts[1:])
+
+
+def _has_symlink_from(root: Path, path: Path) -> bool:
+    """Return true when root or any lexical descendant component is a link."""
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return True
+    cursor = root
+    if cursor.is_symlink():
+        return True
+    for part in relative.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            return True
+    return False
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def publish_workspace_outputs(
+    manifest: Dict[str, Any],
+    workspace_root: Any,
+) -> Dict[str, Any]:
+    """Publish verified staging outputs once into the bound user workspace.
+
+    This is deliberately stricter than the legacy ``publish_canonical`` helper:
+    all rows are validated before the first copy, source and destination
+    symlinks are refused, declarations must live below ``workspace/``, and each
+    file is replaced atomically.  Existing staging evidence is never moved or
+    deleted.  Directory declarations are expanded without following links.
+    """
+    result: Dict[str, Any] = {
+        "ok": False,
+        "reason": "",
+        "workspace_root": "",
+        "published": [],
+        "errors": [],
+    }
+    try:
+        workspace = Path(str(workspace_root)).expanduser()
+        if not workspace.is_absolute():
+            raise ValueError("workspace root must be absolute")
+        if workspace.is_symlink() or not workspace.is_dir():
+            raise ValueError("workspace root must be an existing non-symlink directory")
+        workspace = workspace.resolve(strict=True)
+        result["workspace_root"] = str(workspace)
+
+        roots_payload = manifest.get("roots") if isinstance(manifest.get("roots"), dict) else {}
+        rows = manifest.get("rows") if isinstance(manifest.get("rows"), list) else []
+        operations: dict[Path, Path] = {}
+        directories: set[Path] = set()
+
+        if not rows:
+            raise ValueError("manifest has no output rows")
+
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                raise ValueError(f"manifest row {index} is not an object")
+            root_name = str(row.get("resolved_root") or "").strip()
+            source_text = str(row.get("path") or "").strip()
+            if not root_name or not source_text:
+                raise ValueError(f"manifest row {index} is unresolved")
+            root_text = str(roots_payload.get(root_name) or "").strip()
+            if not root_text:
+                raise ValueError(f"manifest row {index} references unknown root {root_name!r}")
+
+            source = Path(source_text).expanduser()
+            root = Path(root_text).expanduser()
+            if not source.is_absolute() or not root.is_absolute():
+                raise ValueError(f"manifest row {index} uses a relative source/root")
+            source_lexical = Path(os.path.abspath(source))
+            root_lexical = Path(os.path.abspath(root))
+            try:
+                source_lexical.relative_to(root_lexical)
+            except ValueError as exc:
+                raise ValueError(f"manifest row {index} escapes its resolved root") from exc
+            if _has_symlink_from(root_lexical, source_lexical):
+                raise ValueError(f"manifest row {index} source traverses a symlink")
+            try:
+                source_resolved = source_lexical.resolve(strict=True)
+                root_resolved = root_lexical.resolve(strict=True)
+                source_resolved.relative_to(root_resolved)
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise ValueError(f"manifest row {index} source is missing or outside its root") from exc
+
+            destination_rel = _workspace_relative_path(row)
+            destination = workspace / destination_rel
+            if source_resolved.is_file():
+                prior = operations.get(destination)
+                if prior is not None and prior != source_resolved:
+                    raise ValueError(f"multiple sources target {destination}")
+                operations[destination] = source_resolved
+                directories.add(destination.parent)
+            elif source_resolved.is_dir():
+                directories.add(destination)
+                for current, dirnames, filenames in os.walk(source_resolved, followlinks=False):
+                    current_path = Path(current)
+                    for name in [*dirnames, *filenames]:
+                        if (current_path / name).is_symlink():
+                            raise ValueError(f"manifest row {index} directory contains a symlink")
+                    relative_dir = current_path.relative_to(source_resolved)
+                    target_dir = destination / relative_dir
+                    directories.add(target_dir)
+                    for name in filenames:
+                        child_source = current_path / name
+                        child_target = target_dir / name
+                        prior = operations.get(child_target)
+                        if prior is not None and prior != child_source:
+                            raise ValueError(f"multiple sources target {child_target}")
+                        operations[child_target] = child_source
+            else:
+                raise ValueError(f"manifest row {index} is not a regular file or directory")
+
+        # Validate the complete destination set before mutating the workspace.
+        for destination in [*directories, *operations]:
+            try:
+                destination.relative_to(workspace)
+            except ValueError as exc:
+                raise ValueError(f"publish destination escapes workspace: {destination}") from exc
+            cursor = workspace
+            for part in destination.relative_to(workspace).parts:
+                cursor = cursor / part
+                if cursor.exists() or cursor.is_symlink():
+                    if cursor.is_symlink():
+                        raise ValueError(f"publish destination traverses a symlink: {cursor}")
+            if destination in operations and destination.exists() and not destination.is_file():
+                raise ValueError(f"file destination is not a regular file: {destination}")
+
+        for directory in sorted(directories, key=lambda path: (len(path.parts), str(path))):
+            directory.mkdir(parents=True, exist_ok=True)
+
+        published: List[Dict[str, Any]] = []
+        for destination, source in sorted(operations.items(), key=lambda item: str(item[0])):
+            fd, temporary_name = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+            os.close(fd)
+            temporary = Path(temporary_name)
+            try:
+                shutil.copy2(source, temporary, follow_symlinks=False)
+                with temporary.open("rb") as handle:
+                    os.fsync(handle.fileno())
+                digest = _sha256_file(temporary)
+                os.replace(temporary, destination)
+                published.append({"from": str(source), "to": str(destination), "sha256": digest})
+            finally:
+                temporary.unlink(missing_ok=True)
+
+        result["ok"] = True
+        result["published"] = published
+        return result
+    except Exception as exc:
+        result["reason"] = "workspace_publish_validation_failed"
+        result["errors"].append(f"{type(exc).__name__}: {exc}")
+        return result

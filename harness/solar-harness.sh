@@ -113,6 +113,44 @@ human_prefix() {
 
 ensure_dirs() { mkdir -p "$SPRINTS_DIR" "$HARNESS_DIR/personas" "$HARNESS_DIR/templates"; }
 
+persist_workspace_root() {
+  local candidate="${1:-}" source="${2:-harness_start}"
+  [[ -n "$candidate" ]] || { err "workspace root is empty"; return 1; }
+  [[ -f "$HARNESS_DIR/lib/workspace_binding.py" ]] || {
+    err "workspace binding helper missing: $HARNESS_DIR/lib/workspace_binding.py"
+    return 1
+  }
+  python3 "$HARNESS_DIR/lib/workspace_binding.py" bind \
+    --harness-dir "$HARNESS_DIR" --workspace-root "$candidate" --source "$source" >/dev/null
+}
+
+active_workspace_root() {
+  [[ -f "$HARNESS_DIR/lib/workspace_binding.py" ]] || return 1
+  python3 "$HARNESS_DIR/lib/workspace_binding.py" show --harness-dir "$HARNESS_DIR"
+}
+
+resolve_intake_workspace_root() {
+  local candidate="${SOLAR_INTENT_CONSUMER_WORKSPACE_ROOT:-${SOLAR_INTAKE_WORKSPACE_ROOT:-}}"
+  local had_explicit=0 had_binding=0 harness_real candidate_real
+  [[ -n "$candidate" ]] && had_explicit=1
+  if [[ -z "$candidate" ]]; then
+    candidate="$(active_workspace_root 2>/dev/null || true)"
+    [[ -n "$candidate" ]] && had_binding=1
+  fi
+  [[ -n "$candidate" ]] || candidate="$(pwd)"
+  [[ -d "$candidate" ]] || {
+    echo "[Harness] intake workspace does not exist: $candidate" >&2
+    return 1
+  }
+  candidate_real="$(cd "$candidate" && pwd -P)"
+  harness_real="$(cd "$HARNESS_DIR" && pwd -P)"
+  if [[ "$had_explicit" == "0" && "$had_binding" == "0" && "$candidate_real" == "$harness_real" ]]; then
+    echo "[Harness] no user workspace is bound; run 'solar harness start /path/to/project' first, or run intake from the project directory" >&2
+    return 1
+  fi
+  printf '%s\n' "$candidate_real"
+}
+
 # tmux treats a unique session-name prefix as a valid target.  Solar owns
 # several sessions whose names begin with "solar-harness" (dashboard, lab,
 # background work), so a prefix probe can mistake one of those for the main
@@ -1010,6 +1048,8 @@ start_harness() {
   local mode="${1:-3}"
   local work_dir="${2:-$(pwd)}"
   local skip_doctor="${3:-}"
+  [[ -d "$work_dir" ]] || { err "工作目录不存在: $work_dir"; return 1; }
+  work_dir="$(cd "$work_dir" && pwd -P)"
   # G4-lite run-3 deviation: --skip-doctor skipped the PRE-start doctor but the
   # coordinator-start D7 summaries still ran doctor.sh — honor the skip there too.
   [[ "$skip_doctor" == "--skip-doctor" ]] && export SOLAR_SKIP_DOCTOR=1
@@ -1056,6 +1096,19 @@ start_harness() {
     fi
     warn_if_product_delivery_layout_incomplete || true
     configure_product_delivery_labels
+    # Re-attaching must not silently rebind a live cockpit to a newly supplied
+    # argument. Keep its durable binding; recover once from the PM pane only
+    # for installs created before workspace binding existed.
+    local bound_workspace pane_workspace
+    bound_workspace="$(active_workspace_root 2>/dev/null || true)"
+    if [[ -z "$bound_workspace" ]]; then
+      pane_workspace="$(tmux display-message -p -t "$SESSION_NAME:Product Delivery.0" '#{pane_current_path}' 2>/dev/null || true)"
+      [[ -n "$pane_workspace" ]] || pane_workspace="$work_dir"
+      persist_workspace_root "$pane_workspace" "existing_cockpit_recovery" || {
+        err "无法恢复现有 cockpit 的用户工作区绑定"
+        return 1
+      }
+    fi
     if (( clean_start )); then
       reset_stale_runtime_state "already-running --clean"
     fi
@@ -1066,6 +1119,10 @@ start_harness() {
   fi
 
   ensure_dirs
+  persist_workspace_root "$work_dir" "harness_start" || {
+    err "无法绑定用户工作区，拒绝启动"
+    return 1
+  }
 
   # Fix 4: a brand-new cockpit must start from clean coordination state (no in-flight
   # work exists yet), so stale latches/leases/assignments from a prior session can't wall it.
@@ -1692,6 +1749,12 @@ intake_request() {
   [[ -n "$req" ]] || { err "intake 需要需求文本"; return 1; }
 
   ensure_dirs
+  local intake_workspace_root
+  intake_workspace_root="$(resolve_intake_workspace_root)" || return 1
+  persist_workspace_root "$intake_workspace_root" "intake" || {
+    err "无法绑定 intake 用户工作区"
+    return 1
+  }
 
   # P2 contracted intake (design §0): an explicit workflow_id routes through the
   # contract compiler — fail-closed, never a silent fall-through to the generic
@@ -1707,7 +1770,7 @@ intake_request() {
     wf_out=$(python3 "$HARNESS_DIR/lib/workflow_intake.py" \
       --workflow-id "$SOLAR_INTAKE_WORKFLOW_ID" \
       --request "$req" \
-      ${SOLAR_INTAKE_WORKSPACE_ROOT:+--workspace-root "$SOLAR_INTAKE_WORKSPACE_ROOT"} 2>&1)
+      --workspace-root "${SOLAR_INTAKE_WORKSPACE_ROOT:-$intake_workspace_root}" 2>&1)
     wf_rc=$?
     set -e
     if [[ "$wf_rc" != "0" ]]; then
@@ -1731,7 +1794,7 @@ intake_request() {
       --source-channel "${SOLAR_INTENT_SOURCE_CHANNEL:-cli_intake}" \
       --actor "${SOLAR_INTENT_ACTOR:-user}" \
       --device "${SOLAR_INTENT_DEVICE:-}" \
-      --repo "$(pwd)" \
+      --repo "$intake_workspace_root" \
       --text "$req" \
       --json 2>&1)
     intent_rc=$?
@@ -1742,7 +1805,9 @@ intake_request() {
   fi
   if [[ "$intent_rc" == "0" && -n "$intent_id" && -f "$HARNESS_DIR/lib/intent_consumer.py" ]] && ! should_epic_decompose_request "$req"; then
     set +e
-    consumer_out=$(SOLAR_HARNESS_SPRINTS_DIR="$SPRINTS_DIR" python3 "$HARNESS_DIR/lib/intent_consumer.py" consume \
+    consumer_out=$(SOLAR_HARNESS_SPRINTS_DIR="$SPRINTS_DIR" \
+      SOLAR_INTENT_CONSUMER_WORKSPACE_ROOT="$intake_workspace_root" \
+      python3 "$HARNESS_DIR/lib/intent_consumer.py" consume \
       --intent-id "$intent_id" \
       --json 2>&1)
     consumer_rc=$?
