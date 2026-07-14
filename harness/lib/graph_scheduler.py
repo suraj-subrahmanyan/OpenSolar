@@ -385,6 +385,9 @@ def _save_graph_state(path: Path, state: dict[str, Any]) -> None:
 
 def _save_closure_projection(path: Path, graph: dict[str, Any], state: dict[str, Any]) -> None:
     parent = parent_ready_check(graph)
+    failed_set = {str(item) for item in (parent.get("failed_nodes") or [])}
+    open_set = {str(item) for item in (parent.get("open_nodes") or [])}
+    terminal_failed_graph = bool(failed_set) and bool(open_set) and open_set.issubset(failed_set)
     existing: dict[str, Any] = {}
     if path.exists():
         try:
@@ -398,7 +401,12 @@ def _save_closure_projection(path: Path, graph: dict[str, Any], state: dict[str,
     record["sprint_id"] = _sprint_id_for_graph(graph)
     record["graph_ref"] = f"{record['sprint_id']}.task_graph.json" if record["sprint_id"] else str(path)
     record["graph_state_ref"] = str(state.get("graph_ref") or f"{record['sprint_id']}.task_dag.state.json")
-    record["status"] = "closed" if parent.get("ready") else "pending"
+    if parent.get("ready"):
+        record["status"] = "closed"
+    elif terminal_failed_graph:
+        record["status"] = "failed"
+    else:
+        record["status"] = "pending"
     record["all_nodes_passed"] = not parent.get("open_nodes") and not parent.get("failed_nodes")
     record["all_required_gates_passed"] = not parent.get("missing_gates")
     # No coverage artifact means unknown, not zero.  requirement_coverage owns
@@ -411,6 +419,8 @@ def _save_closure_projection(path: Path, graph: dict[str, Any], state: dict[str,
     record["updated_at"] = _now()
     if parent.get("ready") and not record.get("closed_at"):
         record["closed_at"] = record["updated_at"]
+    if terminal_failed_graph and not record.get("failed_at"):
+        record["failed_at"] = record["updated_at"]
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
