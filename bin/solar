@@ -620,6 +620,7 @@ result = {
     "paths": {},
     "python": {},
     "system": {},
+    "runtime": {},
     "models": {},
     "drift": [],
     "schema_version": None,
@@ -768,6 +769,7 @@ for name, item in system.items():
         result["warnings"].append("system dependency missing: " + name)
 
 lab_matrix = ""
+cfg = {}
 user_config = os.path.join(solar_home, "harness", "config", "solar-user-config.json")
 try:
     with open(user_config, encoding="utf-8") as f:
@@ -781,8 +783,69 @@ if not lab_matrix:
 zhipu_ready = credential_present({"ZHIPU_AUTH_TOKEN", "ZHIPU_API_KEY"})
 anthropic_ready = credential_present({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"})
 claude_cli = shutil.which("claude") or ""
+codex_cli = shutil.which("codex") or ""
 uses_glm = "glm" in lab_matrix.lower() or "zhipu" in lab_matrix.lower()
-all_claude_hint = "solar-harness models set-lab-matrix anthropic-sonnet,anthropic-sonnet,anthropic-sonnet,anthropic-sonnet"
+runtime_override = str(os.environ.get("SOLAR_PANE_RUNTIME") or "").strip()
+selected_runtime = str(runtime_override or cfg.get("runtime") or "claude").strip().lower()
+runtime_source = (
+    "SOLAR_PANE_RUNTIME"
+    if runtime_override
+    else "solar-user-config.json"
+    if cfg.get("runtime")
+    else "default"
+)
+home_dir = os.path.expanduser("~")
+
+
+def nonempty_file(path):
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) > 0
+    except OSError:
+        return False
+
+
+if selected_runtime == "codex":
+    runtime_label = "Codex"
+    runtime_cli = codex_cli
+    codex_home = os.path.expanduser(os.environ.get("CODEX_HOME") or os.path.join(home_dir, ".codex"))
+    runtime_auth = bool(os.environ.get("OPENAI_API_KEY")) or nonempty_file(os.path.join(codex_home, "auth.json"))
+    login_command = "codex login --device-auth"
+    runtime_guidance = (
+        "Run `codex login --device-auth` once, then start the cockpit with "
+        "`solar harness start <project-dir>`."
+    )
+elif selected_runtime == "claude":
+    runtime_label = "Claude Code"
+    runtime_cli = claude_cli
+    runtime_auth = bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")) or nonempty_file(
+        os.path.join(claude_dir, ".credentials.json")
+    )
+    login_command = "claude"
+    runtime_guidance = (
+        "Run `claude` once and complete login/trust, then start the cockpit with "
+        "`solar harness start <project-dir>`."
+    )
+else:
+    runtime_label = selected_runtime or "unknown"
+    runtime_cli = ""
+    runtime_auth = False
+    login_command = ""
+    runtime_guidance = "Set runtime to `codex` or `claude` in solar-user-config.json."
+    result["verdict"] = "fail"
+    result["warnings"].append(
+        "unsupported selected runtime: %s (expected codex or claude)" % (selected_runtime or "empty")
+    )
+
+result["runtime"] = {
+    "selected": selected_runtime,
+    "label": runtime_label,
+    "source": runtime_source,
+    "cli": "present" if runtime_cli else "missing",
+    "cli_path": runtime_cli,
+    "auth": "ok" if runtime_auth else "unauthenticated",
+    "login_command": login_command,
+    "guidance": runtime_guidance,
+}
 result["models"] = {
     "lab_matrix": lab_matrix,
     "zhipu_credentials": "present" if zhipu_ready else "missing",
@@ -790,15 +853,22 @@ result["models"] = {
     "claude_cli": "present" if claude_cli else "missing",
     "claude_cli_path": claude_cli,
     "guidance": (
-        "Provide ZHIPU_AUTH_TOKEN in ~/.solar/secrets/zhipu.env or ~/.solar/secrets/solar-user-secrets.env, "
-        "or run: " + all_claude_hint
+        "Provide ZHIPU_AUTH_TOKEN in ~/.solar/secrets/zhipu.env or "
+        "~/.solar/secrets/solar-user-secrets.env."
+        if uses_glm
+        else "Role-model overrides are optional; the selected runtime supplies the default provider route."
     ),
-    "claude_auth_note": "Claude Code must be authenticated once with `claude`; after login, panes self-initialize.",
 }
 if uses_glm and not zhipu_ready:
     result["warnings"].append("lab matrix uses GLM/Zhipu but no ZHIPU credentials were found")
-if not claude_cli:
-    result["warnings"].append("claude CLI missing; install/authenticate Claude Code before launching panes")
+if selected_runtime in {"codex", "claude"} and not runtime_cli:
+    result["warnings"].append(
+        "selected %s runtime CLI missing; install it before launching panes" % runtime_label
+    )
+elif selected_runtime in {"codex", "claude"} and not runtime_auth:
+    result["warnings"].append(
+        "selected %s runtime appears unauthenticated; run: %s" % (runtime_label, login_command)
+    )
 
 # Drift check: every component root the receipt recorded must still exist.
 # Catches a removed install tree (e.g. rm -rf ~/.solar/harness) that the fixed
@@ -856,16 +926,25 @@ else:
             name,
             item.get("path") or item.get("state"),
         ))
+    runtime = result["runtime"]
+    if runtime:
+        print("  selected runtime: %s (%s)" % (
+            runtime.get("selected", "unknown"),
+            runtime.get("source", "unknown"),
+        ))
+        print("  runtime CLI/auth: %s/%s" % (
+            runtime.get("cli", "missing"),
+            runtime.get("auth", "unauthenticated"),
+        ))
+        print("  runtime guidance: %s" % runtime.get("guidance", ""))
     models = result["models"]
     if models:
         print("  model lab matrix: %s" % models.get("lab_matrix", "unknown"))
-        print("  credentials: zhipu=%s anthropic=%s claude_cli=%s" % (
+        print("  optional provider credentials: zhipu=%s anthropic=%s" % (
             models.get("zhipu_credentials", "missing"),
             models.get("anthropic_credentials", "missing"),
-            models.get("claude_cli", "missing"),
         ))
-        print("  guidance: %s" % models.get("guidance", ""))
-        print("  claude: %s" % models.get("claude_auth_note", ""))
+        print("  model guidance: %s" % models.get("guidance", ""))
     if result["schema_version"] is not None:
         print("  schema_version: %s" % result["schema_version"])
     if result["warnings"]:
