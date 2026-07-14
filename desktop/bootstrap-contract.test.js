@@ -104,6 +104,13 @@ assert(
 );
 
 assert(
+  "dashboard listener cleanup tolerates renderer teardown",
+  main.includes("const targetWebContents = win.webContents") &&
+    main.includes("if (targetWebContents.isDestroyed()) return") &&
+    main.includes("targetWebContents.removeListener"),
+);
+
+assert(
   "desktop autotest runs the selftest truth suite",
   autotest.includes("node src/selftest-verdict.test.js") &&
     autotest.includes("node selftest-electron.test.js"),

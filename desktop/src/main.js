@@ -104,8 +104,8 @@ function finishSelftest(ok, details = {}) {
   setTimeout(() => app.exit(code), 300);
 }
 
-async function collectSelftestSnapshot() {
-  return win.webContents.executeJavaScript(
+async function collectSelftestSnapshot(targetWebContents) {
+  return targetWebContents.executeJavaScript(
     `(() => {
       let rendererErrors = [];
       try {
@@ -132,7 +132,11 @@ async function collectSelftestSnapshot() {
   );
 }
 
-async function waitForSelftestVerdict(expectedURL, fallbackUsed) {
+async function waitForSelftestVerdict(
+  expectedURL,
+  fallbackUsed,
+  targetWebContents,
+) {
   const configured = Number.parseInt(
     process.env.SOLAR_DESKTOP_SELFTEST_TIMEOUT_MS || "12000",
     10,
@@ -153,7 +157,7 @@ async function waitForSelftestVerdict(expectedURL, fallbackUsed) {
   while (Date.now() <= deadline) {
     let snapshot;
     try {
-      snapshot = await collectSelftestSnapshot();
+      snapshot = await collectSelftestSnapshot(targetWebContents);
     } catch (error) {
       return {
         ok: false,
@@ -1349,20 +1353,28 @@ async function createWindow(reuse) {
 }
 
 function loadDashboard(url) {
+  const targetWebContents = win.webContents;
   let fallbackUsed = false;
   const cleanup = () => {
-    win.webContents.removeListener("did-finish-load", onFinish);
-    win.webContents.removeListener("did-fail-load", onFail);
+    try {
+      if (targetWebContents.isDestroyed()) return;
+      targetWebContents.removeListener("did-finish-load", onFinish);
+      targetWebContents.removeListener("did-fail-load", onFail);
+    } catch {}
   };
   const onFinish = async () => {
-    const actualURL = win.webContents.getURL();
+    const actualURL = targetWebContents.getURL();
     log("LOADED", actualURL);
     if (!SELFTEST) {
       cleanup();
       return;
     }
 
-    const verdict = await waitForSelftestVerdict(url, fallbackUsed);
+    const verdict = await waitForSelftestVerdict(
+      url,
+      fallbackUsed,
+      targetWebContents,
+    );
     if (!verdict.ok) {
       cleanup();
       finishSelftest(false, { reason: "dashboard_validation_failed", verdict });
@@ -1372,7 +1384,7 @@ function loadDashboard(url) {
     const shot = process.env.SOLAR_DESKTOP_SHOT;
     if (shot) {
       try {
-        const image = await win.webContents.capturePage();
+        const image = await targetWebContents.capturePage();
         const png = image.toPNG();
         if (!png.length) throw new Error("capturePage returned an empty PNG");
         fs.writeFileSync(shot, png);
@@ -1415,19 +1427,19 @@ function loadDashboard(url) {
       fallbackUsed = true;
       log("runtime UI failed; falling back to bundled renderer (app://)");
       const tok = readToken();
-      win.loadURL(
+      targetWebContents.loadURL(
         "app://index.html?api=http://" +
           new URL(url).host +
           (tok ? "&token=" + encodeURIComponent(tok) : ""),
       );
       return;
     }
-    win.loadURL(SCREENS.error("Error " + code + ": " + desc));
+    targetWebContents.loadURL(SCREENS.error("Error " + code + ": " + desc));
   };
-  win.webContents.on("did-finish-load", onFinish);
-  win.webContents.on("did-fail-load", onFail);
+  targetWebContents.on("did-finish-load", onFinish);
+  targetWebContents.on("did-fail-load", onFail);
   log("loading runtime dashboard:", url);
-  void win.loadURL(url).catch((error) => {
+  void targetWebContents.loadURL(url).catch((error) => {
     if (SELFTEST) {
       cleanup();
       finishSelftest(false, {
