@@ -206,6 +206,34 @@ class TestNoFalseDecisionCardOnGovernedPath:
         assert stall.get("is_stalled") is False, stall
         assert action.get("type") not in {"stall_review", "capability_mismatch"}, action
 
+    def test_certified_pending_dispatch_handoff_is_not_reported_as_a_stall(self, tmp_path):
+        """A pending node is not blocked evidence during the scheduler handoff.
+
+        The live rc.9 fixture received its PASS certificate, then briefly had
+        no active node before the first builder dispatch.  That normal state
+        must remain flowing unless routing records a real blocker or the event
+        stream proves a repeated no-progress loop.
+        """
+        _write_fixture(
+            tmp_path,
+            graph_top={
+                "workflow_contract_id": "pm.generic.v1",
+                "workflow_contract_version": "1",
+                "plan_certificate": CERT,
+                "plan_compile_required": True,
+            },
+            status_extra={"status": "active", "phase": "planning_complete"},
+        )
+        mod = _load_routes(tmp_path)
+        projection, _deg = mod.build_projection_payload(SID, mode="fast")
+        governance = projection.get("plan_governance") or {}
+        stall = (projection.get("dispatch") or {}).get("stall") or {}
+        action = projection.get("human_action_required") or {}
+
+        assert governance.get("state") == "certified", governance
+        assert stall.get("is_stalled") is False, stall
+        assert action.get("type") not in {"stall_review", "capability_mismatch"}, action
+
     def test_legacy_uncontracted_keeps_the_plan_review_card(self, tmp_path):
         self._stage(tmp_path, governed=False)
         mod = _load_routes(tmp_path)

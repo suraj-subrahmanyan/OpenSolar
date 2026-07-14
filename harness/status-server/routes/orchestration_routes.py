@@ -774,7 +774,6 @@ def _build_stall_summary(
     phase = str(status.get("phase") or "").strip().lower()
     blocked = [card for card in node_cards if str(card.get("status") or "").lower() in {"blocked", "gate_blocked", "failed"} or card.get("blocked_reason")]
     active = [card for card in node_cards if str(card.get("status") or "").lower() in {"active", "running", "dispatched", "in_progress"}]
-    pending = [card for card in node_cards if str(card.get("status") or "").lower() in {"pending", "queued", "planned"}]
     reasons = sorted({str(card.get("blocked_reason") or card.get("decision") or "").strip() for card in blocked if str(card.get("blocked_reason") or card.get("decision") or "").strip()})
 
     if not tg_ok:
@@ -799,7 +798,7 @@ def _build_stall_summary(
     if (
         "planning_complete" in phase
         and not active
-        and (blocked or pending)
+        and blocked
         and governance_state != "compiling"
     ):
         state = "no_matching_worker" if any("no_matching_worker" in reason for reason in reasons) else "planning_complete_stalled"
@@ -808,7 +807,7 @@ def _build_stall_summary(
             "state": state,
             "severity": "warn",
             "title": "Planning is complete, dispatch is stalled",
-            "detail": "The DAG exists, but no node is actively running. This often means capability labels or worker matching blocked dispatch.",
+            "detail": "The DAG has an explicit blocked node or routing decision, and no node is actively running.",
             "reasons": reasons,
         }
     if blocked:
