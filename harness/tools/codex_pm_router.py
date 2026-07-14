@@ -847,15 +847,9 @@ def _render_product_brief_markdown(brief: dict[str, Any]) -> str:
     )
 
 
-def emit_requirement_package(
-    payload: dict[str, Any],
-    *,
-    workspace_root: Path,
-    sprint_root: Path | None = None,
-    sprint_id: str = "",
-) -> dict[str, str]:
-    workspace_root = Path(workspace_root)
-    pm_dir = workspace_root / ".pm"
+def _emit_compiled_pm_tree(pm_dir: Path, payload: dict[str, Any]) -> None:
+    """Write only compiler-owned PM inputs beneath ``pm_dir``."""
+
     contracts_dir = pm_dir / "contracts"
     handoff_dir = pm_dir / "handoff"
     evals_dir = pm_dir / "evals"
@@ -878,6 +872,22 @@ def emit_requirement_package(
     _write_text(handoff_dir / "solar_harness_handoff.md", artifacts["handoff_markdown"]["solar_harness"])
     _write_text(evals_dir / "golden_cases.jsonl", "\n".join(json.dumps(case, ensure_ascii=False) for case in artifacts["eval_seed_cases"]) + "\n")
 
+
+def emit_requirement_package(
+    payload: dict[str, Any],
+    *,
+    workspace_root: Path,
+    sprint_root: Path | None = None,
+    sprint_id: str = "",
+) -> dict[str, str]:
+    workspace_root = Path(workspace_root)
+    pm_dir = workspace_root / ".pm"
+    contracts_dir = pm_dir / "contracts"
+    handoff_dir = pm_dir / "handoff"
+    artifacts = payload["compiled_artifacts"]
+    requirement_ir = payload["requirement_ir"]
+    _emit_compiled_pm_tree(pm_dir, payload)
+
     emitted = {
         "pm_dir": str(pm_dir),
         "requirement_ir": str(pm_dir / "requirement_ir.json"),
@@ -893,6 +903,8 @@ def emit_requirement_package(
     }
     if sprint_root and sprint_id:
         sprint_root = Path(sprint_root)
+        staging_pm_dir = sprint_root / sprint_id / "workdir" / "workspace" / ".pm"
+        _emit_compiled_pm_tree(staging_pm_dir, payload)
         _write_text(sprint_root / f"{sprint_id}.prd.md", artifacts["prd_markdown"])
         _write_text(sprint_root / f"{sprint_id}.contract.md", artifacts["contract_markdown"])
         _write_json(sprint_root / f"{sprint_id}.task_graph.json", artifacts["task_dag"])
@@ -915,6 +927,7 @@ def emit_requirement_package(
                 "sprint_acceptance_verdict": str(sprint_root / f"{sprint_id}.acceptance_verdict.json"),
                 "sprint_product_brief": str(sprint_root / f"{sprint_id}.product-brief.md"),
                 "sprint_handoff": str(sprint_root / f"{sprint_id}.handoff.md"),
+                "sprint_workspace_pm_dir": str(staging_pm_dir),
             }
         )
     return emitted

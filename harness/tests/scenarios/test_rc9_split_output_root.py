@@ -58,6 +58,11 @@ def test_workspace_binding_round_trip_and_sprint_lookup(tmp_path: Path) -> None:
 def test_rawintent_consumer_preserves_the_user_workspace_as_repo_context(tmp_path: Path) -> None:
     workspace = tmp_path / "project"
     workspace.mkdir()
+    (workspace / ".pm").mkdir()
+    (workspace / ".pm" / "private-note.txt").write_text(
+        "must not enter sprint staging\n",
+        encoding="utf-8",
+    )
     env = dict(os.environ)
     env.update(
         {
@@ -108,6 +113,11 @@ def test_rawintent_consumer_preserves_the_user_workspace_as_repo_context(tmp_pat
 
     assert requirement_ir["source_inputs"]["repo_context"] == [str(workspace.resolve())]
     assert (workspace / ".pm" / "requirement_ir.json").is_file()
+    staged_pm = tmp_path / "sprints" / sid / "workdir" / "workspace" / ".pm"
+    assert json.loads((staged_pm / "requirement_ir.json").read_text(encoding="utf-8")) == json.loads(
+        (workspace / ".pm" / "requirement_ir.json").read_text(encoding="utf-8")
+    )
+    assert not (staged_pm / "private-note.txt").exists()
 
 
 def test_generic_dispatch_names_only_the_sprint_staging_root(tmp_path: Path, monkeypatch) -> None:
