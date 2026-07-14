@@ -1221,10 +1221,23 @@ function projectionProgress(projection?: ProjectionResponse): {
   return { total, done, percent: Math.min(100, Math.max(0, percent)) };
 }
 
+type TerminalRunOutcome = "success" | "failure" | "";
+
+function terminalRunOutcome(status: string, phase: string): TerminalRunOutcome {
+  const value = `${status} ${phase}`.toLowerCase();
+  // Failure wins if legacy projections disagree (for example a stale
+  // "completed" status paired with the current phase "failed").
+  if (/\b(failed|error|cancelled|canceled)\b/.test(value)) {
+    return "failure";
+  }
+  if (/\b(passed|done|completed|eval_pass|eval_passed)\b/.test(value)) {
+    return "success";
+  }
+  return "";
+}
+
 function isTerminalRun(status: string, phase: string): boolean {
-  return /\b(passed|done|completed|eval_pass|eval_passed)\b/.test(
-    `${status} ${phase}`.toLowerCase(),
-  );
+  return Boolean(terminalRunOutcome(status, phase));
 }
 
 // The PM -> Planner -> Builder -> Evaluator pipeline, matched against the projection's
@@ -1245,8 +1258,9 @@ function pipelineStages(
   phase: string,
   status: string,
   isBlocked: boolean,
-  terminal: boolean,
+  terminalOutcome: TerminalRunOutcome,
   actionType: string,
+  failedRole: AgentRole | "" = "",
 ): Array<{ role: AgentRole; state: StageState }> {
   const text = `${phase} ${status}`.toLowerCase();
   let activeIdx = 0;
@@ -1257,10 +1271,15 @@ function pipelineStages(
   if (actionType === "plan_review") activeIdx = 1;
   else if (actionType === "handoff_submit") activeIdx = 2;
   else if (actionType === "eval_review") activeIdx = 3;
+  const failedIdx = failedRole ? ROLE_ORDER.indexOf(failedRole) : activeIdx;
   return RUN_PIPELINE.map((stage, index) => {
     let state: StageState;
-    if (terminal) state = "done";
-    else if (index < activeIdx) state = "done";
+    if (terminalOutcome === "success") state = "done";
+    else if (terminalOutcome === "failure") {
+      if (index < failedIdx) state = "done";
+      else if (index === failedIdx) state = "blocked";
+      else state = "pending";
+    } else if (index < activeIdx) state = "done";
     else if (index === activeIdx) state = isBlocked ? "blocked" : "active";
     else state = "pending";
     return { role: stage.role, state };
@@ -1297,8 +1316,19 @@ function RunOverview({
   const result =
     deliverables.find((item) => item.result) ||
     deliverables.find((item) => item.primary);
-  const terminal = isTerminalRun(status, phase);
-  const stages = pipelineStages(phase, status, isBlocked, terminal, actionType);
+  const terminalOutcome = terminalRunOutcome(status, phase);
+  const failedNode = (data?.task_graph?.nodes || data?.nodes || []).find(
+    (node) => asString(node.status).trim().toLowerCase() === "failed",
+  );
+  const failedRole = failedNode ? normalizeRole(nodeActor(failedNode)) : "";
+  const stages = pipelineStages(
+    phase,
+    status,
+    isBlocked,
+    terminalOutcome,
+    actionType,
+    failedRole,
+  );
   const governance = (data?.plan_governance || {}) as PlanGovernance;
   const governanceState = asString(governance.state);
   const bounces = Number(governance.plan_compile_bounces || 0);
@@ -1317,6 +1347,15 @@ function RunOverview({
     kicker = "Plan integrity failure";
     line = "The certified plan was modified after validation.";
     tone = "blocked";
+  } else if (terminalOutcome === "failure") {
+    kicker = "Run failed";
+    line =
+      "A required step failed. Review the failed step and evaluation evidence below.";
+    tone = "blocked";
+  } else if (terminalOutcome === "success") {
+    kicker = "Done";
+    line = result ? "The result is ready." : "Run complete.";
+    tone = "complete";
   } else if (gate) {
     kicker = "Your decision";
     line = asString(humanAction.title) || gate.title;
@@ -1325,10 +1364,6 @@ function RunOverview({
     kicker = "Paused";
     line = stallCopy(stall) || "Blocked — needs your attention.";
     tone = "blocked";
-  } else if (terminal) {
-    kicker = "Done";
-    line = result ? "The result is ready." : "Run complete.";
-    tone = "complete";
   }
 
   return (
@@ -1426,10 +1461,10 @@ function SessionView({
   const phase = asString(
     projectionData?.phase || currentSprint.phase || currentSprint.status,
   );
-  const isBlocked = isSystemBlocked(stall, humanActionType);
   const status = asString(projectionData?.status || currentSprint.status);
   const gateOpen = Boolean(GATE_KINDS[humanActionType]);
   const terminal = isTerminalRun(status, phase);
+  const isBlocked = !terminal && isSystemBlocked(stall, humanActionType);
   // The run is genuinely "active" (latest step spins) only when it isn't finished,
   // isn't paused on a human gate, and isn't blocked.
   const runActive = !terminal && !gateOpen && !isBlocked;
@@ -1676,12 +1711,13 @@ function PlanFlow({
   const runStatus = asString(data?.status || data?.sprint?.status);
   const runPhase = asString(data?.phase || data?.sprint?.phase);
   const terminal = isTerminalRun(runStatus, runPhase);
-  const headMeta = isBlocked
-    ? "blocked at a capability gate"
-    : terminal
-      ? runStatus === "passed" || done === total
-        ? "done"
-        : `ended: ${runStatus || "failed"}`
+  const outcome = terminalRunOutcome(runStatus, runPhase);
+  const headMeta = terminal
+    ? outcome === "success"
+      ? "done"
+      : `ended: ${runStatus || "failed"}`
+    : isBlocked
+      ? "blocked at a capability gate"
       : activeId
         ? `active: ${activeId}`
         : total
@@ -1944,7 +1980,9 @@ function RunHealth({ projection }: { projection?: ProjectionResponse }) {
     .resources as Record<string, unknown> | undefined;
   const cost = Number(resources?.estimated_total_cost) || 0;
   const mismatch = data.capability_mismatch;
-  const hasBlocker = Boolean(mismatch?.present);
+  const status = asString(data.status || data.sprint?.status);
+  const phase = asString(data.phase || data.sprint?.phase);
+  const hasBlocker = !isTerminalRun(status, phase) && Boolean(mismatch?.present);
   const blockedNode = asString(mismatch?.blocked_node);
   const missing = asString(mismatch?.missing_capability);
   if (stats.total === 0 && !cost && !hasBlocker) return null;
@@ -2037,6 +2075,9 @@ function DecisionZone({
 }) {
   const data = projection?.data;
   if (!data) return null;
+  const status = asString(data.status || data.sprint?.status);
+  const phase = asString(data.phase || data.sprint?.phase);
+  if (isTerminalRun(status, phase)) return null;
   const actions = data.available_actions || [];
   // human_action_required.type is the backend's single "what does the human do now"
   // signal — and the only one that covers handoff (which has no human_gates entry).

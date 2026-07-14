@@ -264,6 +264,73 @@ fs.writeFileSync(
   }) + "\n",
 );
 
+// A terminal failed sprint carrying a stale no-routing diagnostic. The terminal
+// state must win: the UI must report the evaluator failure, not tell the user to
+// connect a worker after the run has already ended.
+const SID3 = "sprint-20260714-terminal-failure--fed987";
+writeJson(sp(`${SID3}.status.json`), {
+  sprint_id: SID3,
+  id: SID3,
+  title: "Verify a completed implementation",
+  status: "failed",
+  phase: "failed",
+  stage: "failed",
+  task_graph_status: "failed",
+  failed_nodes: ["S3"],
+  created_at: "2026-07-14T00:00:00Z",
+});
+writeJson(sp(`${SID3}.task_graph.json`), {
+  sprint_id: SID3,
+  nodes: [
+    { id: "S1", goal: "Implement the product", status: "passed" },
+    {
+      id: "S2",
+      goal: "Run deterministic tests",
+      status: "passed",
+      depends_on: ["S1"],
+    },
+    {
+      id: "S3",
+      goal: "Independently evaluate the result",
+      logical_operator: "Evaluator",
+      status: "failed",
+      depends_on: ["S2"],
+      route_decision: "no_routing_record",
+      blocked_reason: "no_routing_record",
+    },
+  ],
+  node_results: {
+    S1: { status: "passed" },
+    S2: { status: "passed" },
+    S3: { status: "failed" },
+  },
+});
+writeJson(sp(`${SID3}.closure.json`), {
+  status: "failed",
+  all_nodes_passed: false,
+  open_nodes: ["S3"],
+  failed_nodes: ["S3"],
+});
+writeJson(sp(`${SID3}.acceptance_verdict.json`), {
+  verdict: "FAIL",
+  reasons: ["task_graph_failed"],
+});
+fs.mkdirSync(path.join(TMP, "sessions", SID3), { recursive: true });
+fs.writeFileSync(
+  path.join(TMP, "sessions", SID3, "events.jsonl"),
+  JSON.stringify({
+    sprint_id: SID3,
+    ts: "2026-07-14T00:05:00Z",
+    type: "log_message",
+    actor: "evaluator",
+    payload: {
+      legacy_event: "graph_parent_failed",
+      node_id: "S3",
+      phase: "failed",
+    },
+  }) + "\n",
+);
+
 function waitPort(ms) {
   return new Promise((resolve, reject) => {
     const start = Date.now();
@@ -435,6 +502,51 @@ const log = (k, ok, extra = "") => {
         .screenshot({ path: shot, fullPage: true, animations: "disabled" })
         .catch(() => {});
       console.log(`SHOT gate ${shot}`);
+      await page.close();
+    }
+
+    // A stale dispatch mismatch must never override an already-terminal failure.
+    {
+      const page = await browser.newPage({
+        viewport: { width: 1440, height: 920 },
+      });
+      await page.goto(`${base}/#/sessions/${SID3}`, {
+        waitUntil: "domcontentloaded",
+        timeout: 15000,
+      });
+      await page.waitForTimeout(2500);
+      const failed = await page.evaluate(() => {
+        const body = document.body.innerText || "";
+        const overview =
+          document.querySelector('[data-testid="run-overview"]')?.textContent ||
+          "";
+        const plan =
+          document.querySelector('[data-testid="plan-flow"]')?.textContent ||
+          "";
+        return {
+          overview,
+          plan,
+          hasStallCard: !!document.querySelector('[data-testid="system-stall"]'),
+          hasWorkerInstruction: /connect a worker/i.test(body),
+        };
+      });
+      log(
+        "failed-terminal:overview-is-failed",
+        /run failed/i.test(failed.overview),
+        failed.overview.trim(),
+      );
+      log(
+        "failed-terminal:plan-ended-failed",
+        /ended:\s*failed/i.test(failed.plan),
+        failed.plan.trim(),
+      );
+      log("failed-terminal:no-stall-card", !failed.hasStallCard);
+      log("failed-terminal:no-worker-instruction", !failed.hasWorkerInstruction);
+      const shot = path.join(OUT_DIR, "overhaul-terminal-failed.png");
+      await page
+        .screenshot({ path: shot, fullPage: true, animations: "disabled" })
+        .catch(() => {});
+      console.log(`SHOT failed-terminal ${shot}`);
       await page.close();
     }
 
