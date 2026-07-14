@@ -3121,6 +3121,37 @@ pm_operator_role_pool_enabled() {
   return 1
 }
 
+pm_operator_role_pool_claim_active() {
+  local status_file="$1" role="${2:-planner}"
+  [[ -f "$status_file" && "$role" == "planner" ]] || return 1
+  python3 - "$status_file" <<'PY' 2>/dev/null
+import datetime
+import json
+import sys
+
+try:
+    status = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(1)
+
+claim = status.get("planner_dispatch_claim")
+if not isinstance(claim, dict) or claim.get("owner") != "operator_pool":
+    sys.exit(1)
+if str(claim.get("state") or "") not in {"pending", "submitting", "submitted"}:
+    sys.exit(1)
+
+try:
+    expires = datetime.datetime.fromisoformat(str(claim.get("expires_at") or "").replace("Z", "+00:00"))
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=datetime.timezone.utc)
+except Exception:
+    # A claim without a parseable lease boundary must not suppress recovery.
+    sys.exit(1)
+
+sys.exit(0 if expires > datetime.datetime.now(datetime.timezone.utc) else 1)
+PY
+}
+
 pm_operator_role_pool_task_seen() {
   local sid="$1" role="${2:-planner}" node="N0"
   [[ -n "$sid" ]] || return 1
@@ -3139,6 +3170,23 @@ sid = sys.argv[2]
 role = sys.argv[3]
 node = sys.argv[4]
 prefix = f"pm-{sid}-{node}-"
+released = set()
+
+for task_path in (h / "run" / "pm-inbox").glob(f"{prefix}*.json"):
+    try:
+        data = json.loads(task_path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    task_id = str(data.get("task_id") or task_path.stem)
+    if data and str(data.get("requested_role") or role) != role:
+        continue
+    status = str(data.get("status") or "").strip().lower()
+    if status in {"completed", "cancelled"} or status.startswith("failed"):
+        released.add(task_id)
+        continue
+    # Missing status is a legacy non-terminal record and remains active for
+    # compatibility. New claims use explicit pending/submitting/submitted.
+    sys.exit(0)
 
 for status_path in (h / "run" / "operator-status").glob("*.json"):
     try:
@@ -3146,21 +3194,16 @@ for status_path in (h / "run" / "operator-status").glob("*.json"):
     except Exception:
         continue
     task_id = str(data.get("current_task_id") or data.get("task_id") or "")
-    if task_id.startswith(prefix):
-        sys.exit(0)
-
-for task_path in (h / "run" / "pm-inbox").glob(f"{prefix}*.json"):
-    try:
-        data = json.loads(task_path.read_text(encoding="utf-8"))
-    except Exception:
-        data = {}
-    if not data or str(data.get("requested_role") or role) == role:
+    if task_id.startswith(prefix) and task_id not in released:
         sys.exit(0)
 
 results_root = h / "run" / "operator-results"
 for operator_dir in results_root.glob("*"):
-    if operator_dir.is_dir() and any(operator_dir.glob(f"{prefix}*")):
-        sys.exit(0)
+    if not operator_dir.is_dir():
+        continue
+    for result_path in operator_dir.glob(f"{prefix}*"):
+        if result_path.name not in released:
+            sys.exit(0)
 
 sys.exit(1)
 PY
@@ -3278,11 +3321,18 @@ PY
   guard_role="$(workflow_guard_route_role "$sid")"
 
   if [[ "$guard_role" != "builder_main" && "$guard_role" != "builder" ]]; then
-    if pm_operator_role_pool_enabled && pm_operator_role_pool_task_seen "$sid" "planner" \
+    if pm_operator_role_pool_enabled \
       && { [[ ! -s "$design" ]] || [[ ! -s "$plan" ]] || [[ ! -s "$graph" ]]; }; then
-      log "${G}PRD ready → planner role-pool task already active; suppress legacy pane planner dispatch for ${sid}${N}"
-      emit_event "$sid" "planner_role_pool_inflight" "coordinator" "{\"reason\":\"suppress_legacy_pane_dispatch\"}"
-      return 0
+      if pm_operator_role_pool_task_seen "$sid" "planner"; then
+        log "${G}PRD ready → planner role-pool task already active; suppress legacy pane planner dispatch for ${sid}${N}"
+        emit_event "$sid" "planner_role_pool_inflight" "coordinator" "{\"reason\":\"suppress_legacy_pane_dispatch\"}"
+        return 0
+      fi
+      if pm_operator_role_pool_claim_active "$sf" "planner"; then
+        log "${G}PRD ready → planner operator-pool claim pending; suppress legacy pane planner dispatch for ${sid}${N}"
+        emit_event "$sid" "planner_role_pool_claimed" "coordinator" "{\"reason\":\"suppress_legacy_pane_dispatch_until_claim_resolves\"}"
+        return 0
+      fi
     fi
     if [[ "$req_file" == "$prd" ]]; then
       local prd_err

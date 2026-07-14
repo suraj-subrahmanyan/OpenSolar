@@ -44,6 +44,13 @@ MODEL_DOCTOR_INTERVAL_SEC = int(os.environ.get("SOLAR_MODEL_DOCTOR_INTERVAL_SEC"
 MODEL_DOCTOR_TIMEOUT_SEC = int(os.environ.get("SOLAR_MODEL_DOCTOR_TIMEOUT_SEC", "120"))
 PM_INBOX_DIR = HARNESS / "run" / "pm-inbox"
 ROLE_HANDOFF_RETRY_COOLDOWN_SEC = int(os.environ.get("SOLAR_ROLE_HANDOFF_RETRY_COOLDOWN_SEC", "30"))
+try:
+    PLANNER_DISPATCH_CLAIM_TTL_SEC = max(
+        1,
+        int(os.environ.get("SOLAR_PLANNER_DISPATCH_CLAIM_TTL_SEC", "180") or "180"),
+    )
+except (TypeError, ValueError):
+    PLANNER_DISPATCH_CLAIM_TTL_SEC = 180
 
 REAL_HARNESS = Path(os.environ.get("REAL_HARNESS_DIR", HARNESS))
 sys.path.insert(0, str(REAL_HARNESS / "lib"))
@@ -1524,6 +1531,46 @@ def role_for_handoff_finding(ftype: str) -> str:
     if ftype == "ready_for_evaluator":
         return "evaluator"
     return ""
+
+
+def _transition_planner_dispatch_claim(
+    status: dict,
+    state: str,
+    detail: dict | None = None,
+) -> bool:
+    """Persist the operator-pool planner claim lifecycle on sprint status."""
+    now = utc_now()
+    before = json.dumps(status.get("planner_dispatch_claim"), sort_keys=True, default=str)
+    existing = status.get("planner_dispatch_claim")
+    claim = dict(existing) if isinstance(existing, dict) else {}
+    claim["owner"] = "operator_pool"
+    claim.setdefault("source", "solar_autopilot")
+    claim.setdefault("claimed_at", now)
+    claim.setdefault("ttl_seconds", PLANNER_DISPATCH_CLAIM_TTL_SEC)
+    if state in {"pending", "submitting"}:
+        expires = datetime.fromtimestamp(
+            time.time() + PLANNER_DISPATCH_CLAIM_TTL_SEC,
+            timezone.utc,
+        )
+        claim["expires_at"] = expires.strftime("%Y-%m-%dT%H:%M:%SZ")
+    claim["state"] = state
+    claim["updated_at"] = now
+    detail = detail or {}
+    task_id = str(detail.get("task_id") or "").strip()
+    if task_id:
+        claim["task_id"] = task_id
+    if state == "submitted":
+        claim["submitted_at"] = now
+        claim.pop("released_at", None)
+        claim.pop("failure_reason", None)
+    elif state == "failed":
+        claim["released_at"] = now
+        reason = str(detail.get("reason") or detail.get("error") or "role_pool_dispatch_failed")
+        if detail.get("returncode") is not None:
+            reason = f"{reason}_rc_{detail.get('returncode')}"
+        claim["failure_reason"] = reason[-300:]
+    status["planner_dispatch_claim"] = claim
+    return before != json.dumps(claim, sort_keys=True, default=str)
 
 
 def objective_for_role_handoff(sid: str, role: str) -> str:
@@ -3591,6 +3638,9 @@ def apply_findings(findings: list[dict], dispatch: bool, state: dict, cooldown: 
                         status_changed = True
             if _append_status_history_once(status, f"autopilot_{ftype}", str(f.get("message", ""))):
                 status_changed = True
+            if dispatch and role_pool_handoff and role_for_handoff_finding(ftype) == "planner":
+                if _transition_planner_dispatch_claim(status, "submitting"):
+                    status_changed = True
             if status_changed:
                 status["updated_at"] = utc_now()
                 save_json(status_path, status)
@@ -3600,6 +3650,17 @@ def apply_findings(findings: list[dict], dispatch: bool, state: dict, cooldown: 
             if dispatch and sid and role_pool_handoff:
                 live_task = _live_pm_task_for_sprint_role(sid, role_for_handoff_finding(ftype))
                 if live_task is not None:
+                    if role_for_handoff_finding(ftype) == "planner":
+                        _transition_planner_dispatch_claim(
+                            status,
+                            "submitted",
+                            {
+                                "task_id": str(live_task.get("task_id") or ""),
+                                "pm_status": str(live_task.get("status") or ""),
+                            },
+                        )
+                        status["updated_at"] = utc_now()
+                        save_json(status_path, status)
                     result = {
                         "sid": sid,
                         "action": ftype,
@@ -3613,6 +3674,10 @@ def apply_findings(findings: list[dict], dispatch: bool, state: dict, cooldown: 
                     continue
                 sent, role_dispatch_detail = dispatch_role_handoff(sid, ftype)
                 if not sent:
+                    if role_for_handoff_finding(ftype) == "planner":
+                        _transition_planner_dispatch_claim(status, "failed", role_dispatch_detail)
+                        status["updated_at"] = utc_now()
+                        save_json(status_path, status)
                     append_event(sid, "autopilot_role_pool_dispatch_failed", "warn", {"target": target, "type": ftype, **role_dispatch_detail})
                     enqueue_action(f, "role_pool_unavailable", role_dispatch_detail)
                     result = {
@@ -3626,6 +3691,10 @@ def apply_findings(findings: list[dict], dispatch: bool, state: dict, cooldown: 
                     mark_action(state, f, result)
                     actions.append(result)
                     continue
+                if role_for_handoff_finding(ftype) == "planner":
+                    _transition_planner_dispatch_claim(status, "submitted", role_dispatch_detail)
+                    status["updated_at"] = utc_now()
+                    save_json(status_path, status)
             elif dispatch and sid:
                 sent = wake_sid(sid)
             elif dispatch and f.get("message") and f.get("target"):

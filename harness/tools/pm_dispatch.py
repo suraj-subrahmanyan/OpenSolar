@@ -264,6 +264,40 @@ def _now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _env_truthy(name: str) -> bool:
+    return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _pm_operator_pool_enabled() -> bool:
+    return _env_truthy("SOLAR_CODEX_ALLOW_PM_OPERATOR_DISPATCH") or _env_truthy("SOLAR_PM_OPERATOR_DISPATCH")
+
+
+def _new_planner_dispatch_claim(now: str) -> dict[str, Any]:
+    """Claim planner dispatch before ``prd_ready`` becomes externally visible.
+
+    Intake publishes the status before the one-shot autopilot submits the
+    physical planner task.  Without a claim, the concurrently polling
+    coordinator can dispatch the legacy planner pane in that gap.  The claim
+    is a bounded lease: autopilot promotes it to submitted or releases it on
+    failure, and the coordinator may recover after expiry if intake crashes.
+    The default covers the 120s consumer boundary plus the 60s role-submit
+    boundary; deployments may tune it without changing code.
+    """
+    try:
+        ttl_seconds = max(1, int(os.environ.get("SOLAR_PLANNER_DISPATCH_CLAIM_TTL_SEC", "180") or "180"))
+    except (TypeError, ValueError):
+        ttl_seconds = 180
+    expires = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=ttl_seconds)
+    return {
+        "owner": "operator_pool",
+        "state": "pending",
+        "claimed_at": now,
+        "expires_at": expires.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ttl_seconds": ttl_seconds,
+        "source": "requirement_compiler",
+    }
+
+
 def _short_id() -> str:
     return str(uuid.uuid4())[:8]
 
@@ -1850,6 +1884,10 @@ def ensure_compiled_sprint_status(sprint_id: str, title: str, summary: str) -> P
             "updated_at": now,
         }
     )
+    if _pm_operator_pool_enabled():
+        # This is written in the same atomic status replace as ``prd_ready``;
+        # there is no coordinator-visible state in which owner is ambiguous.
+        status["planner_dispatch_claim"] = _new_planner_dispatch_claim(now)
     history = list(status.get("history") or [])
     history.append({"ts": now, "event": "compiled_requirement_package_created", "by": "codex-pm-router"})
     status["history"] = history[-20:]
