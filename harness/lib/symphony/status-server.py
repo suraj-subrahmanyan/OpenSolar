@@ -893,6 +893,42 @@ def _intake_command(task: str) -> list[str]:
     return [str(harness_sh), "intake", "--request", task]
 
 
+_RUNTIME_DEFAULT_PROVIDER = {"claude": "anthropic", "codex": "openai"}
+_RUNTIME_PROVIDER_ENV_KEYS = (
+    "SOLAR_PM_DEFAULT_PROVIDERS",
+    "SOLAR_MULTI_TASK_DEFAULT_PROVIDERS",
+)
+
+
+def _intake_subprocess_env() -> dict[str, str]:
+    """Pin dashboard intake to the runtime currently selected on disk.
+
+    The status server can remain alive across a settings change.  Its process
+    environment then describes the runtime that started the server, not the
+    runtime the user just selected.  Correct only defaults derived from that
+    stale runtime; preserve a different provider value as an intentional
+    advanced/hybrid override.
+    """
+    env = dict(os.environ)
+    selected_runtime, _source = _read_user_config_runtime()
+    stale_runtime = str(env.get("SOLAR_PANE_RUNTIME") or "").strip().lower()
+    env["SOLAR_PANE_RUNTIME"] = selected_runtime
+
+    selected_provider = _RUNTIME_DEFAULT_PROVIDER.get(selected_runtime, "")
+    stale_provider = _RUNTIME_DEFAULT_PROVIDER.get(stale_runtime, "")
+    for key in _RUNTIME_PROVIDER_ENV_KEYS:
+        current = str(env.get(key) or "").strip().lower()
+        if selected_provider and (not current or current == stale_provider):
+            env[key] = selected_provider
+
+    # A runtime switch must not carry launch flags computed for the previous
+    # runtime.  The child solar-harness process will rebuild Codex flags from
+    # the same current config when Codex is selected.
+    if selected_runtime != stale_runtime:
+        env.pop("SOLAR_CODEX_EXTRA_FLAGS", None)
+    return env
+
+
 def _intake_payload(data: dict) -> dict:
     task = str(data.get("task") or data.get("request") or "").strip()
     request_id = re.sub(r"[^A-Za-z0-9_.:-]", "-", str(data.get("request_id") or "").strip())[:96]
@@ -928,7 +964,7 @@ def _intake_payload(data: dict) -> dict:
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     except OSError:
         pass
-    env = dict(os.environ)
+    env = _intake_subprocess_env()
     env["HARNESS_DIR"] = str(HARNESS_DIR)
     env["SOLAR_INTAKE_REQUEST_ID"] = request_id
     if workflow_id:
