@@ -80,6 +80,15 @@ Describe 'Resolve-Distro (W6: consistent distro)' {
         Mock Get-RegisteredDistro { @('Debian', 'Ubuntu-22.04') }
         Resolve-Distro | Should -Be 'Debian'
     }
+    It 'skips Docker Desktop internal distros when choosing a fallback' {
+        Mock Get-RegisteredDistro { @('docker-desktop', 'docker-desktop-data', 'Debian') }
+        Resolve-Distro | Should -Be 'Debian'
+    }
+    It 'does not honor an explicit Docker Desktop internal distro target' {
+        . "$PSScriptRoot/../install.ps1" -Distro 'docker-desktop'
+        Mock Get-RegisteredDistro { @('docker-desktop', 'Ubuntu-24.04') }
+        Resolve-Distro | Should -Be 'Ubuntu-24.04'
+    }
 }
 
 Describe 'Test-WslReady (W6: status + a real distro)' {

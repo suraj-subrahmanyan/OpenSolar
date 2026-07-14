@@ -74,23 +74,34 @@ function Test-Admin {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-# Registered WSL distros (parallel to the desktop app's runtime-detect.js: `wsl -l -q`).
+# Docker Desktop's implementation-only distros are not user Linux environments
+# and must never be used as Solar install/runtime targets.
+function Test-SolarDistroName {
+    param([AllowEmptyString()][string]$Name)
+    $value = $Name.Trim()
+    return ($value -ne '' -and $value -notmatch '^(?i:docker-desktop(?:-data)?)$')
+}
+
+# Registered usable WSL distros (parallel to the desktop app's runtime-detect.js:
+# `wsl -l -q`, excluding Docker Desktop internals).
 function Get-RegisteredDistro {
     try { $out = & wsl.exe -l -q 2>$null } catch { return @() }
     if ($LASTEXITCODE -ne 0) { return @() }
     return @($out -split "`r?`n" |
         ForEach-Object { ($_ -replace "`0", '').Trim() } |
-        Where-Object { $_ })
+        Where-Object { Test-SolarDistroName $_ })
 }
 
 # Use the requested distro if present; else the first registered one (matches the app's
 # first-distro pick so detect/install/start/diagnostics all target the SAME distro); else
 # the default (nothing registered yet -> we will install it).
 function Resolve-Distro {
-    $distros = Get-RegisteredDistro
-    if ($distros -contains $Distro) { return $Distro }
+    # Filter again so mocked/caller-provided lists cannot bypass the boundary.
+    $distros = @(Get-RegisteredDistro | Where-Object { Test-SolarDistroName $_ })
+    $requested = if (Test-SolarDistroName $Distro) { $Distro } else { 'Ubuntu-24.04' }
+    if ($distros -contains $requested) { return $requested }
     if ($distros.Count -gt 0) { return $distros[0] }
-    return $Distro
+    return $requested
 }
 
 # WSL is usable only if `wsl --status` succeeds AND at least one distro is registered.
