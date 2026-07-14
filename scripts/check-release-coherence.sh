@@ -54,7 +54,11 @@ if grep -q "raw.githubusercontent.com/suraj-subrahmanyan/OpenSolar/$TAG/" "$PIPX
 else
     fail "pipx cli.py PUBLIC_GET_SOLAR_URL is not the maintained repo at $TAG"
 fi
-STALE_TAGS="$(grep -rhoIE --exclude-dir=__pycache__ 'v1\.0\.0-rc\.[0-9]+' "$PIPX" | grep -v "^$TAG$" | sort -u || true)"
+# Judge only tracked release inputs. Recursive filesystem grep lets local build
+# residue (for example an untracked *.egg-info directory) veto a release even
+# though the public orphan cannot contain it.
+STALE_TAGS="$(git grep -hoE 'v1\.0\.0-rc\.[0-9]+' -- "$PIPX" \
+    | grep -v "^$TAG$" | sort -u || true)"
 if [ -n "$STALE_TAGS" ]; then
     fail "pipx tree references stale tags: $(printf '%s' "$STALE_TAGS" | tr '\n' ' ')"
 else
