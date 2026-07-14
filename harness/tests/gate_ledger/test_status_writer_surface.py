@@ -57,6 +57,12 @@ AUDITED_WRITERS: dict[str, dict[str, str]] = {
         "_prepare_human_search_handoff": "ledger",
         "_start_node_repair_from_eval_fail": "ledger",
         "_reconcile_existing_dispatches": "ledger",
+        # rc.9 operator-completion fence: terminal failed asynchronous workers
+        # move reviewing -> pending for a clean retry.  The rank guard in
+        # set_node_status intentionally refuses that backwards transition, so
+        # this helper records _ledger_transition immediately before the direct
+        # reset and remains an explicitly audited writer.
+        "_requeue_node_after_operator_closeout": "ledger",
         "_mark_graph_node": "ledger",
         "dispatch_node_evals": "ledger",
         "_account_eval_dispatch_failures": "ledger",

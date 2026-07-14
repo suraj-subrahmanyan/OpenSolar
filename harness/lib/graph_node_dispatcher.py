@@ -2563,6 +2563,57 @@ def _latest_operator_result_for(
     return newest[1] if newest else None
 
 
+def _builder_operator_result_gate(sid: str, node: dict[str, Any]) -> dict[str, Any]:
+    """Require the exact asynchronous builder task to finish before review.
+
+    A PM-dispatched worker can write its handoff and mark the graph node
+    ``reviewing`` before the surrounding Codex/Claude process exits.  Handoff
+    presence is therefore not a stable artifact boundary: evaluation or
+    publication at that point can consume bytes the same worker later changes.
+    The operator runtime's atomic ``result.json`` is the durable completion
+    boundary for that exact task.
+    """
+    if str(node.get("dispatched_via") or "").strip() != "pm_dispatch":
+        return {"required": False, "ok": True, "complete": True}
+    task_id = str(node.get("pm_task_id") or "").strip()
+    if not task_id:
+        return {"required": False, "ok": True, "complete": True}
+    node_id = str(node.get("id") or "").strip()
+    operator_id = str(node.get("operator_id") or "").strip()
+    result = _latest_operator_result_for(
+        sid,
+        node_id,
+        operator_id=operator_id,
+        task_id=task_id,
+    )
+    if not result:
+        return {
+            "required": True,
+            "ok": False,
+            "complete": False,
+            "reason": "builder_operator_result_pending",
+            "task_id": task_id,
+            "operator_id": operator_id,
+        }
+    status = str(result.get("status") or "").strip().lower()
+    try:
+        exit_code = int(result.get("exit_code"))
+    except (TypeError, ValueError):
+        exit_code = None
+    ok = status == "completed" and exit_code == 0
+    return {
+        "required": True,
+        "ok": ok,
+        "complete": True,
+        "reason": "" if ok else f"builder_operator_result_{status or 'failed'}",
+        "task_id": task_id,
+        "operator_id": operator_id,
+        "status": status,
+        "exit_code": exit_code,
+        "result_json": str(result.get("_result_json") or ""),
+    }
+
+
 def _latest_pm_task_record_for(sid: str, node_id: str, operator_id: str = "") -> dict[str, Any] | None:
     """Return the newest terminal PM task record for a graph node."""
     root = HARNESS_DIR / "run" / "pm-inbox"
@@ -2613,15 +2664,25 @@ def _operator_terminal_result_closeout(
         operator_id = str(node.get("operator_id") or "").strip()
     if not operator_id:
         return None
-    result = _latest_operator_result_for(sid, node_id, operator_id=operator_id)
+    task_id = str(node.get("pm_task_id") or "").strip()
+    result = _latest_operator_result_for(
+        sid,
+        node_id,
+        operator_id=operator_id,
+        task_id=task_id,
+    )
     if not result:
         result = _latest_pm_task_record_for(sid, node_id, operator_id=operator_id)
     if not result:
         return None
     status = str(result.get("status") or "").strip().lower()
-    if status == "completed" and _existing_node_handoff(sid, node, graph):
+    try:
+        exit_code = int(result.get("exit_code"))
+    except (TypeError, ValueError):
+        exit_code = None
+    if status == "completed" and exit_code == 0 and _existing_node_handoff(sid, node, graph):
         return None
-    if status == "completed":
+    if status == "completed" and exit_code == 0:
         return {
             "reason": "failed_contract_closeout",
             "operator_status": status,
@@ -2645,7 +2706,7 @@ def _operator_terminal_result_closeout(
         "result_json": str(result.get("_result_json") or ""),
         "pm_task_json": str(result.get("_pm_task_json") or ""),
         "operator_id": operator_id,
-        "exit_code": result.get("exit_code"),
+        "exit_code": exit_code,
         "detail": str(result.get("failure_reason") or "")[:500],
     }
 
@@ -2684,6 +2745,61 @@ def _cooldown_operator_after_contract_closeout(operator_id: str, closeout: dict[
         }
     except Exception as exc:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}", "operator_id": operator_id}
+
+
+def _requeue_node_after_operator_closeout(
+    sid: str,
+    node_id: str,
+    node: dict[str, Any],
+    graph: dict[str, Any],
+    status: str,
+    closeout: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply the existing retry semantics for a terminal failed worker."""
+    pane = str(node.get("assigned_to") or "").strip()
+    dispatch_id = str(node.get("dispatch_id") or "").strip()
+    operator_cooldown: dict[str, Any] = {}
+    if closeout.get("reason") == "failed_contract_closeout":
+        operator_cooldown = _cooldown_operator_after_contract_closeout(
+            str(closeout.get("operator_id") or ""),
+            closeout,
+        )
+    if pane and dispatch_id:
+        release_lease(pane, dispatch_id, f"graph_dispatch_reconcile_{closeout['reason']}")
+    node.pop("assigned_to", None)
+    node.pop("dispatch_id", None)
+    node["dispatch_retry_reason"] = closeout["reason"]
+    node["last_operator_closeout_failure"] = closeout
+    if operator_cooldown:
+        node["last_operator_cooldown_after_closeout"] = operator_cooldown
+    node["updated_at"] = _utc_now()
+    _ledger_transition(
+        sid,
+        node_id,
+        status,
+        "pending",
+        "_reconcile_existing_dispatches",
+        note=str(closeout["reason"]),
+    )
+    node["status"] = "pending"
+    graph.setdefault("node_results", {}).pop(node_id, None)
+    _append_dispatch_ledger(
+        "dispatch_reassigned_after_operator_closeout_failure",
+        sid,
+        pane,
+        dispatch_id,
+        {"node": node_id, **closeout, "operator_cooldown": operator_cooldown},
+    )
+    return {
+        "node": node_id,
+        "pane": pane,
+        "dispatch_id": dispatch_id,
+        "status": "pending",
+        "reason": closeout["reason"],
+        "operator_status": closeout.get("operator_status"),
+        "result_json": closeout.get("result_json"),
+        "operator_cooldown": operator_cooldown,
+    }
 
 
 def _sidecar_reconcile_dependency_blockers(graph: dict[str, Any], node: dict[str, Any]) -> list[str]:
@@ -2810,6 +2926,38 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
             eval_verdict = "FAIL"
         else:
             eval_verdict = ""
+        builder_result_gate = _builder_operator_result_gate(sid, node)
+        if handoff_file and builder_result_gate.get("required") and not builder_result_gate.get("ok"):
+            if builder_result_gate.get("complete"):
+                closeout = _operator_terminal_result_closeout(sid, node_id, node, graph) or {
+                    "reason": str(builder_result_gate.get("reason") or "builder_operator_result_failed"),
+                    "operator_status": builder_result_gate.get("status"),
+                    "result_json": builder_result_gate.get("result_json"),
+                    "operator_id": builder_result_gate.get("operator_id"),
+                    "exit_code": builder_result_gate.get("exit_code"),
+                }
+                repaired.append(
+                    _requeue_node_after_operator_closeout(
+                        sid,
+                        node_id,
+                        node,
+                        graph,
+                        str(status or ""),
+                        closeout,
+                    )
+                )
+            else:
+                repaired.append(
+                    {
+                        "node": node_id,
+                        "status": status,
+                        "reason": "builder_operator_result_pending",
+                        "handoff": str(handoff_file),
+                        "task_id": builder_result_gate.get("task_id"),
+                        "operator_id": builder_result_gate.get("operator_id"),
+                    }
+                )
+            continue
         if handoff_file and eval_verdict in {"PASS", "FAIL"} and status in {"passed", "failed"}:
             stale_eval_keys = [
                 "eval_assigned_to",
@@ -3089,45 +3237,15 @@ def _reconcile_existing_dispatches(graph: dict[str, Any], graph_path: str | Path
         if status in {"assigned", "dispatched", "in_progress", "running"}:
             closeout = _operator_terminal_result_closeout(sid, node_id, node, graph)
             if closeout:
-                pane = str(node.get("assigned_to") or "").strip()
-                dispatch_id = str(node.get("dispatch_id") or "").strip()
-                operator_cooldown = {}
-                if closeout.get("reason") == "failed_contract_closeout":
-                    operator_cooldown = _cooldown_operator_after_contract_closeout(
-                        str(closeout.get("operator_id") or ""),
+                repaired.append(
+                    _requeue_node_after_operator_closeout(
+                        sid,
+                        node_id,
+                        node,
+                        graph,
+                        str(status or ""),
                         closeout,
                     )
-                if pane and dispatch_id:
-                    release_lease(pane, dispatch_id, f"graph_dispatch_reconcile_{closeout['reason']}")
-                node.pop("assigned_to", None)
-                node.pop("dispatch_id", None)
-                node["dispatch_retry_reason"] = closeout["reason"]
-                node["last_operator_closeout_failure"] = closeout
-                if operator_cooldown:
-                    node["last_operator_cooldown_after_closeout"] = operator_cooldown
-                node["updated_at"] = _utc_now()
-                _ledger_transition(sid, node_id, status, "pending", "_reconcile_existing_dispatches",
-                                   note=str(closeout["reason"]))
-                node["status"] = "pending"
-                graph.setdefault("node_results", {}).pop(node_id, None)
-                _append_dispatch_ledger(
-                    "dispatch_reassigned_after_operator_closeout_failure",
-                    sid,
-                    pane,
-                    dispatch_id,
-                    {"node": node_id, **closeout, "operator_cooldown": operator_cooldown},
-                )
-                repaired.append(
-                    {
-                        "node": node_id,
-                        "pane": pane,
-                        "dispatch_id": dispatch_id,
-                        "status": "pending",
-                        "reason": closeout["reason"],
-                        "operator_status": closeout.get("operator_status"),
-                        "result_json": closeout.get("result_json"),
-                        "operator_cooldown": operator_cooldown,
-                    }
                 )
                 continue
         if status in {"assigned", "dispatched", "in_progress", "running"}:
@@ -8761,6 +8879,22 @@ def dispatch_node_evals(graph_path: str, dry_run: bool = False, ttl: int = 900,
         node_id = str(node.get("id") or "")
         if not _node_eval_needed(graph, sid, node, force=force):
             continue
+        builder_result_gate = _builder_operator_result_gate(sid, node)
+        if builder_result_gate.get("required") and not builder_result_gate.get("ok"):
+            skipped.append(
+                {
+                    "node": node_id,
+                    "reason": str(
+                        builder_result_gate.get("reason")
+                        or "builder_operator_result_pending"
+                    ),
+                    "task_id": builder_result_gate.get("task_id"),
+                    "operator_id": builder_result_gate.get("operator_id"),
+                    "complete": builder_result_gate.get("complete"),
+                    "result_json": builder_result_gate.get("result_json"),
+                }
+            )
+            continue
         if not dry_run:
             _emit_node_proof_sidecars(sid, node)
         gate_result = _maybe_execute_contract_gate(graph, sid, node, dry_run=dry_run)
@@ -9248,6 +9382,19 @@ def node_verdict(graph_path: str, node_id: str, verdict: str, reason: str = "",
         status = "failed"
     else:
         return {"ok": False, "reason": "invalid_verdict", "verdict": verdict}
+
+    builder_result_gate = _builder_operator_result_gate(sid, node)
+    if builder_result_gate.get("required") and not builder_result_gate.get("ok"):
+        return {
+            "ok": False,
+            "reason": str(
+                builder_result_gate.get("reason")
+                or "builder_operator_result_pending"
+            ),
+            "node": node_id,
+            "status": str(node_status(graph, node_id) or node.get("status") or ""),
+            "builder_result_gate": builder_result_gate,
+        }
 
     # AC-R4.1: the gate runner (this function) sets verdict_kind explicitly; when a
     # caller does not, classification uses the runner-owned mechanical vocabulary,
