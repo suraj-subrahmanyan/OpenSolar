@@ -220,7 +220,11 @@ def _plan_validator_dispatch_guard(graph: dict[str, Any]) -> dict[str, Any] | No
             "errors": ["PLAN_VALIDATOR_MODULE_MISSING"],
         }
     try:
-        verdict = _plan_validator.check_planner_graph_dispatchable(graph or {})
+        verdict = _plan_validator.check_planner_graph_dispatchable(
+            graph or {},
+            sprints_dir=SPRINTS_DIR,
+            sid=str((graph or {}).get("sprint_id") or ""),
+        )
     except Exception as exc:
         return {
             "ok": False,

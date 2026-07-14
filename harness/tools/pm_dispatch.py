@@ -1648,7 +1648,9 @@ def _builder_ready_nodes_for_sprint(sprint_id: str) -> tuple[list[dict[str, Any]
         try:
             import plan_validator  # type: ignore
 
-            plan_guard = plan_validator.check_planner_graph_dispatchable(graph)
+            plan_guard = plan_validator.check_planner_graph_dispatchable(
+                graph, sprints_dir=SPRINTS_DIR, sid=sprint_id
+            )
         except Exception as guard_exc:
             if str(os.environ.get("SOLAR_PLAN_VALIDATOR") or "").strip().lower() not in {"0", "false", "no", "off"}:
                 return [], {
@@ -1881,6 +1883,9 @@ def ensure_compiled_sprint_status(sprint_id: str, title: str, summary: str) -> P
             "phase": "prd_ready",
             "handoff_to": "planner",
             "target_role": "planner",
+            # Runtime-owned birth provenance: a planner may replace the graph,
+            # but it cannot thereby turn a governed intake into legacy work.
+            "plan_compile_required": True,
             "updated_at": now,
         }
     )

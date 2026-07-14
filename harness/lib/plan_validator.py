@@ -688,8 +688,8 @@ def _generic_graph_kind(task_graph: Dict[str, Any]) -> str:
     "generic" (governed — certificate demanded) iff the graph CLAIMS
     pm.generic.v1 (claiming the contract is never a free pass) OR carries
     the intake birth marker `plan_compile_required` (stamped by the
-    requirement compiler on every template skeleton; the planner edits that
-    file in place, so the marker persists through planning). An uncontracted
+    requirement compiler on every template skeleton and restored from the
+    runtime-owned sprint status before compile/dispatch). An uncontracted
     graph WITHOUT the marker is "legacy_uncontracted" — hand-authored
     graphs, direct multi-task CLI usage, old chain flows — and every guard
     skips it, keeping legacy behavior byte-identical under default-on."""
@@ -701,6 +701,39 @@ def _generic_graph_kind(task_graph: Dict[str, Any]) -> str:
     if contract_id == GENERIC_CONTRACT_ID or task_graph.get("plan_compile_required"):
         return "generic"
     return "legacy_uncontracted"
+
+
+def _with_status_plan_provenance(
+    task_graph: Dict[str, Any],
+    *,
+    sprints_dir: Optional[os.PathLike] = None,
+    sid: str = "",
+) -> Dict[str, Any]:
+    """Restore compiler-owned governance after a planner replaces the graph.
+
+    Planner output is not an authority for whether a request was born on the
+    governed generic path.  That provenance is persisted in ``status.json``
+    and overlaid onto a copy here, leaving genuinely hand-authored legacy
+    graphs (which have no status marker) unchanged.
+    """
+    resolved_sid = str(sid or (task_graph or {}).get("sprint_id") or "").strip()
+    if (
+        not sprints_dir
+        or not resolved_sid
+        or (task_graph or {}).get("plan_compile_required") is True
+    ):
+        return task_graph
+    try:
+        status = json.loads(
+            (Path(sprints_dir) / f"{resolved_sid}.status.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, TypeError):
+        return task_graph
+    if not isinstance(status, dict) or status.get("plan_compile_required") is not True:
+        return task_graph
+    restored = copy.deepcopy(task_graph)
+    restored["plan_compile_required"] = True
+    return restored
 
 
 def _error(code: str, node_id: str, message: str, **extra: Any) -> Dict[str, Any]:
@@ -942,7 +975,11 @@ def compile_planner_graph(
         write_errors_artifact(sprints, sid, [error], bounce_count=0, exhausted=False, terminal=False)
         return {**verdict, "ok": False, "errors": [error], "skipped_reason": "graph_missing"}
 
-    task_graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    task_graph = _with_status_plan_provenance(
+        json.loads(graph_path.read_text(encoding="utf-8")),
+        sprints_dir=sprints,
+        sid=sid,
+    )
     graph_kind = _generic_graph_kind(task_graph)
     if graph_kind != "generic":
         verdict["skipped_reason"] = graph_kind
@@ -1041,13 +1078,21 @@ def _read_status_value(status_path: Path) -> str:
         return ""
 
 
-def check_planner_graph_dispatchable(task_graph: Dict[str, Any]) -> Dict[str, Any]:
+def check_planner_graph_dispatchable(
+    task_graph: Dict[str, Any],
+    *,
+    sprints_dir: Optional[os.PathLike] = None,
+    sid: str = "",
+) -> Dict[str, Any]:
     """Read-only dispatch-boundary check for generic planner graphs."""
     verdict: Dict[str, Any] = {"ok": True, "skipped_reason": "", "errors": []}
     if not _env_gate_enabled():
         verdict["skipped_reason"] = "env_off"
         return verdict
-    graph_kind = _generic_graph_kind(task_graph or {})
+    effective_graph = _with_status_plan_provenance(
+        task_graph or {}, sprints_dir=sprints_dir, sid=sid
+    )
+    graph_kind = _generic_graph_kind(effective_graph)
     if graph_kind != "generic":
         verdict["skipped_reason"] = graph_kind
         return verdict
@@ -1064,9 +1109,9 @@ def check_planner_graph_dispatchable(task_graph: Dict[str, Any]) -> Dict[str, An
                 )
             ],
         }
-    graph_version = str((task_graph or {}).get("workflow_contract_version") or "")
+    graph_version = str(effective_graph.get("workflow_contract_version") or "")
     contract_version = str(contract.get("version") or "")
-    if str((task_graph or {}).get("workflow_contract_id") or "") == GENERIC_CONTRACT_ID and graph_version != contract_version:
+    if str(effective_graph.get("workflow_contract_id") or "") == GENERIC_CONTRACT_ID and graph_version != contract_version:
         return {
             "ok": False,
             "reason": "plan_validator_dispatch_refused",
@@ -1080,7 +1125,7 @@ def check_planner_graph_dispatchable(task_graph: Dict[str, Any]) -> Dict[str, An
                 )
             ],
         }
-    errors = check_plan_certificate(task_graph or {})
+    errors = check_plan_certificate(effective_graph)
     if errors:
         return {
             "ok": False,
@@ -1265,7 +1310,9 @@ def _main_check_generic_dispatch(argv: List[str]) -> int:
     graph_path = Path(args.sprints_dir) / f"{args.sid}.task_graph.json"
     try:
         graph = json.loads(graph_path.read_text(encoding="utf-8"))
-        verdict = check_planner_graph_dispatchable(graph)
+        verdict = check_planner_graph_dispatchable(
+            graph, sprints_dir=args.sprints_dir, sid=args.sid
+        )
     except Exception as exc:
         print(f"plan_validator: {exc}", file=sys.stderr)
         return 2

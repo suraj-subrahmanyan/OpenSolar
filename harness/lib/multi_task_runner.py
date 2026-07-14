@@ -3469,7 +3469,11 @@ def _plan_validator_launch_refusal(graph: dict[str, Any]) -> dict[str, Any] | No
     try:
         import plan_validator  # type: ignore
 
-        plan_guard = plan_validator.check_planner_graph_dispatchable(graph)
+        plan_guard = plan_validator.check_planner_graph_dispatchable(
+            graph,
+            sprints_dir=SPRINTS_DIR,
+            sid=str(graph.get("sprint_id") or ""),
+        )
     except Exception as guard_exc:
         if _plan_validator_env_on():
             return {

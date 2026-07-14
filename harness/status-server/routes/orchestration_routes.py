@@ -2096,7 +2096,12 @@ def _build_plan_governance(sid: str, status: dict, tg: dict) -> dict:
     """
     contract_id = str(tg.get("workflow_contract_id") or "").strip()
     cert = tg.get("plan_certificate") if isinstance(tg.get("plan_certificate"), dict) else {}
-    birth_marker = bool(tg.get("plan_compile_required"))
+    # The requirement compiler owns this provenance.  Planner output may
+    # replace task_graph.json wholesale, so status.json is the durable source;
+    # the graph copy remains supported for older/in-flight records.
+    birth_marker = bool(
+        tg.get("plan_compile_required") or status.get("plan_compile_required")
+    )
     schema = str(tg.get("schema_version") or "")
     sprint_status = str(status.get("status") or "").strip().lower()
     phase = str(status.get("phase") or "").strip().lower()

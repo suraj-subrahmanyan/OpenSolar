@@ -105,7 +105,10 @@ def _plan_certificate_ready(path: Path) -> tuple[bool, str]:
         if str(os.environ.get("SOLAR_PLAN_VALIDATOR", "") or "").strip().lower() not in {"0", "false", "no", "off"}:
             return False, f"plan_certificate_uncheckable:{type(exc).__name__}"
         return True, "not_applicable"
-    verdict = plan_validator.check_planner_graph_dispatchable(graph)
+    sid = str(graph.get("sprint_id") or path.name.removesuffix(".task_graph.json"))
+    verdict = plan_validator.check_planner_graph_dispatchable(
+        graph, sprints_dir=SPRINTS_DIR, sid=sid
+    )
     if verdict.get("ok"):
         return True, str(verdict.get("skipped_reason") or "ok")
     errors = verdict.get("errors") if isinstance(verdict.get("errors"), list) else []

@@ -9,8 +9,8 @@ refusing them non-terminally forever (G4 spec §6 blocker 2).
 
 Fix under test (spec option b, per owner): intake-born sprints are marked
 at birth — the requirement compiler stamps `plan_compile_required: true`
-on every template graph skeleton (the planner edits that file in place, so
-the marker persists through planning). Classification:
+on every template graph skeleton and the runtime-owned sprint status. The
+validator restores it from status if a planner replaces the graph. Classification:
 
 - graph CLAIMS pm.generic.v1  -> "generic" (governed; claiming the contract
   is never a free pass — pre-existing rule, pinned here)
