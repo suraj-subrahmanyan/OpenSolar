@@ -10,6 +10,7 @@ trap 'rm -rf "$tmp"' EXIT
 fixture="$tmp/repo"
 git clone -q --no-local "$repo_dir" "$fixture"
 cp "$repo_dir/scripts/release-cut.sh" "$fixture/scripts/release-cut.sh"
+cp "$repo_dir/release-exclude.txt" "$fixture/release-exclude.txt"
 git -C "$fixture" config user.name "Solar release test"
 git -C "$fixture" config user.email "release-test@example.invalid"
 

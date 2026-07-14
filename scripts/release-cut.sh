@@ -16,6 +16,8 @@
 #   1. WORKLOG.md / MIGRATION_PLAN.md absent from the public tree AND from the
 #      new (single-commit) history. (The dev history range ec07779..0e2b431
 #      carried them tracked; the orphan cut drops all that history.)
+#   1b. Private operational worklogs / usage reports absent from the public
+#       tree, including newly-added files not yet named in the exclude list.
 #   2. Personal tokens ZERO in the public tree — owner-identifying + persona
 #      proper nouns: lisihao, haogege1977, private IPs, sihaoli@,
 #      小爱, 昊哥, xiaoai, sihaoli, "Li Sihao", "Sihao Li". (LICENSE is
@@ -163,6 +165,21 @@ check_working_files() {
     return $fail
 }
 
+check_private_operational_docs() {
+    work="$1"
+    log "check 1b: private operational worklogs / usage reports absent"
+    hits="$(cd "$work" && git ls-tree -r --name-only "$ORPHAN_BRANCH" \
+        | grep -Ei '(^|/)[^/]*(WORKLOG|USAGE_REPORT)[^/]*\.md$' || true)"
+    if [ -n "$hits" ]; then
+        printf '  FAIL: private operational document(s) present in public tree:\n' >&2
+        printf '%s\n' "$hits" | sed 's/^/    /' >&2
+        printf '        Exclude or replace these with purpose-built public documentation.\n' >&2
+        return 1
+    fi
+    log "  ok: no private operational worklogs or usage reports"
+    return 0
+}
+
 check_personal_tokens() {
     work="$1"; fail=0
     log "check 2: personal/persona tokens ZERO in the public tree"
@@ -247,6 +264,8 @@ run_verification() {
     check_excluded_paths_absent "$work" || rc=1
     rule
     check_working_files "$work"        || rc=1
+    rule
+    check_private_operational_docs "$work" || rc=1
     rule
     check_personal_tokens "$work"      || rc=1
     rule
