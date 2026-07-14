@@ -303,7 +303,52 @@ def bind_intent_artifacts(intent_id: str, sprint_id: str) -> dict[str, Any]:
         "requirement_trace.json": SPRINTS_DIR / f"{sprint_id}.requirement_trace.json",
     }
     for name, dst in mapping.items():
-        payload = json.loads((base / name).read_text(encoding="utf-8"))
+        gateway_payload = json.loads((base / name).read_text(encoding="utf-8"))
+        payload = gateway_payload
+        if (
+            dst.exists()
+            and not dst.is_symlink()
+            and name in {"requirement_ir.json", "requirement_trace.json"}
+        ):
+            try:
+                compiled = json.loads(dst.read_text(encoding="utf-8"))
+            except Exception:
+                compiled = None
+            compiled_ir = (
+                name == "requirement_ir.json"
+                and isinstance(compiled, dict)
+                and compiled.get("schema_version") == "solar.requirement_ir.v1"
+                and bool(compiled.get("id"))
+            )
+            compiled_trace = (
+                name == "requirement_trace.json"
+                and isinstance(compiled, dict)
+                and compiled.get("schema_version") == "solar.requirement_trace.v1"
+                and bool(compiled.get("requirement_ir_id"))
+                and isinstance(compiled.get("items"), list)
+            )
+            if compiled_ir or compiled_trace:
+                # The requirement compiler runs before RawIntent binding and
+                # writes the richer, acceptance-mapped package at this path.
+                # Never replace it with the gateway's earlier capture-stage
+                # placeholder.  Bind ingress identity into the compiled
+                # artifact while preserving its requirements and trace.
+                payload = compiled
+                payload["intent_id"] = intent_id
+                payload["sprint_id"] = sprint_id
+                if compiled_ir:
+                    gateway_source = gateway_payload.get("source")
+                    if not payload.get("source") and isinstance(gateway_source, dict):
+                        payload["source"] = gateway_source
+                    compiled_inputs = payload.get("source_inputs")
+                    if not isinstance(compiled_inputs, dict):
+                        compiled_inputs = {}
+                    gateway_inputs = gateway_payload.get("source_inputs")
+                    if isinstance(gateway_inputs, dict):
+                        for key in ("raw_request", "repo_context", "research_artifact"):
+                            if not compiled_inputs.get(key) and gateway_inputs.get(key):
+                                compiled_inputs[key] = gateway_inputs[key]
+                    payload["source_inputs"] = compiled_inputs
         if isinstance(payload, dict):
             payload["sprint_id"] = sprint_id
         write_json(dst, payload)

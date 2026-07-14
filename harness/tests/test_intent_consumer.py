@@ -68,8 +68,20 @@ def test_consumer_compiles_rawintent_to_sprint_package(tmp_path):
     assert (tmp_path / "sprints" / f"{sprint_id}.contract.md").exists()
     assert (tmp_path / "sprints" / f"{sprint_id}.task_graph.json").exists()
     ir = json.loads((tmp_path / "sprints" / f"{sprint_id}.requirement_ir.json").read_text())
+    workspace_ir = json.loads(
+        (tmp_path / "workspace" / ".pm" / "requirement_ir.json").read_text()
+    )
+    trace = json.loads(
+        (tmp_path / "sprints" / f"{sprint_id}.requirement_trace.json").read_text()
+    )
     assert ir["intent_id"] == intent_id
     assert ir["sprint_id"] == sprint_id
+    assert ir["id"] == workspace_ir["id"]
+    assert ir["requirements"] == workspace_ir["requirements"]
+    assert len(ir["requirements"]) >= 4
+    assert ir["requirements"][0]["source_text"] != "N/A"
+    assert trace["requirement_ir_id"] == ir["id"]
+    assert len(trace["items"]) == len(ir["requirements"])
 
 
 def test_consumer_dry_run_marks_trusted_pm_dispatch_for_planner_handoff(tmp_path):
