@@ -59,6 +59,24 @@ def _load_operatord(harness_dir: Path):
     return mod
 
 
+def _load_codex_operator(harness_dir: Path):
+    spec = importlib.util.spec_from_file_location(
+        "g4lite_teardown_codex_operator", _HARNESS / "tools" / "codex_operator.py"
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    old = os.environ.get("HARNESS_DIR")
+    os.environ["HARNESS_DIR"] = str(harness_dir)
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        if old is None:
+            os.environ.pop("HARNESS_DIR", None)
+        else:
+            os.environ["HARNESS_DIR"] = old
+    return mod
+
+
 ENVELOPE = {
     "task_id": "pm-sprint-g4td-N1-abc123",
     "sprint_id": "sprint-g4td",
@@ -112,6 +130,107 @@ class TestWorkerRegistration:
         finally:
             if worker.poll() is None:
                 os.killpg(os.getpgid(worker.pid), signal.SIGKILL)
+
+    def test_detached_codex_process_group_is_registered_and_fully_reaped(
+        self, tmp_path, monkeypatch
+    ):
+        """RC9 live red: killing the outer operator left Codex's own session.
+
+        The registered Codex group contains a leader plus a child, mirroring
+        the Node wrapper/native Codex pair seen in the installed run. Teardown
+        must own and reap the complete dedicated group, not only its leader.
+        """
+        child_pid_path = tmp_path / "codex-child.pid"
+        leader = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import pathlib, subprocess, sys, time; "
+                    "child=subprocess.Popen([sys.executable, '-c', "
+                    "'import time; time.sleep(300)']); "
+                    f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid)); "
+                    "time.sleep(300)"
+                ),
+            ],
+            start_new_session=True,
+        )
+        child_pid = 0
+        try:
+            deadline = time.time() + 5
+            while time.time() < deadline and not child_pid_path.exists():
+                time.sleep(0.05)
+            assert child_pid_path.exists(), "fixture group leader never spawned its child"
+            child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+            assert rpr._running(leader.pid) and rpr._running(child_pid)
+
+            monkeypatch.setenv("HARNESS_DIR", str(tmp_path))
+            codex_operator = _load_codex_operator(tmp_path)
+            assert codex_operator._register_codex_process_group(leader.pid) is True
+
+            registrations = [
+                e for e in _registry_entries(tmp_path)
+                if e.get("event") == "register"
+                and e.get("role") == "operator-task-child"
+            ]
+            assert registrations, _registry_entries(tmp_path)
+            assert registrations[-1].get("signal_scope") == "process_group"
+            assert registrations[-1].get("pgid") == leader.pid
+
+            result = rpr.teardown(
+                "harness", grace_s=0.5, kill_grace_s=0.5, harness_dir=tmp_path
+            )
+            leader.wait(timeout=5)
+            deadline = time.time() + 5
+            while rpr._running(child_pid) and time.time() < deadline:
+                time.sleep(0.05)
+            assert result["ok"] is True, result
+            assert not rpr._running(child_pid), (
+                f"registered Codex process-group child survived teardown: {result}"
+            )
+        finally:
+            try:
+                os.killpg(leader.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            if leader.poll() is None:
+                leader.wait(timeout=5)
+
+    def test_process_group_identity_mismatch_is_never_signalled(self, tmp_path):
+        leader = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(300)"],
+            start_new_session=True,
+        )
+        try:
+            rpr.register(
+                "harness",
+                "operator-task-child",
+                leader.pid,
+                harness_dir=tmp_path,
+                signal_scope="process_group",
+            )
+            registry_path = tmp_path / "run" / "process-registry" / "harness.jsonl"
+            records = [json.loads(line) for line in registry_path.read_text().splitlines()]
+            records[0]["session_id"] = leader.pid + 1
+            registry_path.write_text(
+                "\n".join(json.dumps(record) for record in records) + "\n",
+                encoding="utf-8",
+            )
+
+            result = rpr.teardown(
+                "harness", grace_s=0.1, kill_grace_s=0.1, harness_dir=tmp_path
+            )
+            assert leader.poll() is None, result
+            assert {
+                "pid": leader.pid,
+                "why": "process_group_identity_mismatch",
+            } in result["skipped"]
+        finally:
+            try:
+                os.killpg(leader.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            leader.wait(timeout=5)
 
     def test_terminal_run_refuses_registration_without_breaking(self, tmp_path):
         od = _load_operatord(tmp_path)

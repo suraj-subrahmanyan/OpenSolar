@@ -60,6 +60,17 @@ def test_register_rejects_bad_pid(harness_dir):
             rpr.register(RID, "driver", pid, harness_dir=harness_dir)
 
 
+def test_process_group_registration_rejects_the_callers_own_group(harness_dir):
+    with pytest.raises(ValueError, match="dedicated session/group leader|own process group"):
+        rpr.register(
+            RID,
+            "driver",
+            os.getpid(),
+            harness_dir=harness_dir,
+            signal_scope="process_group",
+        )
+
+
 def test_register_refused_after_terminal(harness_dir):
     rpr.register(RID, "coordinator", 4242, harness_dir=harness_dir)
     rpr.mark_terminal(RID, reason="done", harness_dir=harness_dir)

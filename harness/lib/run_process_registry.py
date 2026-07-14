@@ -11,7 +11,9 @@ Storage (append-only JSONL, one file per run, crash-survivable):
         sites can gate respawn with:  [[ -f "$HARNESS_DIR/run/process-registry/$rid.terminal" ]]
 
 Python API:
-    register(run_id, role, pid, meta=None)   -> record   (raises TerminalRunError post-terminal)
+    register(run_id, role, pid, meta=None, signal_scope="pid") -> record
+        (raises TerminalRunError post-terminal; process_group scope requires
+         the registered pid to be its own dedicated group/session leader)
     mark_terminal(run_id, reason="")         -> marker path (idempotent)
     is_terminal(run_id)                      -> bool
     live_entries(run_id)                     -> registered entries whose process is still alive
@@ -310,6 +312,7 @@ def register(
     pid: int,
     meta: Optional[Dict[str, Any]] = None,
     harness_dir: Optional[Path | str] = None,
+    signal_scope: str = "pid",
 ) -> Dict[str, Any]:
     run_id = _validate_run_id(run_id)
     try:
@@ -322,6 +325,9 @@ def register(
         raise TerminalRunError(
             f"run {run_id} is marked terminal; registration refused (respawn past teardown?)"
         )
+    signal_scope = str(signal_scope or "pid").strip().lower()
+    if signal_scope not in {"pid", "process_group"}:
+        raise ValueError(f"unsupported signal_scope: {signal_scope!r}")
     record: Dict[str, Any] = {
         "event": "register",
         "run_id": run_id,
@@ -330,7 +336,23 @@ def register(
         "cmdline": _read_cmdline(pid),
         "birth_id": _read_birth_id(pid),
         "registered_at": _now(),
+        "signal_scope": signal_scope,
     }
+    if signal_scope == "process_group":
+        try:
+            pgid = int(os.getpgid(pid))
+            session_id = int(os.getsid(pid))
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"cannot inspect process group for pid {pid}: {exc}") from exc
+        if pgid != pid or session_id != pid:
+            raise ValueError(
+                "process_group scope requires a dedicated session/group leader "
+                f"(pid={pid}, pgid={pgid}, session_id={session_id})"
+            )
+        if pgid == os.getpgrp() or session_id == os.getsid(0):
+            raise ValueError("refusing to register the registry caller's own process group")
+        record["pgid"] = pgid
+        record["session_id"] = session_id
     if meta:
         record["meta"] = meta
     _append(run_id, record, harness_dir)
@@ -411,6 +433,112 @@ def _wait_gone(pids: List[int], timeout_s: float) -> List[int]:
     return remaining
 
 
+def _process_group_identity_matches(entry: Dict[str, Any]) -> bool:
+    """True only for the same dedicated group/session leader registered earlier."""
+    try:
+        pid = int(entry["pid"])
+        recorded_pgid = int(entry["pgid"])
+        recorded_session = int(entry["session_id"])
+        current_pgid = int(os.getpgid(pid))
+        current_session = int(os.getsid(pid))
+    except (KeyError, OSError, TypeError, ValueError):
+        return False
+    return (
+        recorded_pgid == pid
+        and recorded_session == pid
+        and current_pgid == recorded_pgid
+        and current_session == recorded_session
+        and current_pgid != os.getpgrp()
+        and current_session != os.getsid(0)
+    )
+
+
+def _process_group_live_pids(pgid: int, session_id: int) -> List[int]:
+    """Return non-zombie members of one recorded process group/session.
+
+    Linux `/proc` is the authoritative path used by the installed product.
+    The `ps` fallback uses only portable PID/PGID/state columns for the
+    supported macOS host; the group/session identity was already verified
+    through ``os.getpgid``/``os.getsid`` before signalling.
+    """
+    members: List[int] = []
+    proc_root = Path("/proc")
+    if proc_root.is_dir():
+        for child in proc_root.iterdir():
+            if not child.name.isdigit():
+                continue
+            try:
+                stat_text = (child / "stat").read_text(encoding="ascii", errors="replace")
+                fields = stat_text.rsplit(")", 1)[1].split()
+                state = fields[0]
+                process_group = int(fields[2])
+                process_session = int(fields[3])
+                pid = int(child.name)
+            except (OSError, IndexError, ValueError):
+                continue
+            if process_group == pgid and process_session == session_id and state != "Z":
+                members.append(pid)
+        return sorted(members)
+
+    try:
+        out = subprocess.run(
+            ["ps", "-axo", "pid=,pgid=,state="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if out.returncode != 0:
+            return []
+        for line in out.stdout.splitlines():
+            fields = line.split(None, 2)
+            if len(fields) != 3:
+                continue
+            pid_text, pgid_text, state = fields
+            try:
+                pid = int(pid_text)
+                process_group = int(pgid_text)
+            except ValueError:
+                continue
+            if (
+                process_group == pgid
+                and not state.upper().startswith("Z")
+            ):
+                members.append(pid)
+    except Exception:
+        return []
+    return sorted(members)
+
+
+def _entry_live_pids(entry: Dict[str, Any]) -> List[int]:
+    if str(entry.get("signal_scope") or "pid") == "process_group":
+        try:
+            return _process_group_live_pids(int(entry["pgid"]), int(entry["session_id"]))
+        except (KeyError, TypeError, ValueError):
+            return []
+    pid = int(entry["pid"])
+    return [pid] if _running(pid) else []
+
+
+def _wait_entries_gone(
+    entries: List[Dict[str, Any]], timeout_s: float
+) -> List[Dict[str, Any]]:
+    iterations = max(1, int(timeout_s / _POLL_INTERVAL_S))
+    remaining = list(entries)
+    for _ in range(iterations):
+        remaining = [entry for entry in remaining if _entry_live_pids(entry)]
+        if not remaining:
+            break
+        _sleep(_POLL_INTERVAL_S)
+    return remaining
+
+
+def _signal_entry(entry: Dict[str, Any], sig: int) -> None:
+    if str(entry.get("signal_scope") or "pid") == "process_group":
+        os.killpg(int(entry["pgid"]), sig)
+        return
+    _send_signal(int(entry["pid"]), sig)
+
+
 def teardown(
     run_id: str,
     grace_s: float = 5.0,
@@ -461,6 +589,12 @@ def teardown(
             if not _identity_matches(entry):
                 skipped.append({"pid": pid, "why": "pid_reused"})
                 continue
+            if (
+                str(entry.get("signal_scope") or "pid") == "process_group"
+                and not _process_group_identity_matches(entry)
+            ):
+                skipped.append({"pid": pid, "why": "process_group_identity_mismatch"})
+                continue
             targets.append(entry)
 
         if not targets:
@@ -468,20 +602,27 @@ def teardown(
 
         for entry in targets:
             try:
-                _send_signal(int(entry["pid"]), signal.SIGTERM)
+                _signal_entry(entry, signal.SIGTERM)
             except ProcessLookupError:
                 pass
-        stubborn = _wait_gone([int(e["pid"]) for e in targets], grace_s)
-        for pid in stubborn:
+        stubborn = _wait_entries_gone(targets, grace_s)
+        for entry in stubborn:
+            pid = int(entry["pid"])
             try:
-                _send_signal(pid, signal.SIGKILL)
+                _signal_entry(entry, signal.SIGKILL)
                 sigkilled.append(pid)
             except ProcessLookupError:
                 pass
-        round_survivors = _wait_gone(stubborn, kill_grace_s)
+        stubborn_after_kill = _wait_entries_gone(stubborn, kill_grace_s)
+        round_survivors = sorted({
+            member_pid
+            for entry in stubborn_after_kill
+            for member_pid in _entry_live_pids(entry)
+        })
         survivors.extend(round_survivors)
+        surviving_leaders = {int(entry["pid"]) for entry in stubborn_after_kill}
         killed.extend(
-            int(e["pid"]) for e in targets if int(e["pid"]) not in round_survivors
+            int(e["pid"]) for e in targets if int(e["pid"]) not in surviving_leaders
         )
 
     result: Dict[str, Any] = {
@@ -511,6 +652,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_register.add_argument("--role", required=True)
     p_register.add_argument("--pid", required=True, type=int)
     p_register.add_argument("--meta", default=None, help="optional JSON object")
+    p_register.add_argument(
+        "--signal-scope", choices=("pid", "process_group"), default="pid"
+    )
 
     p_terminal = sub.add_parser("mark-terminal", help="mark the run terminal (idempotent)")
     p_terminal.add_argument("--run-id", required=True)
@@ -538,7 +682,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         if args.command == "register":
             meta = json.loads(args.meta) if args.meta else None
-            record = register(args.run_id, args.role, args.pid, meta=meta)
+            record = register(
+                args.run_id,
+                args.role,
+                args.pid,
+                meta=meta,
+                signal_scope=args.signal_scope,
+            )
             print(json.dumps(record, ensure_ascii=False))
             return 0
         if args.command == "mark-terminal":

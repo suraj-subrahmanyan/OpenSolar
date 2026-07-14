@@ -176,6 +176,48 @@ def _terminate_process_group(proc: subprocess.Popen[str]) -> None:
             return
 
 
+def _register_codex_process_group(pid: int) -> bool:
+    """Give the run registry ownership of Codex's detached session.
+
+    The operatord owns its outer worker, but Codex is intentionally launched
+    in a separate session so task timeouts can terminate the complete CLI
+    group. Register that second boundary before sending the dispatch; otherwise
+    product teardown can kill the outer wrapper and orphan Codex.
+    """
+    harness_dir = Path(
+        os.environ.get("HARNESS_DIR")
+        or os.environ.get("SOLAR_HARNESS_DIR")
+        or Path.home() / ".solar" / "harness"
+    ).expanduser()
+    lib_dir = Path(__file__).resolve().parents[1] / "lib"
+    lib_text = str(lib_dir)
+    if lib_text not in sys.path:
+        sys.path.insert(0, lib_text)
+    try:
+        import run_process_registry as registry
+
+        registry.register(
+            "harness",
+            "operator-task-child",
+            int(pid),
+            meta={
+                "task_id": str(os.environ.get("TASK_ID") or ""),
+                "sprint_id": str(os.environ.get("SID") or ""),
+                "node_id": str(os.environ.get("NODE_ID") or ""),
+                "backend": "codex",
+            },
+            harness_dir=harness_dir,
+            signal_scope="process_group",
+        )
+        return True
+    except Exception as exc:
+        print(
+            f"ERROR: unable to register Codex process group pid={pid}: {exc}",
+            file=sys.stderr,
+        )
+        return False
+
+
 def main() -> int:
     dispatch = _read_dispatch().strip()
     if not dispatch:
@@ -217,6 +259,17 @@ def main() -> int:
             start_new_session=True,
             env=codex_env,
         )
+        if not _register_codex_process_group(proc.pid):
+            _terminate_process_group(proc)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except Exception:
+                    proc.kill()
+                proc.wait(timeout=5)
+            return 75
         try:
             assert proc.stdin is not None
             proc.stdin.write(dispatch)
