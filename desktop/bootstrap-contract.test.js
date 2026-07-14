@@ -82,6 +82,34 @@ assert(
 );
 
 assert(
+  "desktop selftest validates the loaded runtime dashboard",
+  main.includes("assessSelftestSnapshot") &&
+    main.includes("collectSelftestSnapshot") &&
+    main.includes("fallback_renderer_loaded") &&
+    main.includes("finishSelftest(false") &&
+    main.includes("app.exit(code)"),
+);
+
+assert(
+  "desktop selftest fails when a requested screenshot cannot be written",
+  main.includes('reason: "screenshot_capture_failed"') &&
+    main.includes("capturePage returned an empty PNG") &&
+    !main.includes("SHOT_FAIL"),
+);
+
+assert(
+  "desktop selftest fails immediately on renderer crash or unresponsiveness",
+  main.includes('reason: "renderer_process_gone"') &&
+    main.includes('reason: "window_unresponsive"'),
+);
+
+assert(
+  "desktop autotest runs the selftest truth suite",
+  autotest.includes("node src/selftest-verdict.test.js") &&
+    autotest.includes("node selftest-electron.test.js"),
+);
+
+assert(
   "desktop autotest runs this bootstrap/package contract",
   autotest.includes("node bootstrap-contract.test.js"),
 );
