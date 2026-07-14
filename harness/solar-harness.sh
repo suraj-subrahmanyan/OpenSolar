@@ -1559,21 +1559,45 @@ should_epic_decompose_request() {
   local min_chars="${SOLAR_EPIC_MIN_CHARS:-420}"
   local min_lines="${SOLAR_EPIC_MIN_LINES:-4}"
   local min_signals="${SOLAR_EPIC_MIN_SIGNALS:-3}"
-  local chars lines signals
+  local chars lines signals large_shape explicit_decomposition broad_scope
   chars=$(printf "%s" "$req" | wc -m | tr -d ' ')
   lines=$(printf "%s" "$req" | awk 'END{print NR}')
+  large_shape=0
   if (( chars >= min_chars || lines >= min_lines )); then
+    large_shape=1
+  fi
+
+  # Length describes request detail, not work topology. A long, precise request
+  # for one CLI/file must remain one sprint. Automatic Epic routing therefore
+  # also requires evidence of explicit decomposition or genuinely broad system
+  # scope. This avoids the rc.9 live failure where a bounded line_stats.py task
+  # became five unrelated child sprints solely because it exceeded 420 chars.
+  signals=0
+  explicit_decomposition=0
+  broad_scope=0
+  printf "%s" "$req" | grep -Eiq 'PRDs?|requirements?|contracts?|documentation|README|需求|合约|文档' \
+    && signals=$((signals + 1))
+  printf "%s" "$req" | grep -Eiq '架构|设计|方案|规划|路线图|architecture|architectural|design|roadmap|technical plan' \
+    && signals=$((signals + 1))
+  if printf "%s" "$req" | grep -Eiq '任务图|(^|[^[:alnum:]_])DAG([^[:alnum:]_]|$)|拆分|依赖图|依赖关系|并行调度|多.*PRD|一系列|split .*into|split (the )?(work|request|project)|dependency (DAG|graph|order)|parallel (work|execution|implementation)|workstreams?|orchestrat(e|ion)|multi[- ](stage|component|service|workstream)|multiple (PRDs?|workstreams?|components?|services?|subsystems?)'; then
+    signals=$((signals + 1))
+    explicit_decomposition=1
+  fi
+  printf "%s" "$req" | grep -Eiq '开发|实现|重构|改造|集成|优化|修复|implement|build|develop|refactor|integrat(e|ion)|optimi[sz]e|fix' \
+    && signals=$((signals + 1))
+  printf "%s" "$req" | grep -Eiq '验证|测试|回归|验收|证明|闭环|端到端|verify|verification|validat(e|ion)|tests?|pytest|regression|acceptance|end[- ]to[- ]end|evidence' \
+    && signals=$((signals + 1))
+  printf "%s" "$req" | grep -Eiq '自动|默认|持续|不要.*问|做完|搞定|防.*半截|半截|automat(e|ic|ion)|continuous|without (manual|asking)|close the parent' \
+    && signals=$((signals + 1))
+  if printf "%s" "$req" | grep -Eiq '多个(组件|系统|服务|工作流|子系统|PRD)|全量|全面|系统|框架|平台|产品化|entire (system|platform|product|stack)|whole (system|platform|product|stack)|platform-wide|framework|producti[sz]ation|multiple (components?|services?|workstreams?|PRDs?|subsystems?|applications?|packages?)|cross[- ](component|service|system|platform)|across (the )?.*(subsystems?|services?|components?)'; then
+    signals=$((signals + 1))
+    broad_scope=1
+  fi
+
+  if (( explicit_decomposition == 1 && signals >= 2 )); then
     return 0
   fi
-  signals=0
-  printf "%s" "$req" | grep -Eiq 'PRD|prd|需求|合约|md|文档' && signals=$((signals + 1))
-  printf "%s" "$req" | grep -Eiq '架构|设计|方案|规划|路线图' && signals=$((signals + 1))
-  printf "%s" "$req" | grep -Eiq '任务图|DAG|拆分|依赖|并行|调度|多.*PRD|一系列' && signals=$((signals + 1))
-  printf "%s" "$req" | grep -Eiq '开发|实现|重构|改造|集成|优化|修复' && signals=$((signals + 1))
-  printf "%s" "$req" | grep -Eiq '验证|测试|回归|验收|证明|闭环|端到端' && signals=$((signals + 1))
-  printf "%s" "$req" | grep -Eiq '自动|默认|持续|不要.*问|做完|搞定|防.*半截|半截' && signals=$((signals + 1))
-  printf "%s" "$req" | grep -Eiq '多个|全量|全面|完整|系统|框架|平台|产品化' && signals=$((signals + 1))
-  if (( signals >= min_signals )); then
+  if (( broad_scope == 1 && large_shape == 1 && signals >= min_signals )); then
     return 0
   fi
   return 1
