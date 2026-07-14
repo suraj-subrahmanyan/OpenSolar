@@ -3631,7 +3631,9 @@ function TopBar({
 }
 
 function UsagePanel({ usage }: { usage?: UsagePayload }) {
-  const total = usage?.total_used_tokens_label || "0 tok";
+  const total =
+    usage?.total_used_tokens_label ||
+    (usage?.availability === "unavailable" ? "Unavailable" : "0 tok");
   const models = usage?.models || [];
   return (
     <section className="panel usage-panel" data-testid="usage-panel">
@@ -3651,8 +3653,8 @@ function UsagePanel({ usage }: { usage?: UsagePayload }) {
         ))}
       </div>
       <p className="usage-foot">
-        Per model, per day (account-wide) — runtime does not report per-sprint
-        tokens.
+        {usage?.label ||
+          "Per model, per day (account-wide) — runtime does not report per-sprint tokens."}
       </p>
     </section>
   );
@@ -4387,7 +4389,7 @@ function UsageLimitsPane({ usage }: { usage?: UsagePayload }) {
     <SettingsSection
       title="Usage & limits"
       detail={usage?.total_used_tokens_label || "unavailable"}
-      description="Account-wide model-day token usage from the runtime quota scan. Per-run numbers stay on the session view."
+      description="Account-wide model-day token usage from the selected runtime when that provider exposes it. Per-run evidence stays on the session view."
     >
       {!usage && (
         <SettingsEmptyState
@@ -4405,8 +4407,15 @@ function UsageLimitsPane({ usage }: { usage?: UsagePayload }) {
       </div>
       {usage && !hasUsageRows && (
         <SettingsEmptyState
-          title="No usage rows in this harness"
-          detail="The /usage endpoint is reachable, but it has no model-day rows for the current harness data."
+          title={
+            usage.availability === "unavailable"
+              ? `Usage unavailable for ${usage.runtime === "codex" ? "Codex" : "the selected runtime"}`
+              : "No usage rows in this harness"
+          }
+          detail={
+            usage.label ||
+            "The /usage endpoint is reachable, but it has no model-day rows for the current harness data."
+          }
         />
       )}
       <div className="usage-models settings-usage-models">

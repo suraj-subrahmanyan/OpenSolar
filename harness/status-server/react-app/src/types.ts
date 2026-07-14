@@ -357,6 +357,10 @@ export type StallSummary = {
 
 export type UsagePayload = {
   ok: boolean;
+  runtime?: "codex" | "claude" | string;
+  runtime_source?: string;
+  availability?: "available" | "unavailable" | string;
+  reason?: string;
   source: string;
   scope: string;
   label: string;

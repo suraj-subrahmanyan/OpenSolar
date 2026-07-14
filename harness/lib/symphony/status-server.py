@@ -1075,6 +1075,31 @@ def _refresh_quota_footer_cache() -> list[dict]:
 
 
 def _usage_payload(refresh: bool = False) -> dict:
+    runtime, runtime_source = _read_user_config_runtime()
+    if runtime == "codex":
+        # quota-footer.sh is specifically a Claude JSONL scanner. Running it
+        # in Codex mode creates plausible-looking ``claude-opus 0`` rows, which
+        # is worse than admitting that Codex account usage is not exposed by
+        # this local runtime. Do not relabel or estimate another provider's
+        # data.
+        return {
+            "ok": True,
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "runtime": runtime,
+            "runtime_source": runtime_source,
+            "availability": "unavailable",
+            "reason": "codex_account_usage_not_exposed",
+            "source": "Codex account usage not exposed",
+            "source_path": "",
+            "scope": "selected-runtime account usage",
+            "not_per_sprint": True,
+            "not_per_agent": True,
+            "label": "Codex account-wide token usage is not exposed by the local CLI; per-run evidence remains on the session view.",
+            "total_used_tokens": None,
+            "total_used_tokens_label": "unavailable",
+            "models": [],
+            "refresh_attempts": [],
+        }
     rows = _quota_footer_cache_rows()
     refresh_attempts = []
     if refresh or not rows:
@@ -1084,6 +1109,10 @@ def _usage_payload(refresh: bool = False) -> dict:
     return {
         "ok": True,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "runtime": runtime,
+        "runtime_source": runtime_source,
+        "availability": "available",
+        "reason": "",
         "source": "Claude log scan / quota-footer",
         "source_path": _safe_rel(HARNESS_DIR / "quota-footer.sh", HARNESS_DIR),
         "scope": "model-day estimate",
