@@ -14,9 +14,13 @@ import datetime as dt
 import importlib.util
 import json
 import os
+import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 
 _HARNESS = Path(__file__).resolve().parents[2]
@@ -156,6 +160,106 @@ handle_drafting "$SID" "$STATUS_FILE"
     assert not dispatch_log.exists()
 
 
+@pytest.mark.parametrize(
+    ("heartbeat_offset", "legacy_expected"),
+    [(0, False), (-600, True)],
+    ids=("live-worker-suppresses-duplicate", "stale-worker-allows-recovery"),
+)
+def test_operator_liveness_controls_dispatch_after_planner_outputs_appear(
+    tmp_path: Path,
+    heartbeat_offset: int,
+    legacy_expected: bool,
+) -> None:
+    """A long planner may write artifacts before its final status handoff.
+
+    The run-3 live red hit this exact interval after the bounded birth claim
+    expired: design/plan/graph existed, the submitted PM planner task was still
+    running, and the coordinator incorrectly launched the legacy pane planner.
+    """
+    harness = _minimal_harness(tmp_path)
+    sid = "sprint-planner-artifacts-before-handoff"
+    task_id = f"pm-{sid}-N0-cafefeed"
+    sprints = harness / "sprints"
+    status_path = sprints / f"{sid}.status.json"
+    prd_path = sprints / f"{sid}.prd.md"
+    dispatch_log = tmp_path / "legacy-dispatch-called"
+
+    status_path.write_text(
+        json.dumps(
+            {
+                "id": sid,
+                "status": "drafting",
+                "phase": "prd_ready",
+                "handoff_to": "planner",
+                "planner_dispatch_claim": {
+                    "owner": "operator_pool",
+                    "state": "submitted",
+                    "claimed_at": _iso_after(-600),
+                    "expires_at": _iso_after(-1),
+                    "task_id": task_id,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    prd_path.write_text("# PRD\n\nValid fixture.\n", encoding="utf-8")
+    (sprints / f"{sid}.design.md").write_text("# Design\n", encoding="utf-8")
+    (sprints / f"{sid}.plan.md").write_text("# Plan\n", encoding="utf-8")
+    (sprints / f"{sid}.task_graph.json").write_text(
+        json.dumps({"nodes": [{"id": "S1", "status": "pending"}]}),
+        encoding="utf-8",
+    )
+    (harness / "run" / "pm-inbox" / f"{task_id}.json").write_text(
+        json.dumps(
+            {
+                "task_id": task_id,
+                "sprint_id": sid,
+                "requested_role": "planner",
+                "status": "submitted",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (harness / "run" / "operator-status" / "codex-planner.json").write_text(
+        json.dumps(
+            {
+                "current_task_id": task_id,
+                "runtime_state": "running",
+                "heartbeat_at": _iso_after(heartbeat_offset),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    script = r'''
+pm_requirements_file() { printf '%s\n' "$REQ_FILE"; }
+workflow_guard_route_role() { printf '%s\n' planner; }
+validate_doc() { return 0; }
+drafting_flow_marked() { return 1; }
+drafting_retry_blocked() { return 1; }
+generate_dispatch() { :; }
+append_dispatch() { :; }
+dispatch_to_planner() { printf '%s\n' called > "$DISPATCH_LOG"; return 0; }
+mark_drafting_flow() { :; }
+emit_event() { :; }
+rollback_state_cache() { :; }
+handle_drafting "$SID" "$STATUS_FILE"
+'''
+    result = _source_coordinator(
+        harness,
+        script,
+        env={
+            "SID": sid,
+            "STATUS_FILE": str(status_path),
+            "REQ_FILE": str(prd_path),
+            "DISPATCH_LOG": str(dispatch_log),
+        },
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert dispatch_log.exists() is legacy_expected
+
+
 def test_terminal_pm_record_and_result_do_not_reclaim_planner_ownership(tmp_path: Path) -> None:
     harness = _minimal_harness(tmp_path)
     sid = "sprint-failed-role-pool"
@@ -196,6 +300,55 @@ def test_terminal_pm_record_and_result_do_not_reclaim_planner_ownership(tmp_path
     )
     assert submitted.returncode == 0, submitted.stderr
     assert submitted.stdout.strip() == "active"
+
+
+def test_registered_live_planner_process_is_strong_ownership_evidence(
+    tmp_path: Path,
+) -> None:
+    harness = _minimal_harness(tmp_path)
+    (harness / "lib").mkdir()
+    registry_module = _HARNESS / "lib" / "run_process_registry.py"
+    shutil.copy2(registry_module, harness / "lib" / registry_module.name)
+    sid = "sprint-registry-owned-planner"
+    task_id = f"pm-{sid}-N0-acde1234"
+    worker = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(300)"],
+        start_new_session=True,
+    )
+    try:
+        registered = subprocess.run(
+            [
+                sys.executable,
+                str(registry_module),
+                "register",
+                "--run-id",
+                "harness",
+                "--role",
+                "operator-task-child",
+                "--pid",
+                str(worker.pid),
+                "--meta",
+                json.dumps({"task_id": task_id}),
+            ],
+            env={**os.environ, "HARNESS_DIR": str(harness)},
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert registered.returncode == 0, registered.stderr
+
+        result = _source_coordinator(
+            harness,
+            f'if pm_operator_role_pool_task_live "{sid}" planner; then echo live; else echo absent; fi',
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "live"
+    finally:
+        try:
+            os.killpg(worker.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        worker.wait(timeout=5)
 
 
 def test_expired_operator_pool_claim_allows_legacy_recovery(tmp_path: Path) -> None:

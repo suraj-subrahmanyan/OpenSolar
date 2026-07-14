@@ -3209,6 +3209,70 @@ sys.exit(1)
 PY
 }
 
+pm_operator_role_pool_task_live() {
+  local sid="$1" role="${2:-planner}" node="N0"
+  [[ -n "$sid" ]] || return 1
+  case "$role" in
+    planner) node="N0" ;;
+    builder) node="B0" ;;
+    evaluator) node="E0" ;;
+  esac
+  python3 - "$HARNESS_DIR" "$sid" "$node" <<'PY' 2>/dev/null
+import datetime
+import json
+import os
+import sys
+from pathlib import Path
+
+h = Path(sys.argv[1])
+prefix = f"pm-{sys.argv[2]}-{sys.argv[3]}-"
+
+# Strongest evidence: a registry-owned process whose immutable birth identity
+# still matches and whose task metadata names this planner request.
+try:
+    sys.path.insert(0, str(h / "lib"))
+    import run_process_registry
+
+    for entry in run_process_registry.live_entries("harness", harness_dir=h):
+        task_id = str((entry.get("meta") or {}).get("task_id") or "")
+        if task_id.startswith(prefix):
+            sys.exit(0)
+except Exception:
+    pass
+
+# Compatibility fallback for older operators: require both an active state and
+# a fresh heartbeat. A stale status file must never suppress recovery forever.
+try:
+    stale_seconds = max(
+        15,
+        int(os.environ.get("SOLAR_PM_OPERATOR_HEARTBEAT_STALE_SEC", "90") or "90"),
+    )
+except (TypeError, ValueError):
+    stale_seconds = 90
+now = datetime.datetime.now(datetime.timezone.utc)
+for status_path in (h / "run" / "operator-status").glob("*.json"):
+    try:
+        data = json.loads(status_path.read_text(encoding="utf-8"))
+        task_id = str(data.get("current_task_id") or data.get("task_id") or "")
+        state = str(data.get("runtime_state") or data.get("state") or "").lower()
+        heartbeat = datetime.datetime.fromisoformat(
+            str(data.get("heartbeat_at") or data.get("updated_at") or "").replace("Z", "+00:00")
+        )
+        if heartbeat.tzinfo is None:
+            heartbeat = heartbeat.replace(tzinfo=datetime.timezone.utc)
+    except Exception:
+        continue
+    if (
+        task_id.startswith(prefix)
+        and state in {"leased", "running", "draining", "busy"}
+        and (now - heartbeat).total_seconds() <= stale_seconds
+    ):
+        sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
 handle_queued() {
   local sid="$1" sf="$2"
   local blocked_by
@@ -3321,17 +3385,23 @@ PY
   guard_role="$(workflow_guard_route_role "$sid")"
 
   if [[ "$guard_role" != "builder_main" && "$guard_role" != "builder" ]]; then
-    if pm_operator_role_pool_enabled \
-      && { [[ ! -s "$design" ]] || [[ ! -s "$plan" ]] || [[ ! -s "$graph" ]]; }; then
-      if pm_operator_role_pool_task_seen "$sid" "planner"; then
+    if pm_operator_role_pool_enabled; then
+      if pm_operator_role_pool_task_live "$sid" "planner"; then
         log "${G}PRD ready → planner role-pool task already active; suppress legacy pane planner dispatch for ${sid}${N}"
         emit_event "$sid" "planner_role_pool_inflight" "coordinator" "{\"reason\":\"suppress_legacy_pane_dispatch\"}"
         return 0
       fi
-      if pm_operator_role_pool_claim_active "$sf" "planner"; then
-        log "${G}PRD ready → planner operator-pool claim pending; suppress legacy pane planner dispatch for ${sid}${N}"
-        emit_event "$sid" "planner_role_pool_claimed" "coordinator" "{\"reason\":\"suppress_legacy_pane_dispatch_until_claim_resolves\"}"
-        return 0
+      if [[ ! -s "$design" ]] || [[ ! -s "$plan" ]] || [[ ! -s "$graph" ]]; then
+        if pm_operator_role_pool_task_seen "$sid" "planner"; then
+          log "${G}PRD ready → planner role-pool task already visible; suppress legacy pane planner dispatch for ${sid}${N}"
+          emit_event "$sid" "planner_role_pool_inflight" "coordinator" "{\"reason\":\"suppress_legacy_pane_dispatch\"}"
+          return 0
+        fi
+        if pm_operator_role_pool_claim_active "$sf" "planner"; then
+          log "${G}PRD ready → planner operator-pool claim pending; suppress legacy pane planner dispatch for ${sid}${N}"
+          emit_event "$sid" "planner_role_pool_claimed" "coordinator" "{\"reason\":\"suppress_legacy_pane_dispatch_until_claim_resolves\"}"
+          return 0
+        fi
       fi
     fi
     if [[ "$req_file" == "$prd" ]]; then
