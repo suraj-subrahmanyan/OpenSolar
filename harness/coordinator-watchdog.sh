@@ -360,6 +360,31 @@ tmux_has_exact_session() {
   tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -Fxq -- "$wanted"
 }
 
+resolve_pane_restart_runtime() {
+  local session="$1" configured="" runtime=""
+
+  # A tmux session owns the effective runtime for every pane it launches.
+  # Read that durable session environment instead of trusting the watchdog's
+  # process environment: a long-lived watchdog can outlive a settings change,
+  # while solar-harness.sh refreshes the session environment at launch.
+  configured=$(tmux show-environment -t "$session" SOLAR_PANE_RUNTIME 2>/dev/null || true)
+  case "$configured" in
+    SOLAR_PANE_RUNTIME=*) runtime="${configured#SOLAR_PANE_RUNTIME=}" ;;
+  esac
+  case "$runtime" in
+    claude|codex) printf '%s\n' "$runtime"; return 0 ;;
+  esac
+
+  # Compatibility fallback for an older/external tmux session with no Solar
+  # runtime marker.  Preserve the watchdog's effective launch runtime, then the
+  # historical Claude default, but never accept an arbitrary command value.
+  runtime="${SOLAR_PANE_RUNTIME:-claude}"
+  case "$runtime" in
+    claude|codex) printf '%s\n' "$runtime" ;;
+    *) printf '%s\n' "claude" ;;
+  esac
+}
+
 ensure_tmux_sessions() {
   local missing=0
 
@@ -514,20 +539,29 @@ check_panes() {
     _esc_w=$(printf '%q' "$_respawn_workdir")
     # sprint-20260502-200424 D2: 用绝对路径 bash + 注入完整 PATH
     # 根因: tmux respawn-pane 不继承用户 shell profile, ~/n/bin/claude 找不到 → exit 127
-    local _restart_bash
+    local _restart_bash _restart_runtime _restart_launcher
     _restart_bash=$(resolve_bash4 2>/dev/null || command -v bash 2>/dev/null || echo /bin/bash)
+    _restart_runtime=$(resolve_pane_restart_runtime "$session")
+    _restart_launcher="start-incarnation.sh"
+    if [[ "$_restart_runtime" == "codex" ]]; then
+      # start-incarnation.sh is the legacy Claude-only recovery launcher.
+      # Codex must return through the same runtime-aware launcher used by the
+      # initial session, otherwise recovery silently opens Claude OAuth.
+      _restart_launcher="pane-launcher.sh"
+    fi
     local _user_path="${PATH}"
     for _p in /opt/homebrew/bin /usr/local/bin "$HOME/n/bin" "$HOME/.local/bin" "$HOME/.npm-global/bin" "$HOME/.bun/bin"; do
       [[ -d "$_p" ]] && case ":${_user_path}:" in *":$_p:"*) ;; *) _user_path="$_p:${_user_path}" ;; esac
     done
     local _pane_id
     _pane_id=$(tmux display-message -p -t "$target" '#{pane_id}' 2>/dev/null || true)
-    # respawn start-incarnation: keep watchdog pane recovery on the non-interactive launcher.
+    # Respawn through the selected non-interactive launcher. Claude keeps the
+    # legacy incarnation path; Codex uses the runtime-aware primary launcher.
     tmux respawn-pane -k -t "$target" \
-      "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_EXECPATH HOME='${HOME}' PATH='${_user_path}' TMUX_PANE='${_pane_id}' ${_restart_bash} ${_esc_h}/start-incarnation.sh $persona ${_esc_w}" 2>/dev/null || {
+      "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_EXECPATH SOLAR_PANE_RUNTIME='${_restart_runtime}' HOME='${HOME}' PATH='${_user_path}' TMUX_PANE='${_pane_id}' ${_restart_bash} ${_esc_h}/${_restart_launcher} $persona ${_esc_w}" 2>/dev/null || {
       warn "respawn-pane 失败, 尝试 send-keys..."
       tmux send-keys -t "$target" \
-        "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_EXECPATH PATH='${_user_path}' TMUX_PANE='${_pane_id}' ${_restart_bash} ${_esc_h}/start-incarnation.sh $persona ${_esc_w}" Enter 2>/dev/null || {
+        "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_EXECPATH SOLAR_PANE_RUNTIME='${_restart_runtime}' PATH='${_user_path}' TMUX_PANE='${_pane_id}' ${_restart_bash} ${_esc_h}/${_restart_launcher} $persona ${_esc_w}" Enter 2>/dev/null || {
         warn "send-keys 失败, pane 不存在或不可写: $target; 跳过本 pane 恢复"
         continue
       }
