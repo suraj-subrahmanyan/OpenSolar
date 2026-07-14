@@ -1687,6 +1687,25 @@ _PIPELINE_STAGE_ORDER = {
     "other": 8,
 }
 
+# Task-graph stages that produce proof ABOUT the requested deliverable rather
+# than the deliverable itself.  These outputs remain visible and can still be
+# the result when they are the only thing produced; they merely rank behind a
+# delivery-stage output.  The classification comes from the graph contract,
+# not prompt text or a particular report filename.
+_SUPPORTING_OUTPUT_TASK_TYPES = {
+    "audit_inventory",
+    "evaluation",
+    "evidence",
+    "planning",
+    "requirements",
+    "review",
+    "test",
+    "testing",
+    "tests",
+    "verification",
+}
+_SUPPORTING_OUTPUT_DIRS = {"evidence", "test", "tests"}
+
 
 def _deliverable_stage(name: str, rel_path: str, source: str) -> str:
     """Classify a deliverable by its producing pipeline stage from the file name/dir
@@ -1725,6 +1744,72 @@ def _deliverable_stage(name: str, rel_path: str, source: str) -> str:
     return "other"
 
 
+def _declared_output_contracts(sid: str, workdir: Path) -> list[tuple[Path, str]]:
+    """Resolve graph write-scope declarations into sprint-owned output paths.
+
+    Planner graphs use both workdir-relative declarations (``workspace/x``)
+    and harness-relative declarations (``sprints/<sid>/workdir/x``).  Normalize
+    both forms, reject anything outside the sprint workdir, and retain the
+    producing task type for result ranking.
+    """
+    graph, _path = _sprint_contract_graph(sid)
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    contracts: list[tuple[Path, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        task_type = str(
+            node.get("task_type") or node.get("dispatch_task_type") or ""
+        ).strip().lower()
+        write_scope = node.get("write_scope")
+        if not isinstance(write_scope, list):
+            continue
+        for raw in write_scope:
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            declared = Path(raw.strip())
+            candidates = [declared] if declared.is_absolute() else [
+                workdir / declared,
+                HARNESS_DIR / declared,
+                SPRINTS_DIR / sid / declared,
+            ]
+            if "workdir" in declared.parts:
+                workdir_index = declared.parts.index("workdir")
+                candidates.append(workdir.joinpath(*declared.parts[workdir_index + 1 :]))
+            for candidate in candidates:
+                try:
+                    resolved = candidate.resolve()
+                except OSError:
+                    continue
+                if not _is_within(resolved, workdir):
+                    continue
+                key = (str(resolved), task_type)
+                if key not in seen:
+                    contracts.append((resolved, task_type))
+                    seen.add(key)
+    return contracts
+
+
+def _output_role(path: Path, workdir: Path, contracts: list[tuple[Path, str]]) -> tuple[str, bool]:
+    """Return producer task type and whether an output is supporting evidence."""
+    matches = [
+        (len(declared.parts), task_type)
+        for declared, task_type in contracts
+        if path == declared or _is_within(path, declared)
+    ]
+    producer_task_type = max(matches, default=(0, ""))[1]
+    try:
+        parts = tuple(part.lower() for part in path.relative_to(workdir).parts[:-1])
+    except ValueError:
+        parts = ()
+    supporting = (
+        producer_task_type in _SUPPORTING_OUTPUT_TASK_TYPES
+        or any(part in _SUPPORTING_OUTPUT_DIRS for part in parts)
+    )
+    return producer_task_type, supporting
+
+
 def _select_result_index(rows: list[dict]) -> int:
     """Pick the single canonical result among discovered rows. Preference: the
     evaluator-accepted artifact, then workdir output, then process reports.  Within
@@ -1744,8 +1829,15 @@ def _select_result_index(rows: list[dict]) -> int:
     def produced(row: dict) -> bool:
         return row.get("source") == "output"
 
+    def delivery(row: dict) -> bool:
+        return produced(row) and not bool(row.get("supporting"))
+
     tiers = (
         lambda r: "accepted" in name_l(r) and renderable(r),
+        lambda r: delivery(r) and r.get("stage") == "report" and kind(r) in {"html", "htm"},
+        lambda r: delivery(r) and r.get("stage") == "report" and renderable(r),
+        lambda r: delivery(r) and renderable(r),
+        lambda r: delivery(r),
         lambda r: produced(r) and r.get("stage") == "report" and kind(r) in {"html", "htm"},
         lambda r: produced(r) and r.get("stage") == "report" and renderable(r),
         lambda r: produced(r) and renderable(r),
@@ -1856,6 +1948,7 @@ def _discover_sprint_deliverables(sid: str) -> list[dict]:
             ".git", "__pycache__", ".pytest_cache", "node_modules", ".venv", "venv",
             "dist", "build", ".vite", ".mypy_cache", ".ruff_cache", ".idea", ".cache", "site-packages",
         }
+        output_contracts = _declared_output_contracts(sid, workdir)
         wd_count = 0
         try:
             for path in sorted(workdir.rglob("*"), key=lambda p: str(p)):
@@ -1884,6 +1977,9 @@ def _discover_sprint_deliverables(sid: str) -> list[dict]:
                     continue
                 if cutoff and stat.st_mtime < cutoff:
                     continue
+                producer_task_type, supporting = _output_role(
+                    resolved, workdir, output_contracts
+                )
                 rows.append({
                     "name": resolved.name,
                     "rel_path": key,
@@ -1892,6 +1988,8 @@ def _discover_sprint_deliverables(sid: str) -> list[dict]:
                     "mtime": stat.st_mtime,
                     "source": "output",
                     "primary": True,
+                    "producer_task_type": producer_task_type,
+                    "supporting": supporting,
                     "stage": _deliverable_stage(resolved.name, key, "output"),
                     "view_url": f"/sprints/{urllib.parse.quote(sid)}/deliverables?path={urllib.parse.quote(key)}",
                 })

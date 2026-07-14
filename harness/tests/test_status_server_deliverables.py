@@ -117,3 +117,90 @@ def test_workdir_report_outranks_larger_planner_report(tmp_path: Path) -> None:
     assert len(selected) == 1
     assert selected[0]["name"] == "test_report.md"
     assert selected[0]["source"] == "output"
+
+
+def test_user_deliverable_outranks_larger_supporting_evidence(tmp_path: Path) -> None:
+    """A verification artifact must not replace the requested user output.
+
+    The graph already distinguishes delivery work (``implementation``) from
+    supporting work (``tests``).  The result selector must honor that contract
+    instead of treating every produced markdown file as an equal candidate and
+    choosing the largest one.
+    """
+    module, _harness, sprints = _load_status_server(tmp_path)
+    sid = "sprint-result-role-selection"
+    workdir = sprints / sid / "workdir"
+    readme = _write(
+        workdir / "workspace" / "README.md",
+        "# Line statistics\n\nRun `python line_stats.py`.\n",
+    )
+    _write(workdir / "workspace" / "line_stats.py", "print('ready')\n")
+    evidence = _write(
+        workdir / "workspace" / "evidence" / "test_report.md",
+        "# Verification evidence\n\n" + ("all checks passed\n" * 200),
+    )
+    _write(
+        sprints / f"{sid}.task_graph.json",
+        json.dumps(
+            {
+                "nodes": [
+                    {
+                        "id": "BUILD",
+                        "task_type": "implementation",
+                        "write_scope": [
+                            "workspace/line_stats.py",
+                            "workspace/README.md",
+                        ],
+                    },
+                    {
+                        "id": "VERIFY",
+                        "task_type": "tests",
+                        "depends_on": ["BUILD"],
+                        "write_scope": ["workspace/evidence/test_report.md"],
+                    },
+                ]
+            }
+        ),
+    )
+
+    items = module._discover_sprint_deliverables(sid)
+    selected = [item for item in items if item["result"]]
+    evidence_item = next(item for item in items if item["name"] == "test_report.md")
+
+    assert evidence.stat().st_size > readme.stat().st_size
+    assert len(selected) == 1
+    assert selected[0]["name"] == "README.md"
+    assert selected[0]["producer_task_type"] == "implementation"
+    assert selected[0]["supporting"] is False
+    assert evidence_item["producer_task_type"] == "tests"
+    assert evidence_item["supporting"] is True
+
+
+def test_supporting_evidence_remains_result_when_it_is_the_only_output(tmp_path: Path) -> None:
+    module, _harness, sprints = _load_status_server(tmp_path)
+    sid = "sprint-evidence-only-result"
+    _write(
+        sprints / sid / "workdir" / "workspace" / "evidence" / "review.md",
+        "# Review\n\nPASS\n",
+    )
+    _write(
+        sprints / f"{sid}.task_graph.json",
+        json.dumps(
+            {
+                "nodes": [
+                    {
+                        "id": "REVIEW",
+                        "task_type": "verification",
+                        "write_scope": ["workspace/evidence/review.md"],
+                    }
+                ]
+            }
+        ),
+    )
+
+    items = module._discover_sprint_deliverables(sid)
+    selected = [item for item in items if item["result"]]
+
+    assert len(selected) == 1
+    assert selected[0]["name"] == "review.md"
+    assert selected[0]["supporting"] is True
