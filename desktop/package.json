@@ -16,7 +16,7 @@
     "build:linux": "bash build-renderer.sh && node prepackage-check.js && electron-builder --linux AppImage"
   },
   "devDependencies": {
-    "electron": "^33.2.1",
+    "electron": "^42.6.1",
     "electron-builder": "^26.15.3",
     "playwright": "^1.61.1"
   },

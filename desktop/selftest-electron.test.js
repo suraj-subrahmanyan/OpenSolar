@@ -11,6 +11,9 @@ const { _electron: electron } = require("playwright");
 
 const DESKTOP = __dirname;
 const SOURCE_HARNESS = path.resolve(DESKTOP, "..", "harness");
+const ELECTRON_EXECUTABLE = process.env.SOLAR_ELECTRON_EXECUTABLE_PATH
+  ? path.resolve(process.env.SOLAR_ELECTRON_EXECUTABLE_PATH)
+  : "";
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "solar-desktop-selftest-"));
 const tempHome = path.join(temp, "home");
 const tempHarness = path.join(tempHome, ".solar", "harness");
@@ -115,8 +118,11 @@ function startBlankServer() {
 }
 
 async function runDesktopSelftest(url, options = {}) {
-  const application = await electron.launch({
-    args: ["."],
+  if (ELECTRON_EXECUTABLE && !fs.statSync(ELECTRON_EXECUTABLE).isFile()) {
+    throw new Error(`Electron executable is not a file: ${ELECTRON_EXECUTABLE}`);
+  }
+  const launchOptions = {
+    args: ELECTRON_EXECUTABLE ? [] : ["."],
     cwd: DESKTOP,
     env: {
       ...process.env,
@@ -129,7 +135,9 @@ async function runDesktopSelftest(url, options = {}) {
       SOLAR_ELECTRON_DISABLE_SANDBOX: "1",
       ELECTRON_DISABLE_SECURITY_WARNINGS: "true",
     },
-  });
+  };
+  if (ELECTRON_EXECUTABLE) launchOptions.executablePath = ELECTRON_EXECUTABLE;
+  const application = await electron.launch(launchOptions);
   const output = [];
   application.on("console", (message) => output.push(message.text()));
   const child = application.process();
@@ -197,7 +205,9 @@ async function stopChild(child) {
     assert.doesNotMatch(screenshotFailure.output, /SELFTEST OK/);
     console.log("PASS  unwritable screenshot -> nonzero + SELFTEST FAIL");
 
-    console.log("ELECTRON SELFTEST E2E PASS (3/3)");
+    console.log(
+      `ELECTRON SELFTEST E2E PASS (3/3, ${ELECTRON_EXECUTABLE ? "built executable" : "development shell"})`,
+    );
   } finally {
     if (blank) await new Promise((resolve) => blank.server.close(resolve));
     if (runtime) await stopChild(runtime.child);

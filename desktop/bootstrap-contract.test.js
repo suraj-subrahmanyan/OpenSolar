@@ -22,6 +22,7 @@ const releaseVersion = read("../VERSION").trim();
 const app = read("../harness/status-server/react-app/src/App.tsx");
 const pkg = JSON.parse(read("package.json"));
 const autotest = read("autotest.sh");
+const selftestElectron = read("selftest-electron.test.js");
 const desktopWorkflow = read("../.github/workflows/desktop-build.yml");
 const desktopGateJob = desktopWorkflow.split("\n  gate:\n")[1] || "";
 const macResources = (pkg.build.mac.extraResources || []).map((entry) => entry.to);
@@ -114,6 +115,13 @@ assert(
   "desktop autotest runs the selftest truth suite",
   autotest.includes("node src/selftest-verdict.test.js") &&
     autotest.includes("node selftest-electron.test.js"),
+);
+
+assert(
+  "Electron selftest can verify a built executable",
+  selftestElectron.includes("SOLAR_ELECTRON_EXECUTABLE_PATH") &&
+    selftestElectron.includes("executablePath") &&
+    desktopWorkflow.includes("dist/linux-unpacked/solar-desktop"),
 );
 
 assert(

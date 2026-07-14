@@ -78,6 +78,14 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: npm run ${{ matrix.script }}
 
+      - name: Verify Linux packaged Electron selftest
+        if: matrix.script == 'build:linux'
+        working-directory: desktop
+        shell: bash
+        env:
+          SOLAR_ELECTRON_EXECUTABLE_PATH: ${{ github.workspace }}/desktop/dist/linux-unpacked/solar-desktop
+        run: xvfb-run -a node selftest-electron.test.js
+
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
