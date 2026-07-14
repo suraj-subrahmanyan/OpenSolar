@@ -57,6 +57,50 @@ def _ledger_route(sprint_id: str, node_id: str, task_id: str, phase: str,
     except Exception:
         pass
 
+
+def _sync_graph_after_route_result(sprint_id: str) -> Dict[str, Any]:
+    """Converge terminal graph proof after result.json becomes durable.
+
+    An evaluator can invoke ``node-verdict`` from inside its model process.
+    That updates the graph before operatord writes the provider-bearing
+    ``result.json``.  Closeout deliberately waits at that point, so the result
+    writer must provide the next convergence edge instead of relying on an
+    unrelated coordinator mtime change.
+
+    Non-graph operator tasks are a no-op.  Graph sync remains best-effort for
+    the operator hot path; its return value keeps the failure inspectable in
+    focused tests and callers that choose to surface it.
+    """
+    sid = str(sprint_id or "").strip()
+    if not sid:
+        return {"ok": True, "reason": "missing_sprint_id"}
+    sprints_dir = _route_sprints_dir()
+    graph_path = sprints_dir / f"{sid}.task_graph.json"
+    if not graph_path.is_file():
+        return {"ok": True, "reason": "graph_missing", "graph_path": str(graph_path)}
+    try:
+        import graph_scheduler  # type: ignore
+
+        # operator_runtime may be imported before tests or an installed runner
+        # override HARNESS_DIR.  Keep the scheduler on the same runtime roots as
+        # the result artifact rather than its import-time defaults.
+        graph_scheduler.HARNESS_DIR = HARNESS_DIR
+        graph_scheduler.SPRINTS_DIR = sprints_dir
+        graph = graph_scheduler.load_graph(graph_path)
+        return graph_scheduler.sync_status_cache_from_graph(
+            graph,
+            graph_path,
+            actor="operator_runtime",
+            event="route_result_recorded",
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "reason": "route_result_sync_failed",
+            "graph_path": str(graph_path),
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
 HOME = Path.home()
 # HARNESS_DIR > SOLAR_HARNESS_DIR > install default — the graph_scheduler rule
 # (round-4 G7: operator_runtime ignored SOLAR_HARNESS_DIR and could land run
@@ -877,6 +921,7 @@ def write_result(
         "finished_at": finished_at,
         "result_status": status,
     })
+    _sync_graph_after_route_result(sprint_id)
     return result_path
 
 

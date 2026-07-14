@@ -756,13 +756,16 @@ def sync_status_cache_from_graph(
     if route_proof:
         result["route_proof"] = {
             "ok": route_proof.get("ok"),
+            "complete": route_proof.get("complete"),
             "path": route_proof.get("path"),
             "selected_runtime": route_proof.get("selected_runtime"),
             "allowed_providers": route_proof.get("allowed_providers", []),
             "violations": route_proof.get("violations", []),
+            "incomplete_stages": route_proof.get("incomplete_stages", []),
         }
         if route_proof.get("enforced") and not route_proof.get("ok"):
-            result.update({"ok": False, "reason": "route_proof_violation"})
+            reason = "route_proof_incomplete" if route_proof.get("complete") is False else "route_proof_violation"
+            result.update({"ok": False, "reason": reason})
             return result
 
     already_passed = str(current.get("status") or "").lower() == "passed"

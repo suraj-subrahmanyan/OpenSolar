@@ -19,6 +19,19 @@ TERMINAL_TASK_STATUSES = {
     "error",
 }
 
+ACTIVE_TASK_STATUSES = {
+    "assigned",
+    "dispatched",
+    "in_progress",
+    "leased",
+    "pending",
+    "processing",
+    "running",
+    "started",
+    "submitted",
+    "submitted_fallback",
+}
+
 RUNTIME_DEFAULT_ALLOWED_PROVIDERS = {
     "codex": {"openai"},
     "claude": {"anthropic"},
@@ -343,15 +356,26 @@ def build_route_proof(
         allowed = set(RUNTIME_DEFAULT_ALLOWED_PROVIDERS[runtime])
 
     violations: list[dict[str, Any]] = []
+    incomplete_stages: list[dict[str, Any]] = []
     enforce = bool(allowed)
     for stage in sorted(stages.values(), key=lambda item: str(item.get("task_id") or item.get("node_id") or "")):
         provider = _normalize_provider(stage.get("provider"))
         status = str(stage.get("status") or "").strip().lower()
         has_result = bool(stage.get("result_json"))
+        has_succeeded_call = stage.get("runtime_evidence") == "model_call_succeeded"
+        if enforce and status in ACTIVE_TASK_STATUSES and not has_result and not has_succeeded_call:
+            incomplete_stages.append(
+                {
+                    "task_id": stage.get("task_id"),
+                    "node_id": stage.get("node_id"),
+                    "status": status,
+                    "reason": "route_record_incomplete",
+                }
+            )
         should_check = enforce and (
             has_result
             or status in TERMINAL_TASK_STATUSES
-            or stage.get("runtime_evidence") == "model_call_succeeded"
+            or has_succeeded_call
         )
         if not should_check:
             continue
@@ -405,14 +429,17 @@ def build_route_proof(
                 }
             )
 
+    complete = not incomplete_stages
     return {
-        "ok": not violations,
+        "ok": not violations and complete,
+        "complete": complete,
         "generated_at": _utc_now(),
         "sprint_id": sid,
         "selected_runtime": runtime,
         "allowed_providers": sorted(allowed),
         "enforced": enforce,
         "violations": violations,
+        "incomplete_stages": incomplete_stages,
         "diagnostics": {
             "attribution_warnings": attribution_warnings,
         },

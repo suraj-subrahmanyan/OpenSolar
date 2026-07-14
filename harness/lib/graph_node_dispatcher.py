@@ -7080,9 +7080,11 @@ def _mark_parent_sprint_passed_if_ready(sid: str, parent: dict[str, Any], dry_ru
             "by": "graph-dispatch",
             "data": {
                 "path": route.get("path"),
+                "complete": route.get("complete"),
                 "selected_runtime": route.get("selected_runtime"),
                 "allowed_providers": route.get("allowed_providers", []),
                 "violations": route.get("violations", []),
+                "incomplete_stages": route.get("incomplete_stages", []),
             },
         })
         return False

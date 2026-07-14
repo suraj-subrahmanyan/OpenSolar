@@ -8,6 +8,7 @@ if str(ROOT / "lib") not in sys.path:
     sys.path.insert(0, str(ROOT / "lib"))
 
 import graph_scheduler  # noqa: E402
+import operator_runtime  # noqa: E402
 import route_proof  # noqa: E402
 
 
@@ -202,6 +203,102 @@ def test_scheduler_closeout_blocks_route_proof_violation(tmp_path, monkeypatch):
     assert result["route_proof"]["violations"][0]["provider"] == "anthropic"
     status = json.loads((sprints / f"{sid}.status.json").read_text(encoding="utf-8"))
     assert status["status"] == "active"
+
+
+def test_terminal_closeout_waits_for_final_operator_route_result(tmp_path, monkeypatch):
+    """A passed graph cannot outrun the final operator wrapper's route result.
+
+    The live rc.9 fixture closed its final node from inside the evaluator before
+    operatord had written result.json and changed the PM record from submitted
+    to completed.  Route proof was therefore persisted with a submitted final
+    stage and never refreshed.  Closeout must wait for that durable boundary,
+    then converge on the next scheduler tick.
+    """
+    harness = tmp_path / "harness"
+    sprints = harness / "sprints"
+    sid = "sprint-final-route-result-race"
+    task_id = "task-final-evaluator"
+    _seed_registry(harness)
+    _seed_pm_record(
+        harness,
+        sid,
+        task_id,
+        node_id="S1",
+        role="evaluator",
+        operator_id="codex-builder",
+        status="submitted",
+    )
+    _write_json(
+        sprints / f"{sid}.status.json",
+        {
+            "sprint_id": sid,
+            "status": "active",
+            "phase": "planning_complete",
+        },
+    )
+    graph_path = sprints / f"{sid}.task_graph.json"
+    graph = {
+        "sprint_id": sid,
+        "nodes": [{"id": "S1", "status": "passed"}],
+        "required_gates": [],
+        "node_results": {"S1": {"status": "passed"}},
+    }
+    _write_json(graph_path, graph)
+
+    monkeypatch.setattr(graph_scheduler, "HARNESS_DIR", harness)
+    monkeypatch.setattr(graph_scheduler, "SPRINTS_DIR", sprints)
+    monkeypatch.setattr(operator_runtime, "HARNESS_DIR", harness)
+    monkeypatch.setattr(operator_runtime, "OPERATOR_RESULTS_DIR", harness / "run" / "operator-results")
+    monkeypatch.setattr(operator_runtime, "PHYSICAL_OPERATORS_PATH", harness / "config" / "physical-operators.json")
+    monkeypatch.setattr(operator_runtime, "_route_sprints_dir", lambda: sprints)
+
+    waiting = graph_scheduler.sync_status_cache_from_graph(graph, graph_path)
+
+    assert waiting["ok"] is False
+    assert waiting["reason"] == "route_proof_incomplete"
+    assert waiting["route_proof"]["complete"] is False
+    assert waiting["route_proof"]["incomplete_stages"] == [
+        {
+            "task_id": task_id,
+            "node_id": "S1",
+            "status": "submitted",
+            "reason": "route_record_incomplete",
+        }
+    ]
+    waiting_status = json.loads((sprints / f"{sid}.status.json").read_text(encoding="utf-8"))
+    assert waiting_status["status"] == "active"
+
+    _seed_pm_record(
+        harness,
+        sid,
+        task_id,
+        node_id="S1",
+        role="evaluator",
+        operator_id="codex-builder",
+        status="completed",
+    )
+    operator_runtime.write_result(
+        operator_id="codex-builder",
+        task_id=task_id,
+        sprint_id=sid,
+        node_id="S1",
+        status="completed",
+        exit_code=0,
+        started_at="2026-07-14T16:56:53Z",
+        finished_at="2026-07-14T17:01:37Z",
+        log_tail="completed",
+        model_route={"effective_provider": "openai", "effective_model": "gpt-5.5"},
+    )
+
+    final_proof = json.loads((sprints / f"{sid}.route-proof.json").read_text(encoding="utf-8"))
+    assert final_proof["ok"] is True
+    assert final_proof["complete"] is True
+    assert final_proof["incomplete_stages"] == []
+    final_stage = next(stage for stage in final_proof["stages"] if stage["task_id"] == task_id)
+    assert final_stage["status"] == "completed"
+    assert final_stage["provider"] == "openai"
+    closed_status = json.loads((sprints / f"{sid}.status.json").read_text(encoding="utf-8"))
+    assert closed_status["status"] == "passed"
 
 
 def test_stale_physical_plan_operator_does_not_override_route_proof(tmp_path):
