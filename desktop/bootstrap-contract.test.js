@@ -125,6 +125,12 @@ assert(
 );
 
 assert(
+  "Linux desktop entry matches Electron's runtime window class",
+  pkg.desktopName === "solar-desktop.desktop" &&
+    pkg.build.linux.syncDesktopName === true,
+);
+
+assert(
   "desktop autotest runs this bootstrap/package contract",
   autotest.includes("node bootstrap-contract.test.js"),
 );
