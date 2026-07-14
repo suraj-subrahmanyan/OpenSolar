@@ -11,7 +11,7 @@ teardown (`run_process_registry.teardown --run-id harness`) only reaps
 registered pids.
 
 Fix under test: operatord registers every spawned worker in the harness run
-registry (role "operator-task", cmdline snapshot for identity-safe kills,
+registry (role "operator-task", process-birth identity for exec-safe kills,
 task metadata) so the ONE existing teardown owns it. Registration is
 best-effort: a terminal run refuses registration by design (the
 respawn-past-teardown guard) and any registry failure must never break task
@@ -99,7 +99,8 @@ class TestWorkerRegistration:
             assert entries, _registry_entries(tmp_path)
             assert entries[-1]["pid"] == worker.pid
             assert entries[-1].get("meta", {}).get("task_id") == ENVELOPE["task_id"]
-            assert entries[-1].get("cmdline"), "cmdline snapshot required for identity-safe kills"
+            assert entries[-1].get("cmdline"), "diagnostic command snapshot is required"
+            assert entries[-1].get("birth_id"), "stable process-birth identity is required"
 
             result = rpr.teardown("harness", grace_s=0.5, kill_grace_s=0.5, harness_dir=tmp_path)
             deadline = time.time() + 5
@@ -128,6 +129,55 @@ class TestWorkerRegistration:
             assert not entries, entries
         finally:
             os.killpg(os.getpgid(worker.pid), signal.SIGKILL)
+
+    def test_worker_exec_keeps_same_identity_and_is_reaped(self, tmp_path):
+        """Exact RC9 live failure: bash registered, then exec'd Python/Codex.
+
+        Command text legitimately changes across exec while the PID and process
+        birth remain the same.  Teardown must not misclassify that transition
+        as PID reuse and leave the worker running.
+        """
+        od = _load_operatord(tmp_path)
+        release = tmp_path / "exec-now"
+        worker = subprocess.Popen(
+            [
+                "bash",
+                "-c",
+                f"while [ ! -e {release!s} ]; do sleep 0.02; done; exec sleep 300",
+            ],
+            start_new_session=True,
+        )
+        try:
+            od._register_worker_process(worker.pid, ENVELOPE)
+            registered = [
+                e for e in _registry_entries(tmp_path)
+                if e.get("event") == "register" and e.get("pid") == worker.pid
+            ][-1]
+            before_cmdline = registered.get("cmdline")
+            assert before_cmdline and "bash" in before_cmdline
+
+            release.touch()
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                current = rpr._read_cmdline(worker.pid)
+                if current and current != before_cmdline and "sleep 300" in current:
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("worker never completed the controlled exec transition")
+
+            result = rpr.teardown(
+                "harness", grace_s=0.5, kill_grace_s=0.5, harness_dir=tmp_path
+            )
+            worker.wait(timeout=5)
+            assert worker.returncode is not None
+            assert not any(
+                item.get("pid") == worker.pid and item.get("why") == "pid_reused"
+                for item in result["skipped"]
+            ), result
+        finally:
+            if worker.poll() is None:
+                os.killpg(os.getpgid(worker.pid), signal.SIGKILL)
 
 
 class TestDaemonOnceRegistersWorker:
@@ -189,3 +239,12 @@ class TestDaemonOnceRegistersWorker:
             f"registry; registry={_registry_entries(tmp_path)}"
         )
         assert entries[-1].get("meta", {}).get("task_id") == ENVELOPE["task_id"]
+        daemon_entries = [
+            e for e in _registry_entries(tmp_path)
+            if e.get("event") == "register" and e.get("role") == "operatord"
+        ]
+        assert daemon_entries, (
+            "operator_runtime's real auto-kicked operatord must be owned by "
+            f"the harness registry; registry={_registry_entries(tmp_path)}"
+        )
+        assert daemon_entries[-1].get("meta", {}).get("operator_id") == self.OPERATOR_ID

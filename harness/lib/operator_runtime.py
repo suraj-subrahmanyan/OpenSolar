@@ -549,6 +549,30 @@ def _kick_operatord_once(operator_id: str) -> int:
         env=env,
         start_new_session=True,
     )
+    # The auto-kicked daemon is itself run-owned.  Register it immediately so
+    # `solar-harness kill` can reap both the daemon and the detached worker it
+    # may spawn.  Fail closed if ownership cannot be established: leaving an
+    # unregistered daemon is precisely the RC9 live-run leak this seam guards.
+    try:
+        import run_process_registry as _rpr
+
+        _rpr.register(
+            "harness",
+            "operatord",
+            int(proc.pid),
+            meta={"operator_id": str(operator_id)},
+            harness_dir=HARNESS_DIR,
+        )
+    except Exception:
+        try:
+            proc.terminate()
+            proc.wait(timeout=1)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        raise
     return int(proc.pid)
 
 

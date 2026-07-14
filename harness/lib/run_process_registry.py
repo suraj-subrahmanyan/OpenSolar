@@ -47,8 +47,9 @@ editing those files from this lane):
 
 Kill ordering: roles containing "watchdog" first (nothing may respawn what we
 are about to kill), then "coordinator", then everything else newest-first.
-A recorded cmdline snapshot guards against PID reuse: a pid whose current
-cmdline no longer matches its registered cmdline is skipped, never signalled.
+A recorded process-birth identity guards against PID reuse while remaining
+stable across a legitimate exec transition.  Legacy records without a birth
+identity retain the older cmdline comparison and are skipped on mismatch.
 """
 from __future__ import annotations
 
@@ -161,6 +162,39 @@ def _read_cmdline(pid: int) -> str:
         )
         if out.returncode == 0:
             return out.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _read_birth_id(pid: int) -> str:
+    """Best-effort process birth identity, stable across ``exec``.
+
+    Linux exposes the kernel start-time ticks in ``/proc/<pid>/stat``.  The
+    portable fallback uses ``ps lstart`` (available on macOS and the supported
+    Unix hosts).  Command text is deliberately not part of this identity: an
+    operatord worker begins as ``bash -lc`` and then execs Python/Codex without
+    changing process identity.
+    """
+    try:
+        stat_text = (Path("/proc") / str(pid) / "stat").read_text(
+            encoding="ascii", errors="replace"
+        )
+        fields_after_comm = stat_text.rsplit(")", 1)[1].split()
+        # fields_after_comm[0] is field 3 (state); starttime is field 22.
+        return f"proc-start-ticks:{fields_after_comm[19]}"
+    except (OSError, IndexError):
+        pass
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        started = out.stdout.strip() if out.returncode == 0 else ""
+        if started:
+            return f"ps-lstart:{started}"
     except Exception:
         pass
     return ""
@@ -294,6 +328,7 @@ def register(
         "role": str(role or "").strip() or "unknown",
         "pid": pid,
         "cmdline": _read_cmdline(pid),
+        "birth_id": _read_birth_id(pid),
         "registered_at": _now(),
     }
     if meta:
@@ -324,6 +359,16 @@ def _registered_entries(
 
 
 def _identity_matches(entry: Dict[str, Any]) -> bool:
+    recorded_birth = str(entry.get("birth_id") or "")
+    if recorded_birth:
+        current_birth = _read_birth_id(int(entry["pid"]))
+        # When a birth identity was captured, fail closed if it can no longer
+        # be verified.  Signalling an unverified/reused PID is less safe than
+        # reporting it skipped.
+        return bool(current_birth) and current_birth == recorded_birth
+
+    # Backward compatibility for append-only registries written before the
+    # birth identity existed.
     recorded = str(entry.get("cmdline") or "")
     if not recorded:
         return True  # no snapshot -> cannot distinguish; treat as matching
