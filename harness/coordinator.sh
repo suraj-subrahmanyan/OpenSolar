@@ -2639,38 +2639,51 @@ check_needs_human() {
 auto_checkpoint() {
   local sid="$1" new_status="$2"
 
-  # 找到工作目录 (从 sprint 合约中读取，或用当前目录)
+  # Git commits and tags are user-repository mutations.  Keep them explicitly
+  # opt-in: a normal product run must never create commits merely because its
+  # HOME/HARNESS_DIR happens to live below an unrelated git repository.
+  case "${SOLAR_AUTO_CHECKPOINT:-0}" in
+    1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) ;;
+    *) return 0 ;;
+  esac
+
+  # The durable workspace binding is the only authority for an opted-in
+  # checkpoint.  Never fall back to $HOME/.claude or a contract string: git
+  # walks parent directories, which caused an installed run to commit runtime
+  # sprint artifacts into an unrelated state repository.
   local work_dir=""
-  local contract="$SPRINTS_DIR/${sid}.contract.md"
-  if [[ -f "$contract" ]]; then
-    work_dir=$(grep '^Project:' "$contract" 2>/dev/null | sed 's/^Project:[[:space:]]*//')
+  local binding_helper="$HARNESS_DIR/lib/workspace_binding.py"
+  if [[ -f "$binding_helper" ]]; then
+    work_dir=$(python3 "$binding_helper" show --harness-dir "$HARNESS_DIR" 2>/dev/null || true)
   fi
-  [[ -z "$work_dir" ]] && work_dir="$HOME/.claude"
+  [[ -n "$work_dir" && -d "$work_dir" ]] || return 0
 
-  # 检查是否是 git 仓库
-  if ! git -C "$work_dir" rev-parse --git-dir &>/dev/null; then
-    return 0
+  local git_root rel_work
+  git_root=$(git -C "$work_dir" rev-parse --show-toplevel 2>/dev/null) || return 0
+  git_root=$(cd "$git_root" 2>/dev/null && pwd -P) || return 0
+  work_dir=$(cd "$work_dir" 2>/dev/null && pwd -P) || return 0
+  case "$work_dir/" in
+    "$git_root/"*) ;;
+    *) return 0 ;;
+  esac
+  if [[ "$work_dir" == "$git_root" ]]; then
+    rel_work="."
+  else
+    rel_work="${work_dir#"$git_root"/}"
   fi
 
-  # 检查是否有变更 (避免空 commit)
-  if git -C "$work_dir" diff --quiet 2>/dev/null && git -C "$work_dir" diff --cached --quiet 2>/dev/null; then
-    # 检查 untracked files (只在 sprints 目录)
-    local untracked
-    untracked=$(git -C "$work_dir" ls-files --others --exclude-standard -- "$SPRINTS_DIR/" 2>/dev/null | head -5)
-    if [[ -z "$untracked" ]]; then
-      return 0  # 无变更，跳过
-    fi
-  fi
+  # Scope both detection and commit to the bound workspace.  In particular,
+  # never stage $SPRINTS_DIR: runtime state belongs to the harness, not the
+  # user's project history.
+  [[ -n "$(git -C "$git_root" status --porcelain -- "$rel_work" 2>/dev/null)" ]] || return 0
 
   local tag="checkpoint/${sid}/${new_status}/$(date +%H%M%S)"
 
-  # stage sprint 相关文件 + 工作区变更
-  git -C "$work_dir" add "$SPRINTS_DIR/${sid}"* 2>/dev/null || true
-
-  # 创建检查点 commit
-  git -C "$work_dir" commit --allow-empty -m "checkpoint: ${sid} → ${new_status}" --no-gpg-sign 2>/dev/null && {
+  # --only protects unrelated paths that may already be staged in the repo.
+  git -C "$git_root" add -A -- "$rel_work" 2>/dev/null || return 0
+  git -C "$git_root" commit --only -m "checkpoint: ${sid} → ${new_status}" --no-gpg-sign -- "$rel_work" 2>/dev/null && {
     # 打 tag 方便回滚
-    git -C "$work_dir" tag "$tag" 2>/dev/null
+    git -C "$git_root" tag "$tag" 2>/dev/null
     log "${G}检查点: ${tag}${N}"
   } || true
 }
