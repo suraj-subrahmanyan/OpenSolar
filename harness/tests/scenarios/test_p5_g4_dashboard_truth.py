@@ -193,6 +193,19 @@ class TestNoFalseDecisionCardOnGovernedPath:
         action = projection.get("human_action_required") or {}
         assert action.get("type") != "plan_review", action
 
+    def test_governed_compiling_is_not_reported_as_a_stall(self, tmp_path):
+        """The normal compiler/certificate interval is progress, not a pause."""
+        self._stage(tmp_path, governed=True)
+        mod = _load_routes(tmp_path)
+        projection, _deg = mod.build_projection_payload(SID, mode="fast")
+        governance = projection.get("plan_governance") or {}
+        stall = (projection.get("dispatch") or {}).get("stall") or {}
+        action = projection.get("human_action_required") or {}
+
+        assert governance.get("state") == "compiling", governance
+        assert stall.get("is_stalled") is False, stall
+        assert action.get("type") not in {"stall_review", "capability_mismatch"}, action
+
     def test_legacy_uncontracted_keeps_the_plan_review_card(self, tmp_path):
         self._stage(tmp_path, governed=False)
         mod = _load_routes(tmp_path)

@@ -762,7 +762,14 @@ def _stall_human_reason(reasons: list[str]) -> str:
     return "Repeated retries with no forward progress."
 
 
-def _build_stall_summary(status: dict, node_cards: list[dict], diagnostics: list[dict], tg_ok: bool, events: list[dict] | None = None) -> dict:
+def _build_stall_summary(
+    status: dict,
+    node_cards: list[dict],
+    diagnostics: list[dict],
+    tg_ok: bool,
+    events: list[dict] | None = None,
+    plan_governance: dict | None = None,
+) -> dict:
     sprint_status = str(status.get("status") or "").strip().lower()
     phase = str(status.get("phase") or "").strip().lower()
     blocked = [card for card in node_cards if str(card.get("status") or "").lower() in {"blocked", "gate_blocked", "failed"} or card.get("blocked_reason")]
@@ -788,7 +795,13 @@ def _build_stall_summary(status: dict, node_cards: list[dict], diagnostics: list
             "detail": "Solar reported a blocked gate. The dashboard is showing the stall rather than treating the sprint as complete.",
             "reasons": reasons,
         }
-    if "planning_complete" in phase and not active and (blocked or pending):
+    governance_state = str((plan_governance or {}).get("state") or "").strip().lower()
+    if (
+        "planning_complete" in phase
+        and not active
+        and (blocked or pending)
+        and governance_state != "compiling"
+    ):
         state = "no_matching_worker" if any("no_matching_worker" in reason for reason in reasons) else "planning_complete_stalled"
         return {
             "is_stalled": True,
@@ -2019,7 +2032,15 @@ def build_dashboard_payload(sprint_id: str | None = None) -> tuple[dict, list[st
     registry = _capability_registry()
     node_cards = _build_node_cards(sid, nodes, tg.get("runtime_state") or {}, routing)
     diagnostics = _build_blocker_diagnostics(sid, status, nodes, node_cards, tg_ok)
-    stall = _build_stall_summary(status, node_cards, diagnostics, tg_ok, events=_recent_sprint_events(sid))
+    plan_governance = _build_plan_governance(sid, status, tg)
+    stall = _build_stall_summary(
+        status,
+        node_cards,
+        diagnostics,
+        tg_ok,
+        events=_recent_sprint_events(sid),
+        plan_governance=plan_governance,
+    )
 
     status_counts: dict[str, int] = {}
     cost_by_status: dict[str, float] = {}
@@ -2039,7 +2060,7 @@ def build_dashboard_payload(sprint_id: str | None = None) -> tuple[dict, list[st
         "sprint_status": status.get("status", ""),
         "phase": status.get("phase", ""),
         "workflow_contract_id": str(tg.get("workflow_contract_id") or ""),
-        "plan_governance": _build_plan_governance(sid, status, tg),
+        "plan_governance": plan_governance,
         "generated_from": {
             "status_json": _display_path(SPRINTS_DIR / f"{sid}.status.json") if sid else "",
             "task_graph_json": _display_path(_existing_task_graph_path(sid)) if sid else "",
