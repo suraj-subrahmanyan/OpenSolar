@@ -16,9 +16,18 @@ grep -Fiq 'do not attach' "$doc"
 grep -Fiq '.dmg' "$doc"
 grep -Fiq '.exe' "$doc"
 
+while IFS= read -r script; do
+    [ -f "$repo_dir/$script" ] || {
+        echo "FAIL: checklist references missing script: $script" >&2
+        exit 1
+    }
+done <<EOF
+$(sed -n 's/^[[:space:]]*bash \(\(scripts\|tests\)\/[^[:space:]]*\.sh\).*/\1/p' "$doc" | sort -u)
+EOF
+
 if grep -Eq 'Stellven/OpenSolar|1\.0\.0-rc\.6|1\.0\.0rc3|git switch "\$RELEASE_BRANCH"' "$doc"; then
     echo "FAIL: checklist contains a stale version, upstream target, or unsafe release-branch checkout" >&2
     exit 1
 fi
 
-echo "release checklist contract passed: rc.9, origin-only, safe review, scoped artifacts"
+echo "release checklist contract passed: rc.9, origin-only, valid gates, safe review, scoped artifacts"

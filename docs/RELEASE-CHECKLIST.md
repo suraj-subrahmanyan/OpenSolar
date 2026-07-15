@@ -53,8 +53,7 @@ bash scripts/check-daemons-render.sh
 bash scripts/check-daemons-lifecycle.sh
 bash scripts/check-core-imports.sh
 bash scripts/check-harness-plumbing.sh
-bash scripts/check-solar-version.sh
-bash scripts/check-solar-update.sh
+bash scripts/check-update.sh
 bash scripts/check-solar-status.sh
 bash scripts/check-solar-harness-front-door.sh
 bash scripts/smoke-install-matrix.sh minimal
