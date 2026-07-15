@@ -4359,16 +4359,24 @@ def _proof_artifact_presence(sid: str, node: dict[str, Any], eval_json: str | Pa
     guard_sidecar = _node_sidecar_file(sid, node_id, "guard_decision")
     guard_payload = _read_json_file_safe(guard_sidecar) if guard_sidecar else {}
     presence["guard_decision"] = bool(guard_sidecar) and str(guard_payload.get("decision") or "").lower() == "allow"
-    presence["resource_binding"] = _node_sidecar_file(sid, node_id, "resource_binding") is not None
+    resource_sidecar = _node_sidecar_file(sid, node_id, "resource_binding")
+    resource_payload = _read_json_file_safe(resource_sidecar) if resource_sidecar else {}
+    presence["resource_binding"] = bool(
+        resource_sidecar
+        and resource_payload.get("bound") is True
+        and resource_payload.get("in_scope") is True
+        and str(resource_payload.get("workspace_root") or "").strip()
+    )
     presence["bridged_artifact"] = _node_sidecar_file(sid, node_id, "bridged_artifact") is not None
     # Lane 3 (R6/AC-R6.2): on the contracted path the manifest is the discovery
     # authority — its kind-keyed view overrides the filename-shape scan above.
-    # guard_decision keeps the scan's allow/block semantics (presence alone is
-    # not an "allow"), so the manifest never overrides it.
+    # guard_decision and resource_binding keep their semantic allow/bound
+    # verdicts (presence alone is not proof), so the manifest never overrides
+    # either one.
     manifest_presence = _manifest_presence(sid, node_id)
     if manifest_presence:
         for key, value in manifest_presence.items():
-            if key == "guard_decision":
+            if key in {"guard_decision", "resource_binding"}:
                 continue
             presence[key] = bool(value)
     for artifact_key, artifact_value in artifacts.items():
