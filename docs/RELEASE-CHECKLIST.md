@@ -147,7 +147,11 @@ python.version >= 3.11
 python.harness_imports.yaml == ok
 system.tmux / system.jq / system["bash>=4"]
 models.guidance
-models.claude_auth_note
+runtime.selected == codex or claude
+runtime.cli == present
+runtime.auth == ok or unauthenticated
+runtime.guidance
+runtime.login_command
 ```
 
 ## 5. Verify The Public Orphan Cut

@@ -16,6 +16,17 @@ grep -Fiq 'do not attach' "$doc"
 grep -Fiq '.dmg' "$doc"
 grep -Fiq '.exe' "$doc"
 
+if grep -Fq 'models.claude_auth_note' "$doc"; then
+    echo "FAIL: checklist requires the removed Claude-only doctor field models.claude_auth_note" >&2
+    exit 1
+fi
+
+grep -Fq 'runtime.selected' "$doc"
+grep -Fq 'runtime.cli' "$doc"
+grep -Fq 'runtime.auth' "$doc"
+grep -Fq 'runtime.guidance' "$doc"
+grep -Fq 'runtime.login_command' "$doc"
+
 while IFS= read -r script; do
     [ -f "$repo_dir/$script" ] || {
         echo "FAIL: checklist references missing script: $script" >&2
